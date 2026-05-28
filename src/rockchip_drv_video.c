@@ -35,6 +35,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <sys/ioctl.h>
+#include <errno.h>
 
 #include "h264.h"
 
@@ -386,6 +387,7 @@ static VAStatus rk_CreateSurfaces(VADriverContextP ctx,
 
 static VAStatus rk_DestroySurfaces(VADriverContextP ctx,
                                     VASurfaceID *list, int n) {
+    LOG("DestroySurfaces: n=%d", n);
     RKDriver *d = drv_from_ctx(ctx);
     for (int i = 0; i < n; i++) {
         RKSurface *s = surface_by_id(d, list[i]);
@@ -451,18 +453,6 @@ static VAStatus rk_CreateContext(VADriverContextP ctx,
         }
         LOG("CreateContext: mpp_create OK");
 
-        /* Set split-mode: driver reassembles packets, not MPP */
-        MppDecCfg dec_cfg = NULL;
-        mpp_dec_cfg_init(&dec_cfg);
-        mpp_dec_cfg_set_u32(dec_cfg, "base:split_parse", 0);
-        c->mpi->control(c->mpp, MPP_DEC_SET_CFG, dec_cfg);
-        mpp_dec_cfg_deinit(dec_cfg);
-
-        /* Non-blocking output: decode_get_frame returns immediately when
-         * nothing is ready, preventing Firefox's GPU thread from hanging. */
-        int block = 0;
-        c->mpi->control(c->mpp, MPP_SET_OUTPUT_BLOCK, (MppParam)&block);
-
         ret = mpp_init(c->mpp, MPP_CTX_DEC, coding);
         if (ret != MPP_OK) {
             mpp_destroy(c->mpp);
@@ -470,6 +460,17 @@ static VAStatus rk_CreateContext(VADriverContextP ctx,
             return VA_STATUS_ERROR_ALLOCATION_FAILED;
         }
         LOG("CreateContext: mpp_init OK");
+
+        /* Must be set after mpp_init: split_parse=0 means we send complete
+         * access units; OUTPUT_BLOCK=0 makes decode_get_frame non-blocking. */
+        MppDecCfg dec_cfg = NULL;
+        mpp_dec_cfg_init(&dec_cfg);
+        mpp_dec_cfg_set_u32(dec_cfg, "base:split_parse", 0);
+        c->mpi->control(c->mpp, MPP_DEC_SET_CFG, dec_cfg);
+        mpp_dec_cfg_deinit(dec_cfg);
+
+        int block = 0;
+        c->mpi->control(c->mpp, MPP_SET_OUTPUT_BLOCK, (MppParam)&block);
 
         c->used      = true;
         c->config_id = config_id;
@@ -485,6 +486,7 @@ static VAStatus rk_CreateContext(VADriverContextP ctx,
 }
 
 static VAStatus rk_DestroyContext(VADriverContextP ctx, VAContextID id) {
+    LOG("DestroyContext: ctx=0x%x", id);
     RKDriver *d = drv_from_ctx(ctx);
     RKContext *c = context_by_id(d, id);
     if (!c) return VA_STATUS_ERROR_INVALID_CONTEXT;
@@ -610,6 +612,8 @@ static VAStatus rk_RenderPicture(VADriverContextP ctx,
 static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
 {
     if (mpp_frame_get_info_change(frame)) {
+        LOG("assign_mpp_frame: info_change → acknowledged, render_target=0x%x",
+            (unsigned)c->render_target);
         c->mpi->control(c->mpp, MPP_DEC_SET_INFO_CHANGE_READY, NULL);
         mpp_frame_deinit(&frame);
         return;
@@ -635,7 +639,12 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
             c->dq_head = (c->dq_head + 1) & 63;
     }
 
-    if (!s) { mpp_frame_deinit(&frame); return; }
+    if (!s) {
+        LOG("assign_mpp_frame: PTS=0x%llx surface not found, dropped",
+            (unsigned long long)raw_pts);
+        mpp_frame_deinit(&frame);
+        return;
+    }
 
     MppBuffer buf = mpp_frame_get_buffer(frame);
     int fd = buf ? dup(mpp_buffer_get_fd(buf)) : -1;
@@ -717,7 +726,19 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
     }
 #undef PKT_APPEND
 
-    if (!pkt_sz) { free(pkt_data); return VA_STATUS_SUCCESS; }
+    if (!pkt_sz) {
+        LOG("do_h264_decode: no slice data, marking surface 0x%x decoded",
+            (unsigned)c->render_target);
+        free(pkt_data);
+        RKSurface *tgt = surface_by_id(d, c->render_target);
+        if (tgt) {
+            pthread_mutex_lock(&tgt->lock);
+            tgt->decoded = true;
+            pthread_cond_signal(&tgt->cond);
+            pthread_mutex_unlock(&tgt->lock);
+        }
+        return VA_STATUS_SUCCESS;
+    }
 
     /* Pre-drain: consume frames MPP already has ready from previous packets */
     {
@@ -728,7 +749,7 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
         }
     }
 
-    /* send to MPP */
+    LOG("do_h264_decode: sending %zu bytes target=0x%x", pkt_sz, (unsigned)c->render_target);
     MppPacket pkt = NULL;
     mpp_packet_init(&pkt, pkt_data, pkt_sz);
     mpp_packet_set_length(pkt, pkt_sz);
@@ -761,6 +782,28 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
     return VA_STATUS_SUCCESS;
 }
 
+/* Return false for VP9 altref / non-displayed frames (show_frame=0).
+ * These are decoded by MPP internally as references but never output via
+ * decode_get_frame — polling for them stalls the thread for the full timeout.
+ * VP9 uncompressed header layout (MSB-first):
+ *   [7:6] frame_marker=0b10  [5] profile_low  [4] profile_high
+ *   profile≠3: [3] show_existing  [2] frame_type  [1] show_frame
+ *   profile=3:  [3] reserved       [2] show_existing [1] frame_type [0] show_frame */
+static bool vp9_show_frame(const uint8_t *data, size_t len)
+{
+    if (!data || len < 1) return true;
+    uint8_t b = data[0];
+    if ((b >> 6) != 2) return true;                   /* bad frame_marker, assume shown */
+    int profile = ((b >> 5) & 1) | (((b >> 4) & 1) << 1);
+    if (profile != 3) {
+        if ((b >> 3) & 1) return true;                /* show_existing_frame */
+        return (b >> 1) & 1;                          /* show_frame */
+    } else {
+        if ((b >> 2) & 1) return true;                /* show_existing_frame (profile 3) */
+        return b & 1;                                 /* show_frame (profile 3) */
+    }
+}
+
 /* For VP9 / HEVC / AV1: slice data is already a complete coded picture */
 static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
 {
@@ -787,10 +830,23 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
 #undef PKT_APPEND
 
     if (!pkt_sz) {
-        LOG("do_generic_decode: no VASliceDataBufferType found, skipping");
+        LOG("do_generic_decode: no slice data, marking surface 0x%x decoded",
+            (unsigned)c->render_target);
         free(pkt_data);
+        RKSurface *tgt = surface_by_id(d, c->render_target);
+        if (tgt) {
+            pthread_mutex_lock(&tgt->lock);
+            tgt->decoded = true;
+            pthread_cond_signal(&tgt->cond);
+            pthread_mutex_unlock(&tgt->lock);
+        }
         return VA_STATUS_SUCCESS;
     }
+
+    /* Detect VP9 altref (show_frame=0): MPP decodes them as internal references
+     * but never outputs them via decode_get_frame — polling would stall 500ms. */
+    bool is_hidden = (c->coding == MPP_VIDEO_CodingVP9) &&
+                     !vp9_show_frame(pkt_data, pkt_sz);
 
     /* Pre-drain: consume any frames MPP already has ready from previous
      * packets.  Keyframes that timed out in the previous EndPicture poll
@@ -807,8 +863,9 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
     c->decode_queue[c->dq_tail] = c->render_target;
     c->dq_tail = (c->dq_tail + 1) & 63;
 
-    LOG("do_generic_decode: sending %zu bytes to MPP (coding=%d) target=0x%x",
-        pkt_sz, (int)c->coding, (unsigned)c->render_target);
+    LOG("do_generic_decode: sending %zu bytes to MPP (coding=%d) target=0x%x%s",
+        pkt_sz, (int)c->coding, (unsigned)c->render_target,
+        is_hidden ? " [altref]" : "");
     MppPacket pkt = NULL;
     mpp_packet_init(&pkt, pkt_data, pkt_sz);
     mpp_packet_set_length(pkt, pkt_sz);
@@ -824,10 +881,36 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
         return VA_STATUS_ERROR_DECODING_ERROR;
     }
 
-    /* Poll up to 100ms.  Keyframes that miss this window are picked up either
-     * by SyncSurface's 2s drain loop or by the pre-drain of the next call. */
-    LOG("do_generic_decode: polling (pkt_sz=%zu)", pkt_sz);
-    for (int tries = 0; tries < 100; tries++) {
+    /* Altref frames are never output by MPP — mark decoded immediately and
+     * advance the FIFO head so subsequent frames route correctly. */
+    if (is_hidden) {
+        LOG("do_generic_decode: altref hidden, no poll");
+        RKSurface *tgt = surface_by_id(d, c->render_target);
+        if (tgt) {
+            /* Invalidate stale prime_fd: MPP never outputs altref frames, so the
+             * surface retains whatever fd it had from a previous P-frame.  If
+             * Firefox later issues show_existing_frame pointing here,
+             * ExportSurfaceHandle must return ERROR_INVALID_SURFACE rather than
+             * serving the old content. */
+            if (tgt->prime_fd >= 0) { close(tgt->prime_fd); tgt->prime_fd = -1; }
+            pthread_mutex_lock(&tgt->lock);
+            tgt->decoded = true;
+            pthread_cond_signal(&tgt->cond);
+            pthread_mutex_unlock(&tgt->lock);
+        }
+        if (c->dq_head != c->dq_tail && c->decode_queue[c->dq_head] == c->render_target)
+            c->dq_head = (c->dq_head + 1) & 63;
+        return VA_STATUS_SUCCESS;
+    }
+
+    /* Poll window scales with packet size. 4K VP9 keyframes (~150-300KB) can
+     * take 200-500ms in MPP; inter-frames break out in 1-2ms. 500ms minimum
+     * ensures keyframes at segment boundaries don't timeout. */
+    int poll_ms = (int)(pkt_sz / 500);
+    if (poll_ms < 500)  poll_ms = 500;
+    if (poll_ms > 3000) poll_ms = 3000;
+    LOG("do_generic_decode: polling %dms (pkt_sz=%zu)", poll_ms, pkt_sz);
+    for (int tries = 0; tries < poll_ms; tries++) {
         RKSurface *tgt = surface_by_id(d, c->render_target);
         if (tgt) {
             pthread_mutex_lock(&tgt->lock);
@@ -907,7 +990,10 @@ static VAStatus rk_SyncSurface(VADriverContextP ctx, VASurfaceID id) {
         }
         usleep(1000);
     }
-    return VA_STATUS_SUCCESS;
+    pthread_mutex_lock(&s->lock);
+    bool final_ok = s->decoded;
+    pthread_mutex_unlock(&s->lock);
+    return final_ok ? VA_STATUS_SUCCESS : VA_STATUS_ERROR_DECODING_ERROR;
 }
 
 static VAStatus rk_SyncSurface2(VADriverContextP ctx,
@@ -925,6 +1011,8 @@ static VAStatus rk_QuerySurfaceStatus(VADriverContextP ctx,
     pthread_mutex_lock(&s->lock);
     *status = s->decoded ? VASurfaceReady : VASurfaceRendering;
     pthread_mutex_unlock(&s->lock);
+    LOG("QuerySurfaceStatus: surface=0x%x status=%s", id,
+        (*status == VASurfaceReady) ? "Ready" : "Rendering");
     return VA_STATUS_SUCCESS;
 }
 
@@ -960,7 +1048,10 @@ static VAStatus rk_ExportSurfaceHandle(VADriverContextP ctx,
     }
 
     int export_fd = dup(fd);
-    if (export_fd < 0) return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    if (export_fd < 0) {
+        LOG("ExportSurfaceHandle: dup(%d) failed errno=%d, ERROR_ALLOCATION_FAILED", fd, errno);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
 
     LOG("ExportSurfaceHandle: surface=0x%x %dx%d stride=%dx%d export_fd=%d decoded=%d placeholder=%d 10bit=%d",
         id, s->width, s->height, hs, vs, export_fd, decoded, is_placeholder, is_10bit);

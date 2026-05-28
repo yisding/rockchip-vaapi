@@ -1,3 +1,28 @@
+rockchip-vaapi (1.0.8-1) noble; urgency=medium
+
+  * Fix H.264 decode: mpp_init must be called before MPP_DEC_SET_CFG and
+    MPP_SET_OUTPUT_BLOCK (mpp_init resets all prior configuration); previously
+    every H.264 frame timed out in SyncSurface because non-blocking mode was
+    never applied.
+  * Fix VP9 altref temporal glitch: invalidate prime_fd when a hidden
+    (show_frame=0) altref frame is decoded. MPP never outputs altref frames via
+    decode_get_frame, so the surface retains the fd from its previous use as a
+    P-frame. If Firefox later issues show_existing_frame pointing to that surface,
+    ExportSurfaceHandle now returns VA_STATUS_ERROR_INVALID_SURFACE instead of
+    serving stale content, eliminating frames-from-the-past appearing mixed with
+    current frames.
+  * SyncSurface: return VA_STATUS_ERROR_DECODING_ERROR on 3s drain timeout
+    instead of SUCCESS, so callers can distinguish a properly decoded surface
+    from one that was never assigned an MPP frame.
+  * do_h264_decode / do_generic_decode: mark render_target as decoded
+    immediately when no VASliceDataBufferType is found (BeginPicture+EndPicture
+    without slice data, e.g. after a crash recovery sequence).
+  * do_generic_decode: scale EndPicture poll window with packet size
+    (min 500ms, max 3000ms) so large 4K VP9 keyframes do not time out.
+  * Add src/va_test.c: synthetic VA-API decode correctness test for VP9.
+
+ -- Eduardo García-Mádico Portabella <woodyst@gmail.com>  Wed, 28 May 2026 04:00:00 +0000
+
 rockchip-vaapi (1.0.7-1) noble; urgency=high
 
   * Fix NS_ERROR_DOM_MEDIA_FATAL_ERR crash at quality transitions: BeginPicture
