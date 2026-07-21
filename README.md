@@ -145,7 +145,9 @@ chmod +x /usr/local/bin/firefox-hw
 ## Development
 
 See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for architecture, VA-API
-internals, MPP integration details, and how to add support for new codecs.
+internals, MPP integration details, and how to add support for new codecs, and
+[docs/ROADMAP.md](docs/ROADMAP.md) for the production target design and the
+phased plan (decode core → HEVC + 10-bit → hardening → encode).
 
 ## AI-assisted development
 
