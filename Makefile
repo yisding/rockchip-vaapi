@@ -1,27 +1,37 @@
-CC      := gcc
-CFLAGS  := -O2 -Wall -Wextra -fPIC -shared \
+CC        ?= gcc
+PREFIX    ?= /usr
+MULTIARCH := $(shell $(CC) -print-multiarch 2>/dev/null)
+LIBDIR    ?= $(PREFIX)/lib$(if $(MULTIARCH),/$(MULTIARCH))
+DRIVERDIR ?= $(LIBDIR)/dri
+
+CFLAGS  ?= -O2 -Wall -Wextra
+CFLAGS  += -fPIC \
            $(shell pkg-config --cflags libva 2>/dev/null) \
            -I/usr/include/rockchip
-LDFLAGS := $(shell pkg-config --libs libva 2>/dev/null) \
-           -lrockchip_mpp -lpthread -ldl
+LDLIBS  := $(shell pkg-config --libs libva 2>/dev/null) \
+           -lrockchip_mpp -lpthread
 
 TARGET  := rockchip_drv_video.so
 SRCS    := src/rockchip_drv_video.c src/h264.c
 OBJS    := $(SRCS:.c=.o)
-INSTALL_DIR := /usr/lib/aarch64-linux-gnu/dri
 
 all: $(TARGET)
 
 $(TARGET): $(OBJS)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	$(CC) -shared $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 src/%.o: src/%.c
 	$(CC) $(CFLAGS) -Isrc -c $< -o $@
 
 install: $(TARGET)
-	sudo install -m 755 $(TARGET) $(INSTALL_DIR)/
+	install -D -m 755 $(TARGET) $(DESTDIR)$(DRIVERDIR)/$(TARGET)
+
+# Software-vs-VAAPI bit-exactness gate; needs an ffmpeg with vaapi support
+# and Rockchip MPP hardware. See tests/validate.sh for options.
+check: $(TARGET)
+	tests/validate.sh
 
 clean:
 	rm -f $(OBJS) $(TARGET)
 
-.PHONY: all install clean
+.PHONY: all install check clean

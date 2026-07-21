@@ -14,5 +14,12 @@ int h264_write_sps(uint8_t *buf, size_t buf_size,
                    const VAPictureParameterBufferH264 *pp,
                    int profile_idc);
 
+/* num_ref_idx_l0/l1_default_active_minus1 are taken from the current frame's
+ * slice parameters: VA-API does not expose the original PPS defaults, and
+ * hardcoding them corrupts any stream whose slices rely on the PPS default
+ * instead of carrying num_ref_idx_active_override_flag. The caller re-emits
+ * the PPS before every frame so the "default" always matches the frame. */
 int h264_write_pps(uint8_t *buf, size_t buf_size,
-                   const VAPictureParameterBufferH264 *pp);
+                   const VAPictureParameterBufferH264 *pp,
+                   int num_ref_idx_l0_default_minus1,
+                   int num_ref_idx_l1_default_minus1);

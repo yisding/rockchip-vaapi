@@ -216,6 +216,34 @@ static VAStatus rk_Terminate(VADriverContextP ctx) {
     return VA_STATUS_SUCCESS;
 }
 
+/* Only profiles with validated decode paths are advertised (or accepted by
+ * CreateConfig). Board-validated 2026-07-21 on RK3588 / kernel 6.18 via
+ * software-vs-VAAPI framemd5 comparison:
+ *   - H.264 CB/Main/High: bit-exact (after the per-frame PPS fix)
+ *   - VP9 Profile 0: bit-exact
+ * Deliberately not offered:
+ *   - HEVC: no VPS/SPS/PPS reconstruction exists; MPP receives headerless
+ *     slice data and decodes nothing (verified failure). Advertising it made
+ *     apps pick VAAPI and break instead of falling back to software.
+ *   - VP8: verified segfault in the generic path.
+ *   - H.264 High10 / VP9 Profile 2 (10-bit): MPP outputs compact NV15, but
+ *     the copy/export path treats 10-bit as 2-byte-per-sample P010 — layout
+ *     mismatch, would render garbage.
+ *   - AV1: MPP needs a full OBU bytestream but VA-API hands us only
+ *     headerless tile data, so MPP can never parse it. Firefox falls back
+ *     to VP9 (hardware-decoded) for AV1-capable content. */
+static bool profile_supported(VAProfile p) {
+    switch (p) {
+    case VAProfileH264ConstrainedBaseline:
+    case VAProfileH264Main:
+    case VAProfileH264High:
+    case VAProfileVP9Profile0:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static VAStatus rk_QueryConfigProfiles(VADriverContextP ctx,
                                        VAProfile *list, int *n) {
     (void)ctx;
@@ -223,15 +251,7 @@ static VAStatus rk_QueryConfigProfiles(VADriverContextP ctx,
     list[i++] = VAProfileH264ConstrainedBaseline;
     list[i++] = VAProfileH264Main;
     list[i++] = VAProfileH264High;
-    list[i++] = VAProfileH264High10;
-    list[i++] = VAProfileHEVCMain;
-    list[i++] = VAProfileHEVCMain10;
-    list[i++] = VAProfileVP8Version0_3;
     list[i++] = VAProfileVP9Profile0;
-    list[i++] = VAProfileVP9Profile2;
-    /* AV1 not advertised: MPP needs a full OBU bytestream but VA-API hands us
-     * only headerless tile data, so MPP can never parse it. Firefox falls back
-     * to VP9 (hardware-decoded) for AV1-capable content. */
     *n = i;
     return VA_STATUS_SUCCESS;
 }
@@ -240,7 +260,7 @@ static VAStatus rk_QueryConfigEntrypoints(VADriverContextP ctx,
                                           VAProfile profile,
                                           VAEntrypoint *list, int *n) {
     (void)ctx;
-    if (profile_to_coding(profile) == MPP_VIDEO_CodingUnused)
+    if (!profile_supported(profile))
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
     list[0] = VAEntrypointVLD;
     *n = 1;
@@ -256,7 +276,8 @@ static VAStatus rk_GetConfigAttributes(VADriverContextP ctx,
         LOG("GetConfigAttributes: type=%d", list[i].type);
         switch (list[i].type) {
         case VAConfigAttribRTFormat:
-            list[i].value = VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10;
+            /* 10-bit intentionally not offered — see profile_supported() */
+            list[i].value = VA_RT_FORMAT_YUV420;
             break;
         case VAConfigAttribDecSliceMode:
             list[i].value = VA_DEC_SLICE_MODE_NORMAL;
@@ -280,7 +301,8 @@ static VAStatus rk_CreateConfig(VADriverContextP ctx,
     LOG("CreateConfig: profile=%d entrypoint=%d n_attribs=%d",
         profile, entrypoint, n_attribs);
 
-    if (profile_to_coding(profile) == MPP_VIDEO_CodingUnused) {
+    if (!profile_supported(profile) ||
+        profile_to_coding(profile) == MPP_VIDEO_CodingUnused) {
         LOG("CreateConfig: unsupported profile %d", profile);
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
     }
@@ -628,23 +650,38 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
     }
 
     RK_S64      raw_pts = mpp_frame_get_pts(frame);
-    VASurfaceID sid     = (VASurfaceID)raw_pts;
-    RKSurface  *s       = sid ? surface_by_id(d, sid) : NULL;
+    VASurfaceID sid;
+    RKSurface  *s;
 
-    if (!s) {
-        if (c->coding == MPP_VIDEO_CodingAVC) {
+    if (c->coding == MPP_VIDEO_CodingAVC) {
+        /* H.264: MPP reorders to display order but preserves each source
+         * packet's PTS on its frame, so the smuggled surface id is reliable;
+         * fall back to the current render target if it was lost. */
+        sid = (VASurfaceID)raw_pts;
+        s   = sid ? surface_by_id(d, sid) : NULL;
+        if (!s) {
             sid = c->render_target;
-        } else if (c->dq_head != c->dq_tail) {
+            s   = sid ? surface_by_id(d, sid) : NULL;
+        }
+    } else {
+        /* VP9: shown frames come out in submission order (no display
+         * reordering), but PTS is NOT reliable — a show_existing_frame
+         * repeat of a hidden altref surfaces with the *altref packet's*
+         * PTS, which routes to a surface we already marked decoded and
+         * desyncs everything after it (measured: nondeterministic 60-95%
+         * frame corruption before this change). The FIFO of submitted
+         * shown-frame surfaces is the reliable identity, so route by it
+         * unconditionally and ignore PTS. */
+        if (c->dq_head != c->dq_tail) {
             sid = c->decode_queue[c->dq_head];
             c->dq_head = (c->dq_head + 1) & 63;
-            LOG("assign_mpp_frame: PTS=0x%llx unmapped, FIFO → surface=0x%x",
-                (unsigned long long)raw_pts, (unsigned)sid);
+            if ((VASurfaceID)raw_pts != sid)
+                LOG("assign_mpp_frame: PTS=0x%llx overridden by FIFO → surface=0x%x",
+                    (unsigned long long)raw_pts, (unsigned)sid);
+        } else {
+            sid = 0;
         }
         s = sid ? surface_by_id(d, sid) : NULL;
-    } else if (c->coding != MPP_VIDEO_CodingAVC) {
-        /* PTS valid — advance FIFO head only if this surface is at the front */
-        if (c->dq_head != c->dq_tail && c->decode_queue[c->dq_head] == sid)
-            c->dq_head = (c->dq_head + 1) & 63;
     }
 
     if (!s) {
@@ -701,6 +738,27 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
         (unsigned)sid, s->prime_fd, fwidth, fheight, fhs, fvs, (unsigned)ffmt, copied);
 }
 
+/* decode_put_packet with backpressure handling. The context runs MPP in
+ * non-blocking mode, so when MPP's input queue is full put fails instead of
+ * waiting; give it its consumer (drain output frames) and retry, bounded.
+ * Without this, fast submission silently drops frames (measured on VP9:
+ * 38 of 120 packets rejected, nondeterministically, before this fix). */
+static MPP_RET put_packet_draining(RKContext *c, RKDriver *d, MppPacket pkt)
+{
+    MPP_RET ret = MPP_OK;
+    for (int tries = 0; tries < 500; tries++) {
+        ret = c->mpi->decode_put_packet(c->mpp, pkt);
+        if (ret == MPP_OK) return MPP_OK;
+        MppFrame f = NULL;
+        while (c->mpi->decode_get_frame(c->mpp, &f) == MPP_OK && f) {
+            assign_mpp_frame(f, c, d);
+            f = NULL;
+        }
+        usleep(1000);
+    }
+    return ret;
+}
+
 /* Build Annex B bitstream from VA-API buffers and send to MPP */
 static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
 {
@@ -720,7 +778,26 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
     pkt_sz += _l;                                          \
 } while (0)
 
-    /* check if first slice is IDR to prepend SPS+PPS */
+    /* Pull the current frame's active reference counts from the first slice
+     * parameter buffer. VA-API never gives us the original PPS defaults;
+     * slices that don't carry num_ref_idx_active_override_flag rely on the
+     * PPS default matching their active count, so we re-emit a PPS whose
+     * "defaults" are this frame's values before every frame. Multi-slice
+     * frames with differing per-slice counts are still correct as long as
+     * the non-matching slices carry the override flag (they must, since one
+     * original default couldn't have matched both either). */
+    int ref_l0_minus1 = 0, ref_l1_minus1 = 0;
+    for (int i = 0; i < c->n_pending; i++) {
+        RKBuffer *b = buffer_by_id(d, c->pending[i]);
+        if (!b || b->type != VASliceParameterBufferType) continue;
+        const VASliceParameterBufferH264 *sp = b->data;
+        ref_l0_minus1 = sp->num_ref_idx_l0_active_minus1;
+        ref_l1_minus1 = sp->num_ref_idx_l1_active_minus1;
+        break;
+    }
+
+    /* SPS at IDR/first frame; PPS before every frame (see above). Repeating
+     * parameter sets mid-stream is legal Annex B and MPP handles it. */
     bool is_idr = false;
     for (int i = 0; i < c->n_pending; i++) {
         RKBuffer *b = buffer_by_id(d, c->pending[i]);
@@ -730,17 +807,18 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
         break;
     }
 
-    /* SPS + PPS before every IDR (or first frame) */
-    if (is_idr || !c->sps_sent) {
+    {
         uint8_t hdr[512];
-        int n = h264_write_sps(hdr, sizeof(hdr), &c->last_pp,
+        int n;
+        if (is_idr || !c->sps_sent) {
+            n = h264_write_sps(hdr, sizeof(hdr), &c->last_pp,
                                profile_idc(config_by_id(d, c->config_id)->profile));
+            if (n > 0) { PKT_APPEND(hdr, (size_t)n); }
+            c->sps_sent = true;
+        }
+        n = h264_write_pps(hdr, sizeof(hdr), &c->last_pp,
+                           ref_l0_minus1, ref_l1_minus1);
         if (n > 0) { PKT_APPEND(hdr, (size_t)n); }
-
-        n = h264_write_pps(hdr, sizeof(hdr), &c->last_pp);
-        if (n > 0) { PKT_APPEND(hdr, (size_t)n); }
-
-        c->sps_sent = true;
     }
 
     /* append each slice with Annex B start code */
@@ -782,7 +860,7 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
     mpp_packet_set_length(pkt, pkt_sz);
     mpp_packet_set_pts(pkt, (RK_S64)c->render_target);
 
-    MPP_RET ret = c->mpi->decode_put_packet(c->mpp, pkt);
+    MPP_RET ret = put_packet_draining(c, d, pkt);
     mpp_packet_deinit(&pkt);
     free(pkt_data);
 
@@ -903,7 +981,7 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
     mpp_packet_set_length(pkt, pkt_sz);
     mpp_packet_set_pts(pkt, (RK_S64)c->render_target);
 
-    MPP_RET ret = c->mpi->decode_put_packet(c->mpp, pkt);
+    MPP_RET ret = put_packet_draining(c, d, pkt);
     mpp_packet_deinit(&pkt);
     free(pkt_data);
 

@@ -8,6 +8,37 @@ applications such as Firefox.
 **Contact:** woodyst@gmail.com
 **License:** LGPL-2.1-or-later
 
+## Fork status (yisding/rockchip-vaapi)
+
+This fork continues the upstream v1.0.11 work. Changes so far, each
+validated on a ROCK 5B (RK3588, vendor MPP stack on a 6.18 kernel) with a
+software-vs-VAAPI `framemd5` bit-exactness gate (`tests/validate.sh`,
+`make check`):
+
+- **Fixed multi-reference / B-frame H.264 corruption.** VA-API never passes
+  the original PPS, and the reconstructed PPS hardcoded
+  `num_ref_idx_*_default_active` to 1 — any stream whose slices rely on the
+  PPS default (x264 `ref>1`) decoded mostly garbage (measured: 109–117 of
+  120 frames wrong at `ref=4:bframes=3`). The driver now re-emits a PPS
+  before every frame with defaults taken from the frame's own slice
+  parameters. All six configurations of `ref∈{1,2,4,8} × bframes∈{0,2,3}`
+  plus a 4K clip are now bit-exact.
+- **Fixed nondeterministic VP9 frame drops.** `EndPicture` is non-blocking;
+  when MPP's input queue filled, `decode_put_packet` failures were treated
+  as fatal and ffmpeg silently dropped frames (measured: 38 of 120 packets
+  rejected on some runs, 5/10 runs corrupt). Puts now drain output frames
+  and retry, bounded. VP9 is 10/10 bit-exact.
+- **VP9 output routing by FIFO instead of PTS**, since a
+  `show_existing_frame` repeat of a hidden altref can surface with the
+  altref packet's PTS and desync every later frame.
+- **Honest capability advertising.** HEVC (no header reconstruction —
+  verified non-functional), VP8 (verified segfault), and the 10-bit
+  profiles (MPP emits compact NV15, driver exported it as P010 — layout
+  mismatch) are no longer advertised, so applications fall back to software
+  instead of breaking. They can return as their decode paths get built.
+- Packaging/build hygiene: `DESTDIR`/`PREFIX`/multiarch-aware Makefile,
+  no `sudo` in `make install`, `make check` validation gate.
+
 ---
 
 ## What it does
@@ -20,7 +51,7 @@ library, which in turn uses the hardware VPU.
 
 Key features:
 
-- H.264 / HEVC / VP9 / AV1 hardware decode
+- H.264 and VP9 hardware decode, bit-exact against software decode
 - Zero-copy DRM PRIME 2 surface export (NV12, DMABUF)
 - Compatible with Firefox 128+ (VA-API PDM path, RDD process)
 - Implements the full VA-API 1.20 vtable (`__vaDriverInit_1_20`)
@@ -35,12 +66,17 @@ Key features:
 
 ## Supported codecs
 
-| Codec | Profile | Max resolution |
-|-------|---------|---------------|
-| H.264 | Constrained Baseline, Main, High, High10 | 4K |
-| HEVC | Main, Main10 | 8K |
-| VP9 | Profile 0, 2 | 8K |
-| AV1 | Profile 0, 1 | 8K |
+| Codec | Profile | Validated | Notes |
+|-------|---------|-----------|-------|
+| H.264 | Constrained Baseline, Main, High | bit-exact up to 4K, refs 1–8, B-frames | |
+| VP9 | Profile 0 | bit-exact, deterministic (×10 runs) | |
+| HEVC | — | not offered | needs VPS/SPS/PPS reconstruction |
+| VP8 | — | not offered | crashes in the generic path; needs debugging |
+| AV1 | — | not offered | VA-API hands headerless tile data; MPP needs full OBUs |
+| 10-bit (High10, VP9 P2) | — | not offered | MPP outputs compact NV15; P010 export path pending |
+
+Applications fall back to their software decoders for the codecs that are
+not offered.
 
 ## Dependencies
 
@@ -125,3 +161,8 @@ Firefox integration issues.
 
 All code was reviewed, tested, and validated on real hardware by
 Eduardo García-Mádico Portabella — EGP Sistemas.
+
+Fork development (July 2026) continued the AI-assisted approach with
+**Claude Fable 5** (`claude-fable-5`, Anthropic): full-source review, the
+correctness fixes and validation gate described in *Fork status*, all
+hardware-validated on a ROCK 5B.

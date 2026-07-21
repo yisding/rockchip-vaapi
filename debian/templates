@@ -1,19 +1,52 @@
 Template: rockchip-vaapi/configure-environment
 Type: boolean
-Default: true
-Description: ¿Configurar variables de entorno VA-API para Firefox?
+Default: false
+Description: Configure system-wide VA-API environment for Firefox?
+ This package can install environment configuration so Firefox
+ automatically uses the Rockchip hardware acceleration driver, without
+ setting variables manually in each session.
+ .
+ Files installed:
+   /etc/profile.d/rockchip-vaapi.sh           (terminal sessions)
+   /etc/environment.d/60-rockchip-vaapi.conf  (desktop sessions)
+ .
+ Variables set:
+   LIBVA_DRIVER_NAME=rockchip
+   LIBVA_DRIVERS_PATH=/usr/lib/aarch64-linux-gnu/dri
+   MOZ_DISABLE_RDD_SANDBOX=1
+ .
+ SECURITY NOTE: MOZ_DISABLE_RDD_SANDBOX=1 disables the seccomp sandbox of
+ Firefox's media decoding process for ALL users, because that sandbox
+ blocks the Rockchip MPP device ioctls the driver needs. This widens the
+ attack surface of media decoding: a compromised decoder process gains
+ direct access to /dev/mpp_service. Decline if that trade-off is not
+ acceptable and scope the variables to specific launchers instead.
+ .
+ A log out / log in is required for the change to take effect.
+ .
+ If you answer No, you can configure it later by running:
+   dpkg-reconfigure rockchip-vaapi
+Description-es.UTF-8: ¿Configurar variables de entorno VA-API para Firefox?
  Este paquete puede instalar configuración de entorno para que Firefox
  utilice automáticamente el driver de aceleración hardware Rockchip,
  sin necesidad de definir variables manualmente en cada sesión.
  .
  Se instalarán:
-   /etc/profile.d/rockchip-vaapi.sh       (sesiones de terminal)
+   /etc/profile.d/rockchip-vaapi.sh           (sesiones de terminal)
    /etc/environment.d/60-rockchip-vaapi.conf  (sesiones de escritorio)
  .
  Las variables que se configurarán son:
    LIBVA_DRIVER_NAME=rockchip
    LIBVA_DRIVERS_PATH=/usr/lib/aarch64-linux-gnu/dri
    MOZ_DISABLE_RDD_SANDBOX=1
+ .
+ NOTA DE SEGURIDAD: MOZ_DISABLE_RDD_SANDBOX=1 desactiva el sandbox seccomp
+ del proceso de decodificación multimedia de Firefox para TODOS los
+ usuarios, porque ese sandbox bloquea los ioctls del dispositivo Rockchip
+ MPP que el driver necesita. Esto amplía la superficie de ataque de la
+ decodificación multimedia: un proceso decodificador comprometido obtiene
+ acceso directo a /dev/mpp_service. Responda No si ese compromiso no es
+ aceptable y limite las variables a lanzadores específicos.
  .
  Es necesario cerrar sesión y volver a iniciarla para que surtan efecto.
  .

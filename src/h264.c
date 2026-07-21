@@ -122,7 +122,9 @@ int h264_write_sps(uint8_t *buf, size_t buf_size,
 }
 
 int h264_write_pps(uint8_t *buf, size_t buf_size,
-                   const VAPictureParameterBufferH264 *pp)
+                   const VAPictureParameterBufferH264 *pp,
+                   int num_ref_idx_l0_default_minus1,
+                   int num_ref_idx_l1_default_minus1)
 {
     uint8_t raw[256];
     BSWriter bs;
@@ -137,9 +139,12 @@ int h264_write_pps(uint8_t *buf, size_t buf_size,
     bs_write(&bs, pp->pic_fields.bits.pic_order_present_flag, 1);
     bs_write_ue(&bs, 0); /* num_slice_groups_minus1 = 0 */
 
-    /* num_ref_idx_l0/l1_default: use conservative default (0 = 1 ref) */
-    bs_write_ue(&bs, 0);
-    bs_write_ue(&bs, 0);
+    /* Slices without num_ref_idx_active_override_flag inherit these; see
+     * h264.h — the caller supplies the current frame's slice values. */
+    if (num_ref_idx_l0_default_minus1 < 0) num_ref_idx_l0_default_minus1 = 0;
+    if (num_ref_idx_l1_default_minus1 < 0) num_ref_idx_l1_default_minus1 = 0;
+    bs_write_ue(&bs, (uint32_t)num_ref_idx_l0_default_minus1);
+    bs_write_ue(&bs, (uint32_t)num_ref_idx_l1_default_minus1);
 
     bs_write(&bs, pp->pic_fields.bits.weighted_pred_flag, 1);
     bs_write(&bs, pp->pic_fields.bits.weighted_bipred_idc, 2);

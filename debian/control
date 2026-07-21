@@ -19,8 +19,8 @@ Description: VA-API driver for Rockchip RK3588 via MPP
  Hardware video acceleration driver that bridges the VA-API (libva)
  interface to Rockchip MPP (librockchip-mpp1) for the RK3588/RK3576 SoC.
  .
- Enables H.264 hardware decode in applications like Firefox via zero-copy
- DRM PRIME 2 surface export.
+ Enables H.264 and VP9 hardware decode in applications like Firefox via
+ zero-copy DRM PRIME 2 surface export.
  .
  Install LIBVA_DRIVER_NAME=rockchip and point LIBVA_DRIVERS_PATH to
  /usr/lib/aarch64-linux-gnu/dri to use.

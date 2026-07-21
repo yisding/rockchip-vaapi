@@ -1,3 +1,32 @@
+rockchip-vaapi (1.0.11+ysp1) resolute; urgency=medium
+
+  Fork build (yisding/rockchip-vaapi). Correctness fixes, all validated on a
+  ROCK 5B (RK3588, vendor MPP on kernel 6.18) with a software-vs-VAAPI
+  framemd5 bit-exactness gate (tests/validate.sh, make check).
+
+  * H.264: re-emit PPS before every frame with num_ref_idx_*_default taken
+    from the frame's slice parameters, instead of hardcoding 1. Fixes heavy
+    corruption on multi-reference / B-frame streams (was 109-117 of 120
+    frames wrong at ref=4:bframes=3). ref in {1,2,4,8} x bframes in {0,2,3}
+    and a 4K clip are now bit-exact.
+  * VP9: retry decode_put_packet while draining output on MPP input
+    backpressure, instead of treating a full-queue failure as fatal and
+    silently dropping frames (was up to 38 of 120 packets dropped,
+    nondeterministically). VP9 now 10/10 bit-exact across repeated runs.
+  * VP9: route output frames by the submission FIFO rather than packet PTS,
+    since a show_existing_frame repeat of a hidden altref can carry the
+    altref packet's PTS and desync all later frames.
+  * Advertise only validated profiles (H.264 CB/Main/High, VP9 Profile 0).
+    HEVC (no header reconstruction), VP8 (segfault), and 10-bit (NV15/P010
+    layout mismatch) are withdrawn so apps fall back to software instead of
+    failing. RTFormat no longer claims 10-bit.
+  * debconf: default the system-wide MOZ_DISABLE_RDD_SANDBOX prompt to false
+    and document that it disables Firefox's media sandbox for all users.
+  * Build: DESTDIR/PREFIX/multiarch-aware Makefile, drop sudo from
+    make install, add make check gate. Link without -ldl (unused).
+
+ -- Yi Ding <yi.s.ding@gmail.com>  Tue, 21 Jul 2026 12:10:00 +0000
+
 rockchip-vaapi (1.0.11-1) noble; urgency=high
 
   * Fix 4K@60fps stability: >30000 frames decoded without NS_ERROR in Firefox,
