@@ -151,7 +151,7 @@ Each phase is independently shippable and ends at a gate — a concrete,
 re-runnable result. Rough sizing assumes one focused engineer; treat as
 relative, not calendar-exact.
 
-### Phase 0 — Baseline & harness  ✅ mostly done (~1 wk remaining)
+### Phase 0 — Baseline & harness  ✅ complete
 
 Fork, build against the ROCK 5B stack, the original `framemd5` gate, and the
 three correctness fixes (PPS ref-counts, VP9 backpressure, VP9 PTS routing) are
@@ -187,16 +187,21 @@ three correctness fixes (PPS ref-counts, VP9 backpressure, VP9 PTS routing) are
 - The **CI skeleton** runs AArch64 cross-builds, sanitizer unit tests,
   Valgrind, ShellCheck, and clang-tidy on every push. The on-board hardware
   gate is a guarded manual self-hosted job. Kernel-crash vectors additionally
-  require an exact audited `uname -r`, preventing a stale manual confirmation
-  from running them on a vulnerable boot.
+  require an exact audited `uname -r` plus running kernel-notes fingerprint,
+  preventing a stale manual confirmation from running them on a vulnerable
+  build that shares the same release string.
 
-Phase 0 remains open until the fixed VP9 kernel is booted and the
-unquarantined conformance + sanitizer gate proves the hidden-reference bridge
-on hardware. A skipped required vector is deliberately reported as blocked,
+Phase 0 closed on 2026-07-21 on the audited fixed kernel build `#3`. The full
+unquarantined conformance gate passed every pinned H.264 and VP9 vector
+bit-exact, including `vp90-2-10-show-existing-frame2`; the full ASan/UBSan gate
+also passed the pinned vectors, synthetic H.264 matrix (including 4K), five VP9
+determinism runs, and the unsupported-codec fallback check. The release and
+kernel-notes guards were also verified to reject mismatches before device
+access. A skipped required vector remains deliberately reported as blocked,
 never green.
 
-**Gate:** conformance-vector decode bit-exact for the shipping profiles; gate
-green under ASan; CI builds and lints on push.
+**Gate:** ✅ conformance-vector decode bit-exact for the shipping profiles;
+gate green under ASan; CI builds and lints on push.
 
 ### Phase 1 — Architectural renovation (decode core)  (~2–3 wk)
 
@@ -323,10 +328,10 @@ concurrent with decode contexts are race-free.
 
 ## Status
 
-- Phase 0: in progress on `main`; implementation, host analysis, and the safe
-  normal/sanitized hardware subset are complete. The fixed-kernel risky-vector
-  gate remains.
-- Phases 1–5: planned.
+- Phase 0: complete on `main`; the normal and sanitized full hardware gates are
+  green on the audited fixed kernel build `#3`.
+- Phase 1: next.
+- Phases 2–5: planned.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement
 map and driver-review finding as the decision/evidence record.

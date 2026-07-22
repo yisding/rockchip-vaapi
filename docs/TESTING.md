@@ -59,11 +59,13 @@ FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-sanitize
 Do not set `RISKY_VECTORS=run` until the kernel's VP9 probability-table bounds
 fix is installed and the board has booted that kernel. The
 `vp90-2-10-show-existing-frame2.webm` stream can otherwise panic the RK3588 VPU
-driver. The harness additionally requires the running release to equal the
-audited `RISKY_KERNEL_RELEASE`, which defaults to
-`6.18.38-ysp-rockchip64`; a stale checkbox or environment variable therefore
-cannot run this vector on the vulnerable `current` kernel. A future kernel
-must be audited before passing its exact release through that variable.
+driver. The harness additionally requires both the exact running release and
+the SHA-256 of `/sys/kernel/notes` to match `RISKY_KERNEL_RELEASE` and
+`RISKY_KERNEL_NOTES_SHA256`. This distinguishes the audited fixed build `#3`
+from vulnerable build `#1`, which both report
+`6.18.38-current-rockchip64`; a stale checkbox or environment variable cannot
+enable the vector on the older build. A future kernel must be audited before
+passing both its release and notes fingerprint through those variables.
 Omitting `RISKY_VECTORS` quarantines the stream, but the full gate exits
 non-zero so a skipped required vector can never be reported as a pass.
 
@@ -110,8 +112,12 @@ driver build includes the hidden-reference bridge, `/usr/bin/ffmpeg` has
 VA-API, and the build dependencies, `curl`, `unzip`, and `sha256sum` are
 installed.
 
-As of 2026-07-21, this board is still booted into the vulnerable kernel. The
-pinned MPP revision already contains Rockchip's January 2026 parser handling
-for `show_existing_frame`; official `develop` has no later VP9 parser or
-buffer-slot change. The driver-side bridge passes host checks, but the full
-Phase 0 gate remains blocked until it is exercised on the repaired boot.
+As of 2026-07-21, this board is booted into fixed kernel build `#3`, identified
+by kernel-notes SHA-256
+`5708409f759669c2ff6a9d32597acb452632ef658c57a1f2b75a981733d7559a`.
+The pinned MPP revision already contains Rockchip's January 2026 parser
+handling for `show_existing_frame`; official `develop` has no later VP9 parser
+or buffer-slot change. On that boot, both the unquarantined normal conformance
+gate and the full ASan/UBSan gate pass, including the hidden-reference vector,
+the supplemental matrix, and five VP9 determinism runs. This closes the Phase
+0 hardware gate.

@@ -15,7 +15,8 @@ VECTOR_DIR=${VECTOR_DIR:-$SCRIPT_DIR/vectors}
 MANIFEST=${MANIFEST:-$SCRIPT_DIR/conformance-vectors.tsv}
 TEST_SET=${TEST_SET:-all}
 RISKY_VECTORS=${RISKY_VECTORS:-skip}
-RISKY_KERNEL_RELEASE=${RISKY_KERNEL_RELEASE:-6.18.38-ysp-rockchip64}
+RISKY_KERNEL_RELEASE=${RISKY_KERNEL_RELEASE:-6.18.38-current-rockchip64}
+RISKY_KERNEL_NOTES_SHA256=${RISKY_KERNEL_NOTES_SHA256:-5708409f759669c2ff6a9d32597acb452632ef658c57a1f2b75a981733d7559a}
 ALLOW_QUARANTINE=${ALLOW_QUARANTINE:-0}
 VP9_RUNS=${VP9_RUNS:-5}
 KEEP_WORK=${KEEP_WORK:-0}
@@ -30,14 +31,25 @@ case $RISKY_VECTORS in
 esac
 
 # A typo or stale CI checkbox must not turn a conformance run into a kernel
-# panic. Kernel-crash vectors are enabled only on the exact release whose
-# RK3588 VP9 probability-table bounds fix was audited. Future kernel releases
-# must be reviewed and then named explicitly through RISKY_KERNEL_RELEASE.
+# panic. Kernel-crash vectors are enabled only on the exact release and GNU
+# notes fingerprint of the build whose RK3588 VP9 probability-table bounds fix
+# was audited. The fingerprint distinguishes fixed build #3 from vulnerable
+# build #1, which deliberately share the same release string. Future kernel
+# builds must be reviewed and then named explicitly through both variables.
 if [ "$RISKY_VECTORS" = run ] && [ "$TEST_SET" != synthetic ]; then
     running_kernel=$(uname -r) || exit 2
+    running_notes_sha=$(sha256sum /sys/kernel/notes 2>/dev/null |
+        awk '{print $1}')
     if [ "$running_kernel" != "$RISKY_KERNEL_RELEASE" ]; then
         echo "error: refusing kernel-crash vectors on $running_kernel" >&2
         echo "error: audited kernel release is $RISKY_KERNEL_RELEASE" >&2
+        exit 2
+    fi
+    if [ -z "$running_notes_sha" ] ||
+       [ "$running_notes_sha" != "$RISKY_KERNEL_NOTES_SHA256" ]; then
+        echo "error: refusing kernel-crash vectors on unaudited kernel build" >&2
+        echo "error: running kernel notes sha256 is ${running_notes_sha:-unavailable}" >&2
+        echo "error: audited kernel notes sha256 is $RISKY_KERNEL_NOTES_SHA256" >&2
         exit 2
     fi
 fi
