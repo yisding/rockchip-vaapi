@@ -92,18 +92,21 @@ request:
   MPP commit `1375813cbbae5ad6861b166475dd8fb672183220`.
 
 The on-board gate is a manual `workflow_dispatch` job. Its separate
-`run_risky_vectors` confirmation must remain false until both VP9 fixes are
-deployed; with it false, the required quarantine intentionally fails the job.
+`run_risky_vectors` confirmation must remain false until the VP9 kernel fix is
+booted and the driver hidden-reference bridge is ready to validate; with it
+false, the required quarantine intentionally fails the job.
 Register the board as a self-hosted runner with the default `self-hosted`,
 `linux`, and `ARM64` labels plus the custom `rk3588` label. GitHub documents
 the label routing in its
 [self-hosted runner guide](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/use-in-a-workflow).
 
-Before confirming risky vectors, verify the board has the fixed kernel, an MPP
-userspace fix for `show_existing_frame` reference accounting,
-`/usr/bin/ffmpeg` with VA-API, the build dependencies, `curl`, `unzip`, and
-`sha256sum`.
+Before confirming risky vectors, verify the board has the fixed kernel, the
+driver build includes the hidden-reference bridge, `/usr/bin/ffmpeg` has
+VA-API, and the build dependencies, `curl`, `unzip`, and `sha256sum` are
+installed.
 
-As of 2026-07-21, this board is still booted into the vulnerable kernel and the
-pinned MPP revision still rejects the `show_existing_frame` reference counts.
-The full Phase 0 gate is therefore blocked, not passed.
+As of 2026-07-21, this board is still booted into the vulnerable kernel. The
+pinned MPP revision already contains Rockchip's January 2026 parser handling
+for `show_existing_frame`; official `develop` has no later VP9 parser or
+buffer-slot change. The driver-side bridge passes host checks, but the full
+Phase 0 gate remains blocked until it is exercised on the repaired boot.

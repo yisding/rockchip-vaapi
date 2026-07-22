@@ -11,7 +11,7 @@ on:
         type: boolean
         default: false
       run_risky_vectors:
-        description: Confirm the VP9 kernel and MPP show_existing fixes are deployed
+        description: Confirm the VP9 kernel fix is booted for hidden-reference validation
         required: false
         type: boolean
         default: false

@@ -16,10 +16,10 @@ MPP_LIBS   ?= -lrockchip_mpp
 LDLIBS     ?= $(VA_LIBS) $(MPP_LIBS) -lpthread
 
 TARGET := rockchip_drv_video.so
-SRCS   := src/rockchip_drv_video.c src/h264.c src/frame_layout.c
+SRCS   := src/rockchip_drv_video.c src/h264.c src/frame_layout.c src/vp9.c
 OBJS   := $(SRCS:.c=.o)
 
-UNIT_TESTS := tests/frame_layout_test tests/h264_test
+UNIT_TESTS := tests/frame_layout_test tests/h264_test tests/vp9_test
 
 VALGRIND        ?= valgrind
 VALGRIND_FLAGS  ?= --quiet --error-exitcode=99 --leak-check=full \
@@ -31,7 +31,7 @@ SAN_LDFLAGS ?= -fsanitize=address,undefined
 SAN_DIR      := tests/.san-driver
 SAN_TARGET   := $(SAN_DIR)/$(TARGET)
 SAN_OBJS     := $(SRCS:.c=.san.o)
-SAN_TESTS    := tests/frame_layout_test.san tests/h264_test.san
+SAN_TESTS    := tests/frame_layout_test.san tests/h264_test.san tests/vp9_test.san
 
 DRIVER_COMPILE = $(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) -fPIC \
 	$(VA_CFLAGS) $(MPP_CFLAGS) -Isrc
@@ -49,9 +49,10 @@ $(TARGET): $(OBJS)
 src/%.o: src/%.c
 	$(DRIVER_COMPILE) -c $< -o $@
 
-src/rockchip_drv_video.o: src/frame_layout.h src/h264.h
+src/rockchip_drv_video.o: src/frame_layout.h src/h264.h src/vp9.h
 src/frame_layout.o: src/frame_layout.h
 src/h264.o: src/h264.h src/bs.h
+src/vp9.o: src/vp9.h
 
 install: $(TARGET)
 	install -D -m 755 $(TARGET) $(DESTDIR)$(DRIVERDIR)/$(TARGET)
@@ -81,6 +82,9 @@ tests/frame_layout_test: tests/frame_layout_test.c src/frame_layout.c src/frame_
 tests/h264_test: tests/h264_test.c src/h264.c src/h264.h src/bs.h
 	$(TEST_COMPILE) tests/h264_test.c src/h264.c -o $@
 
+tests/vp9_test: tests/vp9_test.c src/vp9.c src/vp9.h
+	$(TEST_COMPILE) tests/vp9_test.c src/vp9.c -o $@
+
 test: $(UNIT_TESTS)
 	@set -e; for test_binary in $(UNIT_TESTS); do ./$$test_binary; done
 
@@ -99,9 +103,10 @@ $(SAN_TARGET): $(SAN_OBJS)
 src/%.san.o: src/%.c
 	$(SAN_DRIVER_COMPILE) -c $< -o $@
 
-src/rockchip_drv_video.san.o: src/frame_layout.h src/h264.h
+src/rockchip_drv_video.san.o: src/frame_layout.h src/h264.h src/vp9.h
 src/frame_layout.san.o: src/frame_layout.h
 src/h264.san.o: src/h264.h src/bs.h
+src/vp9.san.o: src/vp9.h
 
 tests/frame_layout_test.san: tests/frame_layout_test.c src/frame_layout.c src/frame_layout.h
 	$(SAN_TEST_COMPILE) tests/frame_layout_test.c src/frame_layout.c \
@@ -109,6 +114,9 @@ tests/frame_layout_test.san: tests/frame_layout_test.c src/frame_layout.c src/fr
 
 tests/h264_test.san: tests/h264_test.c src/h264.c src/h264.h src/bs.h
 	$(SAN_TEST_COMPILE) tests/h264_test.c src/h264.c $(SAN_LDFLAGS) -o $@
+
+tests/vp9_test.san: tests/vp9_test.c src/vp9.c src/vp9.h
+	$(SAN_TEST_COMPILE) tests/vp9_test.c src/vp9.c $(SAN_LDFLAGS) -o $@
 
 test-sanitize: $(SAN_TESTS)
 	@set -e; for test_binary in $(SAN_TESTS); do \

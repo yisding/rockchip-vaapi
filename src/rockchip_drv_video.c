@@ -39,6 +39,7 @@
 
 #include "frame_layout.h"
 #include "h264.h"
+#include "vp9.h"
 
 /* ── logging ─────────────────────────────────────────────────── */
 static FILE *g_log_fp = NULL;
@@ -953,26 +954,28 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
     return VA_STATUS_SUCCESS;
 }
 
-/* Return false for VP9 altref / non-displayed frames (show_frame=0).
- * These are decoded by MPP internally as references but never output via
- * decode_get_frame — polling for them stalls the thread for the full timeout.
- * VP9 uncompressed header layout (MSB-first):
- *   [7:6] frame_marker=0b10  [5] profile_low  [4] profile_high
- *   profile≠3: [3] show_existing  [2] frame_type  [1] show_frame
- *   profile=3:  [3] reserved       [2] show_existing [1] frame_type [0] show_frame */
-static bool vp9_show_frame(const uint8_t *data, size_t len)
+static bool decode_queue_push(RKContext *c, VASurfaceID sid)
 {
-    if (!data || len < 1) return true;
-    uint8_t b = data[0];
-    if ((b >> 6) != 2) return true;                   /* bad frame_marker, assume shown */
-    int profile = ((b >> 5) & 1) | (((b >> 4) & 1) << 1);
-    if (profile != 3) {
-        if ((b >> 3) & 1) return true;                /* show_existing_frame */
-        return (b >> 1) & 1;                          /* show_frame */
-    } else {
-        if ((b >> 2) & 1) return true;                /* show_existing_frame (profile 3) */
-        return b & 1;                                 /* show_frame (profile 3) */
+    int next = (c->dq_tail + 1) & 63;
+    if (next == c->dq_head)
+        return false;
+    c->decode_queue[c->dq_tail] = sid;
+    c->dq_tail = next;
+    return true;
+}
+
+static void decode_queue_undo_push(RKContext *c)
+{
+    c->dq_tail = (c->dq_tail - 1) & 63;
+}
+
+static uint8_t first_refresh_slot(uint8_t refresh_frame_flags)
+{
+    for (uint8_t slot = 0; slot < 8; slot++) {
+        if (refresh_frame_flags & (1u << slot))
+            return slot;
     }
+    return 8;
 }
 
 /* For VP9 / HEVC / AV1: slice data is already a complete coded picture */
@@ -1012,11 +1015,16 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
         return VA_STATUS_SUCCESS;
     }
 
-    /* Detect VP9 altref (show_frame=0): MPP decodes them as references but does
-     * NOT output them via decode_get_frame in this environment, so we never
-     * poll/block for them — see the is_hidden handling after decode_put_packet. */
-    bool is_hidden = (c->coding == MPP_VIDEO_CodingVP9) &&
-                     !vp9_show_frame(pkt_data, pkt_sz);
+    RKVP9FrameInfo vp9_info = {0};
+    bool is_vp9 = c->coding == MPP_VIDEO_CodingVP9;
+    if (is_vp9 &&
+        !rk_vp9_parse_profile0_frame(pkt_data, pkt_sz, &vp9_info)) {
+        LOG("do_generic_decode: malformed or unsupported VP9 header");
+        free(pkt_data);
+        return VA_STATUS_ERROR_DECODING_ERROR;
+    }
+    bool is_hidden = is_vp9 && !vp9_info.show_existing_frame &&
+                     !vp9_info.show_frame;
 
     /* Pre-drain: consume any frames MPP already has ready from previous
      * packets.  Keyframes that timed out in the previous EndPicture poll
@@ -1032,9 +1040,10 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
     /* Enqueue this surface into the FIFO decode queue (PTS-routing fallback).
      * Altref frames are skipped: MPP never outputs them, so enqueuing would
      * leave a permanent entry the head can never advance past. */
-    if (!is_hidden) {
-        c->decode_queue[c->dq_tail] = c->render_target;
-        c->dq_tail = (c->dq_tail + 1) & 63;
+    if (!is_hidden && !decode_queue_push(c, c->render_target)) {
+        LOG("do_generic_decode: decode queue full");
+        free(pkt_data);
+        return VA_STATUS_ERROR_DECODING_ERROR;
     }
 
     LOG("do_generic_decode: sending %zu bytes to MPP (coding=%d) target=0x%x%s",
@@ -1051,18 +1060,52 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
 
     if (ret != MPP_OK) {
         LOG("decode_put_packet failed: %d", ret);
-        if (!is_hidden) c->dq_tail = (c->dq_tail - 1) & 63; /* undo enqueue */
+        if (!is_hidden) decode_queue_undo_push(c);
         return VA_STATUS_ERROR_DECODING_ERROR;
     }
 
-    /* Altref frames (show_frame=0): MPP decodes them internally as references
-     * but never outputs them via decode_get_frame here, and ffmpeg never syncs
-     * or displays a hidden frame directly.  So do NOT poll — that would block
-     * the decode thread for the whole poll window per altref, accumulating
-     * latency until Firefox's pipeline underruns (NS_ERROR_DOM_MEDIA_FATAL_ERR).
-     * Just mark the surface decoded immediately; its permanent prime_fd stays
-     * valid (placeholder content) so ExportSurfaceHandle always succeeds. */
+    /* FFmpeg handles show_existing_frame itself and does not issue a VA call
+     * for that packet. MPP, meanwhile, keeps show_frame=0 output internal.
+     * Ask MPP to expose the newly refreshed reference through its display
+     * queue with a synthetic one-byte show_existing_frame packet. This copies
+     * the hidden pixels into the VA target before FFmpeg later reuses it. MPP
+     * keeps the display slot non-ready until SLOT_HAL_OUTPUT is cleared, so
+     * decode_get_frame cannot return it before hardware completion. */
     if (is_hidden) {
+        uint8_t slot = first_refresh_slot(vp9_info.refresh_frame_flags);
+        if (slot < 8) {
+            uint8_t repeat_data;
+            MppPacket repeat = NULL;
+
+            if (!rk_vp9_make_profile0_show_existing(slot, &repeat_data) ||
+                !decode_queue_push(c, c->render_target)) {
+                LOG("do_generic_decode: cannot queue hidden VP9 surface");
+                return VA_STATUS_ERROR_DECODING_ERROR;
+            }
+
+            ret = mpp_packet_init(&repeat, &repeat_data,
+                                  sizeof(repeat_data));
+            if (ret != MPP_OK) {
+                decode_queue_undo_push(c);
+                LOG("do_generic_decode: hidden VP9 packet init failed: %d",
+                    ret);
+                return VA_STATUS_ERROR_ALLOCATION_FAILED;
+            }
+            mpp_packet_set_length(repeat, sizeof(repeat_data));
+            mpp_packet_set_pts(repeat, (RK_S64)c->render_target);
+            ret = put_packet_draining(c, d, repeat);
+            mpp_packet_deinit(&repeat);
+            if (ret != MPP_OK) {
+                decode_queue_undo_push(c);
+                LOG("do_generic_decode: hidden VP9 repeat failed: %d", ret);
+                return VA_STATUS_ERROR_DECODING_ERROR;
+            }
+            LOG("do_generic_decode: queued hidden VP9 target=0x%x via ref slot %u",
+                (unsigned)c->render_target, (unsigned)slot);
+            return VA_STATUS_SUCCESS;
+        }
+
+        /* A hidden frame that refreshes no slot cannot be shown later. */
         RKSurface *tgt = surface_by_id(d, c->render_target);
         if (tgt) {
             pthread_mutex_lock(&tgt->lock);

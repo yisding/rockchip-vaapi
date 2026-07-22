@@ -155,7 +155,7 @@ relative, not calendar-exact.
 
 Fork, build against the ROCK 5B stack, the original `framemd5` gate, and the
 three correctness fixes (PPS ref-counts, VP9 backpressure, VP9 PTS routing) are
-**done** (`ysp/cleanup`). The remaining Phase 0 implementation also landed:
+**done** on `main`. The remaining Phase 0 implementation also landed:
 
 - The gate uses checksum-pinned **real conformance vectors** (ITU-T H.264 and
   official libvpx VP9), forces declared VA-API cases through hardware-frame
@@ -172,6 +172,14 @@ three correctness fixes (PPS ref-counts, VP9 backpressure, VP9 PTS routing) are
   size; FFmpeg subsequently segfaulted. Placeholder surfaces now reserve MPP's
   codec alignment, every copy is bounds-checked, and unexpected layouts become
   `VA_STATUS_ERROR_DECODING_ERROR`.
+- **VP9 hidden-reference bridging:** FFmpeg consumes `show_existing_frame`
+  packets internally and later reuses the referenced VA surface, while MPP
+  normally withholds `show_frame=0` buffers from `decode_get_frame`. The driver
+  now parses the Profile 0 refresh mask and submits a minimal synthetic repeat
+  so MPP exposes the completed hidden buffer for a bounds-checked copy into the
+  correct VA surface. The parser is covered by real-vector headers,
+  ASan/UBSan, exhaustive short-prefix checks, and Valgrind; its hardware gate
+  remains quarantined until the fixed kernel is booted.
 - The complete driver has an **ASan/UBSan build**; the safe conformance subset
   is green with that instrumented driver loaded into FFmpeg. Hardware-
   independent reconstruction/layout tests also run with full **Valgrind** leak
@@ -180,10 +188,10 @@ three correctness fixes (PPS ref-counts, VP9 backpressure, VP9 PTS routing) are
   Valgrind, ShellCheck, and clang-tidy on every push. The on-board hardware
   gate is a guarded manual self-hosted job.
 
-Phase 0 remains open until the fixed VP9 kernel is booted, MPP's
-`show_existing_frame` reference-accounting fix is installed, and the
-unquarantined conformance + sanitizer gate passes. A skipped required vector
-is deliberately reported as blocked, never green.
+Phase 0 remains open until the fixed VP9 kernel is booted and the
+unquarantined conformance + sanitizer gate proves the hidden-reference bridge
+on hardware. A skipped required vector is deliberately reported as blocked,
+never green.
 
 **Gate:** conformance-vector decode bit-exact for the shipping profiles; gate
 green under ASan; CI builds and lints on push.
@@ -313,8 +321,9 @@ concurrent with decode contexts are race-free.
 
 ## Status
 
-- Phase 0: in progress on `ysp/cleanup` (fixes + gate done; conformance
-  vectors, ASan, CI remain).
+- Phase 0: in progress on `main`; implementation, host analysis, and the safe
+  normal/sanitized hardware subset are complete. The fixed-kernel risky-vector
+  gate remains.
 - Phases 1–5: planned.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement

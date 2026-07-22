@@ -14,7 +14,7 @@ This fork continues the upstream v1.0.11 work. Changes so far are tested on a
 ROCK 5B (RK3588, vendor MPP stack on a 6.18 kernel) with a software-vs-VAAPI
 `framemd5` bit-exactness harness (`tests/validate.sh`). The full conformance
 gate is currently blocked by the quarantined VP9 `show_existing_frame`
-kernel/MPP path; see [docs/TESTING.md](docs/TESTING.md):
+kernel path; see [docs/TESTING.md](docs/TESTING.md):
 
 - **Fixed multi-reference / B-frame H.264 corruption.** VA-API never passes
   the original PPS, and the reconstructed PPS hardcoded
@@ -32,6 +32,13 @@ kernel/MPP path; see [docs/TESTING.md](docs/TESTING.md):
 - **VP9 output routing by FIFO instead of PTS**, since a
   `show_existing_frame` repeat of a hidden altref can surface with the
   altref packet's PTS and desync every later frame.
+- **Preserved hidden VP9 references.** FFmpeg resolves
+  `show_existing_frame` packets internally, so MPP never receives the repeat
+  that would expose a hidden decoded buffer. The driver now parses the hidden
+  frame's refresh mask and submits a bounded one-byte repeat to MPP, routing
+  that output back to the VA surface that FFmpeg may later reuse. Host parser,
+  sanitizer, and Valgrind checks pass; the quarantined hardware vector remains
+  pending the fixed-kernel boot.
 - **Hardened decoded-surface copies.** MPP can return a much wider VP9 stride
   than the coded width. Surface allocation now reserves MPP's aligned layout,
   every NV12 copy is bounds-checked, and an unexpected layout becomes a VA
@@ -79,7 +86,7 @@ Key features:
 |-------|---------|-----------|-------|
 | H.264 | Main, High | safe conformance vectors bit-exact; full gate pending | scaling-list reconstruction included |
 | H.264 | Constrained Baseline | not offered | pinned SVA vector is corrupt in MPP; software fallback |
-| VP9 | Profile 0 | safe vectors under validation; full gate blocked | `show_existing_frame` quarantined until kernel + MPP fixes deploy |
+| VP9 | Profile 0 | safe vectors bit-exact under normal + ASan/UBSan drivers | hidden-reference bridge host-validated; risky vector awaits fixed kernel |
 | HEVC | — | not offered | needs VPS/SPS/PPS reconstruction |
 | VP8 | — | not offered | crashes in the generic path; needs debugging |
 | AV1 | — | not offered | VA-API hands headerless tile data; MPP needs full OBUs |
