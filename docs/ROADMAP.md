@@ -173,10 +173,12 @@ three correctness fixes (PPS ref-counts, VP9 backpressure, VP9 PTS routing) are
   codec alignment, every copy is bounds-checked, and unexpected layouts become
   `VA_STATUS_ERROR_DECODING_ERROR`.
 - The complete driver has an **ASan/UBSan build**; the safe conformance subset
-  is green with that instrumented driver loaded into FFmpeg.
+  is green with that instrumented driver loaded into FFmpeg. Hardware-
+  independent reconstruction/layout tests also run with full **Valgrind** leak
+  checking.
 - The **CI skeleton** runs AArch64 cross-builds, sanitizer unit tests,
-  ShellCheck, and clang-tidy on every push. The on-board hardware gate is a
-  guarded manual self-hosted job.
+  Valgrind, ShellCheck, and clang-tidy on every push. The on-board hardware
+  gate is a guarded manual self-hosted job.
 
 Phase 0 remains open until the fixed VP9 kernel is booted, MPP's
 `show_existing_frame` reference-accounting fix is installed, and the

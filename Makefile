@@ -21,6 +21,11 @@ OBJS   := $(SRCS:.c=.o)
 
 UNIT_TESTS := tests/frame_layout_test tests/h264_test
 
+VALGRIND        ?= valgrind
+VALGRIND_FLAGS  ?= --quiet --error-exitcode=99 --leak-check=full \
+	--show-leak-kinds=all --errors-for-leak-kinds=all --track-origins=yes
+VALGRIND_PREFIX ?=
+
 SAN_CFLAGS  ?= -O1 -g3 -fno-omit-frame-pointer -fsanitize=address,undefined
 SAN_LDFLAGS ?= -fsanitize=address,undefined
 SAN_DIR      := tests/.san-driver
@@ -79,6 +84,14 @@ tests/h264_test: tests/h264_test.c src/h264.c src/h264.h src/bs.h
 test: $(UNIT_TESTS)
 	@set -e; for test_binary in $(UNIT_TESTS); do ./$$test_binary; done
 
+test-valgrind: $(UNIT_TESTS)
+	@command -v $(firstword $(VALGRIND)) >/dev/null || { \
+		echo "valgrind is required" >&2; exit 1; \
+	}
+	@set -e; for test_binary in $(UNIT_TESTS); do \
+		$(VALGRIND) $(VALGRIND_FLAGS) $(VALGRIND_PREFIX) ./$$test_binary; \
+	done
+
 $(SAN_TARGET): $(SAN_OBJS)
 	mkdir -p $(SAN_DIR)
 	$(CC) $(LDFLAGS) $(SAN_LDFLAGS) -shared -o $@ $^ $(LDLIBS)
@@ -128,5 +141,5 @@ clean:
 	rm -rf $(SAN_DIR)
 
 .PHONY: all install fetch-vectors check check-conformance check-synthetic \
-	check-safe test test-sanitize sanitize check-sanitize \
+	check-safe test test-valgrind test-sanitize sanitize check-sanitize \
 	check-sanitize-safe lint clean

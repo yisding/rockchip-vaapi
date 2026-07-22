@@ -11,6 +11,7 @@ Run the unit tests, the complete sanitized build, and static analysis with:
 ```sh
 make test
 make sanitize
+make test-valgrind
 make lint
 shellcheck tests/fetch-vectors.sh tests/validate.sh
 ```
@@ -19,7 +20,10 @@ shellcheck tests/fetch-vectors.sh tests/validate.sh
 tests under ASan and UBSan. LeakSanitizer is disabled for these runs because it
 cannot operate reliably under the board's ptrace restrictions. The hardware
 gate still loads the sanitized driver into FFmpeg and stops on the first ASan
-or UBSan finding.
+or UBSan finding. `make test-valgrind` runs the same unit tests with full leak
+checking and treats every reported leak kind or memory error as a failure. On
+AArch64, install both `valgrind` and the matching `libc6-dbg`; Valgrind needs
+the dynamic loader's symbols before it can start.
 
 ## Pinned conformance vectors
 
@@ -83,7 +87,7 @@ render node, driver location, vector directory, or cleanup behavior.
 GitHub Actions runs two hardware-independent jobs on every push and pull
 request:
 
-- native unit tests, ASan/UBSan tests, ShellCheck, and clang-tidy;
+- native unit tests, ASan/UBSan and Valgrind tests, ShellCheck, and clang-tidy;
 - an AArch64 cross-build of the normal and sanitized drivers against Rockchip
   MPP commit `1375813cbbae5ad6861b166475dd8fb672183220`.
 

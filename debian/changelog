@@ -8,8 +8,8 @@ rockchip-vaapi (1.0.11+ysp2) resolute; urgency=medium
     output; applications now fall back to software for that profile.
   * Bound decoded NV12 copies and size export surfaces for MPP's aligned
     strides, fixing the independent Track 14 userspace overflow.
-  * Add ASan/UBSan builds, unit coverage, clang-tidy, AArch64 cross-build CI,
-    and a guarded manual ROCK 5B hardware job.
+  * Add ASan/UBSan and Valgrind tests, unit coverage, clang-tidy, AArch64
+    cross-build CI, and a guarded manual ROCK 5B hardware job.
 
  -- Yi Ding <yi.s.ding@gmail.com>  Tue, 21 Jul 2026 18:05:57 -0700
 
