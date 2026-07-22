@@ -30,6 +30,7 @@ void rk_log_message(const char *format, ...)
     fprintf(log_file, "[rk-vaapi pid=%d] ", getpid());
     va_list arguments;
     va_start(arguments, format);
+    // NOLINTNEXTLINE(clang-analyzer-valist.Uninitialized) -- va_start above.
     vfprintf(log_file, format, arguments);
     va_end(arguments);
     fputc('\n', log_file);
