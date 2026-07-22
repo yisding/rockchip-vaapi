@@ -15,6 +15,7 @@ VECTOR_DIR=${VECTOR_DIR:-$SCRIPT_DIR/vectors}
 MANIFEST=${MANIFEST:-$SCRIPT_DIR/conformance-vectors.tsv}
 TEST_SET=${TEST_SET:-all}
 RISKY_VECTORS=${RISKY_VECTORS:-skip}
+RISKY_KERNEL_RELEASE=${RISKY_KERNEL_RELEASE:-6.18.38-ysp-rockchip64}
 ALLOW_QUARANTINE=${ALLOW_QUARANTINE:-0}
 VP9_RUNS=${VP9_RUNS:-5}
 KEEP_WORK=${KEEP_WORK:-0}
@@ -27,6 +28,19 @@ case $RISKY_VECTORS in
     skip|run) ;;
     *) echo "error: RISKY_VECTORS must be skip or run" >&2; exit 2 ;;
 esac
+
+# A typo or stale CI checkbox must not turn a conformance run into a kernel
+# panic. Kernel-crash vectors are enabled only on the exact release whose
+# RK3588 VP9 probability-table bounds fix was audited. Future kernel releases
+# must be reviewed and then named explicitly through RISKY_KERNEL_RELEASE.
+if [ "$RISKY_VECTORS" = run ] && [ "$TEST_SET" != synthetic ]; then
+    running_kernel=$(uname -r) || exit 2
+    if [ "$running_kernel" != "$RISKY_KERNEL_RELEASE" ]; then
+        echo "error: refusing kernel-crash vectors on $running_kernel" >&2
+        echo "error: audited kernel release is $RISKY_KERNEL_RELEASE" >&2
+        exit 2
+    fi
+fi
 
 export LIBVA_DRIVER_NAME=rockchip
 export LIBVA_DRIVERS_PATH="$DRIVER_DIR"

@@ -10,6 +10,8 @@ rockchip-vaapi (1.0.11+ysp2) resolute; urgency=medium
     strides, fixing the independent Track 14 userspace overflow.
   * Preserve VP9 hidden reference surfaces by parsing their refresh masks and
     asking MPP to expose the completed buffer through a synthetic repeat.
+  * Refuse kernel-crash vectors unless the running kernel release exactly
+    matches the audited fixed ROCK 5B kernel.
   * Add ASan/UBSan and Valgrind tests, unit coverage, clang-tidy, AArch64
     cross-build CI, and a guarded manual ROCK 5B hardware job.
 

@@ -59,7 +59,12 @@ FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-sanitize
 Do not set `RISKY_VECTORS=run` until the kernel's VP9 probability-table bounds
 fix is installed and the board has booted that kernel. The
 `vp90-2-10-show-existing-frame2.webm` stream can otherwise panic the RK3588 VPU
-driver. Omitting the variable quarantines that stream, but the full gate exits
+driver. The harness additionally requires the running release to equal the
+audited `RISKY_KERNEL_RELEASE`, which defaults to
+`6.18.38-ysp-rockchip64`; a stale checkbox or environment variable therefore
+cannot run this vector on the vulnerable `current` kernel. A future kernel
+must be audited before passing its exact release through that variable.
+Omitting `RISKY_VECTORS` quarantines the stream, but the full gate exits
 non-zero so a skipped required vector can never be reported as a pass.
 
 For diagnosis on a vulnerable boot, the safe subset is:

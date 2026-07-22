@@ -186,7 +186,9 @@ three correctness fixes (PPS ref-counts, VP9 backpressure, VP9 PTS routing) are
   checking.
 - The **CI skeleton** runs AArch64 cross-builds, sanitizer unit tests,
   Valgrind, ShellCheck, and clang-tidy on every push. The on-board hardware
-  gate is a guarded manual self-hosted job.
+  gate is a guarded manual self-hosted job. Kernel-crash vectors additionally
+  require an exact audited `uname -r`, preventing a stale manual confirmation
+  from running them on a vulnerable boot.
 
 Phase 0 remains open until the fixed VP9 kernel is booted and the
 unquarantined conformance + sanitizer gate proves the hidden-reference bridge
