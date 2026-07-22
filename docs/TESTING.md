@@ -14,7 +14,8 @@ make sanitize
 make test-tsan
 make test-valgrind
 make lint
-shellcheck tests/check-zero-copy.sh tests/fetch-vectors.sh tests/validate.sh
+shellcheck tests/check-concurrent-decode.sh tests/check-zero-copy.sh \
+    tests/fetch-vectors.sh tests/validate.sh
 ```
 
 `make sanitize` builds the whole driver and runs its hardware-independent unit
@@ -62,6 +63,9 @@ make check-driver-objects-sanitize
 make check-driver-objects-tsan
 FFMPEG=/usr/bin/ffmpeg make check-zero-copy
 FFMPEG=/usr/bin/ffmpeg make check-zero-copy-sanitize
+FFMPEG=/usr/bin/ffmpeg make check-concurrent-decode
+FFMPEG=/usr/bin/ffmpeg make check-concurrent-decode-sanitize
+FFMPEG=/usr/bin/ffmpeg make check-concurrent-decode-tsan
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-conformance
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-sanitize
 ```
@@ -84,6 +88,18 @@ the complete ASan/UBSan driver for the same audit.
 Readback uses explicit dma-buf CPU synchronization; the zero-copy and full
 conformance gates are therefore visibility/coherency regressions, not only
 routing checks.
+
+The concurrent-decode gate opens H.264 and VP9 hardware decoders in one
+FFmpeg process, requires both driver workers to overlap, and compares all 240
+output frames against software references. It also audits two clean external
+pool lifecycles and rejects every zero-copy fallback/error marker. The
+ASan/UBSan and TSan variants load fully instrumented drivers for the same
+single-process workload. FFmpeg uses one decoder thread per input in this
+gate: concurrency comes from the two VA contexts and their dedicated workers,
+while avoiding unrelated races in FFmpeg's uninstrumented internal frame
+threading. The TSan variant downloads NV12 directly to rawvideo sinks,
+avoiding FFmpeg's unrelated swscale/frame-hash races without any TSan
+suppression; normal and ASan/UBSan runs perform the bit-exact readback.
 
 The pinned `CABREF3_Sand_D.264` case is also the worker/fence regression for
 field pictures: its two submissions per VA surface must share one fence and

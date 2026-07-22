@@ -48,7 +48,7 @@ jobs:
       - name: Static analysis
         run: make lint MPP_CFLAGS="-I$GITHUB_WORKSPACE/build/mpp-headers"
       - name: Shell analysis
-        run: shellcheck tests/check-zero-copy.sh tests/fetch-vectors.sh tests/validate.sh
+        run: shellcheck tests/check-concurrent-decode.sh tests/check-zero-copy.sh tests/fetch-vectors.sh tests/validate.sh
 
   arm64-cross-build:
     runs-on: ubuntu-24.04

@@ -40,6 +40,9 @@ SAN_TESTS    := tests/object_heap_test.san tests/frame_layout_test.san \
 TSAN_CFLAGS  ?= -O1 -g3 -fno-omit-frame-pointer -fsanitize=thread
 TSAN_LDFLAGS ?= -fsanitize=thread
 TSAN_TESTS   := tests/object_heap_test.tsan
+TSAN_DIR     := tests/.tsan-driver
+TSAN_TARGET  := $(TSAN_DIR)/$(TARGET)
+TSAN_OBJS    := $(SRCS:.c=.tsan.o)
 
 DRIVER_COMPILE = $(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) -fPIC \
 	$(VA_CFLAGS) $(MPP_CFLAGS) -Isrc
@@ -48,6 +51,8 @@ SAN_DRIVER_COMPILE = $(CC) $(CPPFLAGS) $(SAN_CFLAGS) $(WARNINGS) -fPIC \
 	$(VA_CFLAGS) $(MPP_CFLAGS) -Isrc
 SAN_TEST_COMPILE = $(CC) $(CPPFLAGS) $(SAN_CFLAGS) $(WARNINGS) \
 	$(VA_CFLAGS) -Isrc
+TSAN_DRIVER_COMPILE = $(CC) $(CPPFLAGS) $(TSAN_CFLAGS) $(WARNINGS) -fPIC \
+	$(VA_CFLAGS) $(MPP_CFLAGS) -Isrc
 
 all: $(TARGET)
 
@@ -100,6 +105,20 @@ check-zero-copy-sanitize: sanitize
 	ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
 	UBSAN_OPTIONS=halt_on_error=1 \
 	DRIVER_DIR="$(abspath $(SAN_DIR))" tests/check-zero-copy.sh
+
+check-concurrent-decode: $(TARGET) test
+	tests/check-concurrent-decode.sh
+
+check-concurrent-decode-sanitize: sanitize
+	HW_LD_PRELOAD="$(shell $(CC) -print-file-name=libasan.so)" \
+	ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
+	UBSAN_OPTIONS=halt_on_error=1 \
+	DRIVER_DIR="$(abspath $(SAN_DIR))" tests/check-concurrent-decode.sh
+
+check-concurrent-decode-tsan: $(TSAN_TARGET) test
+	HW_LD_PRELOAD="$(shell $(CC) -print-file-name=libtsan.so)" \
+	TSAN_OPTIONS=halt_on_error=1 CONCURRENT_OUTPUT_MODE=download \
+	DRIVER_DIR="$(abspath $(TSAN_DIR))" tests/check-concurrent-decode.sh
 
 # Diagnostic subset for a kernel on which risky vectors cannot safely run.
 # This is intentionally not the release gate.
@@ -169,6 +188,17 @@ $(SAN_TARGET): $(SAN_OBJS)
 src/%.san.o: src/%.c
 	$(SAN_DRIVER_COMPILE) -c $< -o $@
 
+$(TSAN_TARGET): $(TSAN_OBJS)
+	mkdir -p $(TSAN_DIR)
+	$(CC) $(LDFLAGS) $(TSAN_LDFLAGS) -shared -o $@ $^ $(LDLIBS)
+
+src/%.tsan.o: src/%.c
+	$(TSAN_DRIVER_COMPILE) -c $< -o $@
+
+$(TSAN_OBJS): src/buffer.h src/context.h src/driver_internal.h src/export.h \
+	src/frame_layout.h src/h264.h src/log.h src/mpp_dec.h src/object_heap.h \
+	src/surface.h src/vp9.h
+
 src/rockchip_drv_video.san.o: src/buffer.h src/context.h \
 	src/driver_internal.h src/export.h src/log.h src/object_heap.h \
 	src/surface.h
@@ -237,13 +267,15 @@ lint:
 		$(VA_CFLAGS) $(MPP_CFLAGS) -Isrc
 
 clean:
-	rm -f $(OBJS) $(SAN_OBJS) $(TARGET) $(UNIT_TESTS) $(SAN_TESTS) \
+	rm -f $(OBJS) $(SAN_OBJS) $(TSAN_OBJS) $(TARGET) $(UNIT_TESTS) $(SAN_TESTS) \
 		$(TSAN_TESTS) $(HARDWARE_TESTS) tests/driver_objects_test.san \
 		tests/driver_objects_test.tsan
-	rm -rf $(SAN_DIR)
+	rm -rf $(SAN_DIR) $(TSAN_DIR)
 
 .PHONY: all install fetch-vectors check check-conformance check-synthetic \
-	check-safe check-zero-copy check-zero-copy-sanitize test test-valgrind \
-	test-sanitize sanitize check-sanitize \
+	check-safe check-zero-copy check-zero-copy-sanitize \
+	check-concurrent-decode check-concurrent-decode-sanitize \
+	check-concurrent-decode-tsan test test-valgrind test-sanitize sanitize \
+	check-sanitize \
 	test-tsan check-sanitize-safe check-driver-objects \
 	check-driver-objects-sanitize check-driver-objects-tsan lint clean
