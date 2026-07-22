@@ -120,6 +120,9 @@ check-concurrent-decode-tsan: $(TSAN_TARGET) test
 	TSAN_OPTIONS=halt_on_error=1 CONCURRENT_OUTPUT_MODE=download \
 	DRIVER_DIR="$(abspath $(TSAN_DIR))" tests/check-concurrent-decode.sh
 
+check-soak: $(TARGET) test
+	tests/check-soak.sh
+
 # Diagnostic subset for a kernel on which risky vectors cannot safely run.
 # This is intentionally not the release gate.
 check-safe: $(TARGET) test
@@ -275,7 +278,7 @@ clean:
 .PHONY: all install fetch-vectors check check-conformance check-synthetic \
 	check-safe check-zero-copy check-zero-copy-sanitize \
 	check-concurrent-decode check-concurrent-decode-sanitize \
-	check-concurrent-decode-tsan test test-valgrind test-sanitize sanitize \
+	check-concurrent-decode-tsan check-soak test test-valgrind test-sanitize sanitize \
 	check-sanitize \
 	test-tsan check-sanitize-safe check-driver-objects \
 	check-driver-objects-sanitize check-driver-objects-tsan lint clean

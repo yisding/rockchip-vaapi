@@ -15,7 +15,7 @@ make test-tsan
 make test-valgrind
 make lint
 shellcheck tests/check-concurrent-decode.sh tests/check-zero-copy.sh \
-    tests/fetch-vectors.sh tests/validate.sh
+    tests/check-soak.sh tests/fetch-vectors.sh tests/validate.sh
 ```
 
 `make sanitize` builds the whole driver and runs its hardware-independent unit
@@ -66,6 +66,7 @@ FFMPEG=/usr/bin/ffmpeg make check-zero-copy-sanitize
 FFMPEG=/usr/bin/ffmpeg make check-concurrent-decode
 FFMPEG=/usr/bin/ffmpeg make check-concurrent-decode-sanitize
 FFMPEG=/usr/bin/ffmpeg make check-concurrent-decode-tsan
+FFMPEG=/usr/bin/ffmpeg make check-soak
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-conformance
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-sanitize
 ```
@@ -100,6 +101,19 @@ while avoiding unrelated races in FFmpeg's uninstrumented internal frame
 threading. The TSan variant downloads NV12 directly to rawvideo sinks,
 avoiding FFmpeg's unrelated swscale/frame-hash races without any TSan
 suppression; normal and ASan/UBSan runs perform the bit-exact readback.
+
+The soak gate generates one reusable 4K H.264 clip, loops it in a paced
+single FFmpeg process for two hours, and downloads every NV12 frame. After a
+60-second warmup it samples `/proc/<pid>/status` and `/proc/<pid>/fd` every 30
+seconds, requiring bounded RSS variation/growth and no fd growth. FFmpeg
+recreates the VA decoder at each four-second stream-loop boundary, so the same
+run also requires every external pool and worker to have a matching teardown.
+It requires at least 25 frames per second and no fallback, stale route, or
+ownership marker. `SOAK_SECONDS`,
+`SOAK_SAMPLE_SECONDS`, and `SOAK_WARMUP_SECONDS` support short harness smoke
+runs, but durations below 7,200 seconds are explicitly not a Phase 1 exit
+result. RSS/fd thresholds can be overridden for diagnosis; release evidence
+uses the committed defaults.
 
 The pinned `CABREF3_Sand_D.264` case is also the worker/fence regression for
 field pictures: its two submissions per VA surface must share one fence and

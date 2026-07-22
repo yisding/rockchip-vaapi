@@ -274,6 +274,12 @@ per input so uninstrumented FFmpeg frame-thread and swscale races do not
 obscure the two instrumented driver workers. The remaining Phase 1 exit work
 is the multi-hour 4K memory/fd soak.
 
+The soak harness is now in place and its 40-second qualification smoke is
+green: 1,205 external 4K frames, matched repeated pool/worker lifecycles, a
+36,660 KiB post-warmup RSS span with no growth, and identical head/tail fd
+medians. This proves the monitor and teardown audit; it does not satisfy the
+7,200-second Phase 1 duration requirement.
+
 - Split the monolith into the module layout above; introduce the object heap.
 - Implement the **external-buffer-group zero-copy model** and delete the
   per-frame memcpy.
