@@ -115,6 +115,10 @@ jobs:
         run: |
           make clean all test
           make fetch-vectors
+      - name: Object lifecycle gate
+        run: |
+          make check-driver-objects
+          make check-driver-objects-sanitize
       - name: Full conformance gate
         env:
           FFMPEG: /usr/bin/ffmpeg

@@ -22,6 +22,7 @@ OBJS   := $(SRCS:.c=.o)
 
 UNIT_TESTS := tests/object_heap_test tests/frame_layout_test tests/h264_test \
 	tests/vp9_test
+HARDWARE_TESTS := tests/driver_objects_test
 
 VALGRIND        ?= valgrind
 VALGRIND_FLAGS  ?= --quiet --error-exitcode=99 --leak-check=full \
@@ -82,6 +83,24 @@ check-synthetic: $(TARGET) test
 # This is intentionally not the release gate.
 check-safe: $(TARGET) test
 	TEST_SET=conformance ALLOW_QUARANTINE=1 tests/validate.sh
+
+tests/driver_objects_test: tests/driver_objects_test.c $(SRCS) \
+		src/object_heap.h src/frame_layout.h src/h264.h src/vp9.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(VA_CFLAGS) $(MPP_CFLAGS) \
+		-Isrc tests/driver_objects_test.c $(SRCS) $(LDLIBS) -o $@
+
+check-driver-objects: $(HARDWARE_TESTS)
+	@set -e; for test_binary in $(HARDWARE_TESTS); do ./$$test_binary; done
+
+tests/driver_objects_test.san: tests/driver_objects_test.c $(SRCS) \
+		src/object_heap.h src/frame_layout.h src/h264.h src/vp9.h
+	$(CC) $(CPPFLAGS) $(SAN_CFLAGS) $(WARNINGS) $(VA_CFLAGS) $(MPP_CFLAGS) \
+		-Isrc tests/driver_objects_test.c $(SRCS) $(SAN_LDFLAGS) \
+		$(LDLIBS) -o $@
+
+check-driver-objects-sanitize: tests/driver_objects_test.san
+	ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
+	UBSAN_OPTIONS=halt_on_error=1 ./tests/driver_objects_test.san
 
 tests/object_heap_test: tests/object_heap_test.c src/object_heap.c src/object_heap.h
 	$(TEST_COMPILE) tests/object_heap_test.c src/object_heap.c -lpthread -o $@
@@ -169,9 +188,10 @@ lint:
 
 clean:
 	rm -f $(OBJS) $(SAN_OBJS) $(TARGET) $(UNIT_TESTS) $(SAN_TESTS) \
-		$(TSAN_TESTS)
+		$(TSAN_TESTS) $(HARDWARE_TESTS) tests/driver_objects_test.san
 	rm -rf $(SAN_DIR)
 
 .PHONY: all install fetch-vectors check check-conformance check-synthetic \
 	check-safe test test-valgrind test-sanitize sanitize check-sanitize \
-	test-tsan check-sanitize-safe lint clean
+	test-tsan check-sanitize-safe check-driver-objects \
+	check-driver-objects-sanitize lint clean

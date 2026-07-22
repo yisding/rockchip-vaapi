@@ -57,9 +57,16 @@ On a ROCK 5B with the vendor MPP stack and a VA-capable system FFmpeg:
 ```sh
 make clean all test
 make fetch-vectors
+make check-driver-objects
+make check-driver-objects-sanitize
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-conformance
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-sanitize
 ```
+
+The object-lifecycle gate crosses every former fixed-array ceiling, validates
+all five typed handle namespaces and stale-handle rejection, and creates nine
+simultaneous MPP decode contexts. Its sanitized variant applies ASan/UBSan to
+the complete driver lifecycle in-process.
 
 Do not set `RISKY_VECTORS=run` until the kernel's VP9 probability-table bounds
 fix is installed and the board has booted that kernel. The

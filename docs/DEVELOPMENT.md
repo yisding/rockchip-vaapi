@@ -77,10 +77,10 @@ Firefox compositor (zero-copy from the exported surface onward)
 
 ### Object model
 
-Phase 1 is replacing the original fixed arrays with the dynamic heap in
-`object_heap.c`. Configs and buffers have migrated; contexts and surfaces are
-the remaining fixed-array users, and images temporarily share their backing
-buffer handle.
+Phase 1 replaced all original fixed arrays with the dynamic heap in
+`object_heap.c`. Configs, contexts, surfaces, buffers, and images each use a
+distinct handle type. A `VAImageID` owns a separate backing `VABufferID`, so
+the two namespaces no longer alias.
 
 Heap handles encode a 4-bit object type, an 8-bit generation, and a 20-bit
 slot index. Lookup rejects the wrong type and any stale generation. Slots grow

@@ -28,6 +28,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -52,14 +53,6 @@ static void log_init(void) {
     fprintf(g_log_fp, "[rk-vaapi pid=%d] " fmt "\n", getpid(), ##__VA_ARGS__); \
 } while(0)
 
-/* ── limits ──────────────────────────────────────────────────── */
-#define MAX_CONTEXTS   8
-#define MAX_SURFACES  64
-
-/* VA object ID namespaces */
-#define CONTEXT_ID_BASE  0x02000000u
-#define SURFACE_ID_BASE  0x03000000u
-
 /* ── data structures ─────────────────────────────────────────── */
 
 typedef struct {
@@ -69,7 +62,7 @@ typedef struct {
 } RKConfig;
 
 typedef struct {
-    bool         used;
+    RKObjectBase base;
     VAProfile    profile;
     int          width, height;
 
@@ -95,7 +88,7 @@ typedef struct {
 } RKContext;
 
 typedef struct {
-    bool         used;
+    RKObjectBase base;
     int          width, height;
 
     /* filled after decode */
@@ -132,11 +125,22 @@ typedef struct {
 } RKBuffer;
 
 typedef struct {
+    RKObjectBase base;
+    VABufferID buffer_id;
+    RKBuffer *buffer;
+    uint32_t fourcc;
+    unsigned int width;
+    unsigned int height;
+    unsigned int pitch;
+} RKImage;
+
+typedef struct {
     pthread_mutex_t object_lock;
     RKObjectHeap config_heap;
+    RKObjectHeap context_heap;
+    RKObjectHeap surface_heap;
     RKObjectHeap buffer_heap;
-    RKContext  contexts[MAX_CONTEXTS];
-    RKSurface  surfaces[MAX_SURFACES];
+    RKObjectHeap image_heap;
 } RKDriver;
 
 /* ── helpers ─────────────────────────────────────────────────── */
@@ -153,14 +157,20 @@ static RKConfig *config_acquire(RKDriver *d, VAConfigID id) {
     return config;
 }
 
-static RKContext *context_by_id(RKDriver *d, VAContextID id) {
-    unsigned idx = id - CONTEXT_ID_BASE;
-    return (idx < MAX_CONTEXTS && d->contexts[idx].used) ? &d->contexts[idx] : NULL;
+static RKContext *context_acquire(RKDriver *d, VAContextID id) {
+    pthread_mutex_lock(&d->object_lock);
+    RKContext *context = (RKContext *)rk_object_heap_acquire(
+        &d->context_heap, (uint32_t)id);
+    pthread_mutex_unlock(&d->object_lock);
+    return context;
 }
 
-static RKSurface *surface_by_id(RKDriver *d, VASurfaceID id) {
-    unsigned idx = id - SURFACE_ID_BASE;
-    return (idx < MAX_SURFACES && d->surfaces[idx].used) ? &d->surfaces[idx] : NULL;
+static RKSurface *surface_acquire(RKDriver *d, VASurfaceID id) {
+    pthread_mutex_lock(&d->object_lock);
+    RKSurface *surface = (RKSurface *)rk_object_heap_acquire(
+        &d->surface_heap, (uint32_t)id);
+    pthread_mutex_unlock(&d->object_lock);
+    return surface;
 }
 
 static RKBuffer *buffer_acquire(RKDriver *d, VABufferID id) {
@@ -171,10 +181,47 @@ static RKBuffer *buffer_acquire(RKDriver *d, VABufferID id) {
     return buffer;
 }
 
+static RKImage *image_acquire(RKDriver *d, VAImageID id) {
+    pthread_mutex_lock(&d->object_lock);
+    RKImage *image = (RKImage *)rk_object_heap_acquire(
+        &d->image_heap, (uint32_t)id);
+    pthread_mutex_unlock(&d->object_lock);
+    return image;
+}
+
 static void buffer_destroy(void *opaque) {
     RKBuffer *buffer = opaque;
     free(buffer->data);
     free(buffer);
+}
+
+static void image_destroy(void *opaque) {
+    RKImage *image = opaque;
+    if (image->buffer)
+        rk_object_unref(&image->buffer->base);
+    free(image);
+}
+
+static void context_destroy(void *opaque) {
+    RKContext *context = opaque;
+    if (context->mpp)
+        mpp_destroy(context->mpp);
+    free(context);
+}
+
+static void surface_destroy(void *opaque) {
+    RKSurface *surface = opaque;
+    if (surface->frame)
+        mpp_frame_deinit(&surface->frame);
+    if (surface->prime_fd >= 0)
+        close(surface->prime_fd);
+    if (surface->priv_buf)
+        mpp_buffer_put(surface->priv_buf);
+    if (surface->priv_group)
+        mpp_buffer_group_put(surface->priv_group);
+    pthread_cond_destroy(&surface->cond);
+    pthread_mutex_destroy(&surface->lock);
+    free(surface);
 }
 
 static VAStatus packet_append(uint8_t **packet, size_t *packet_size,
@@ -239,21 +286,11 @@ static VAStatus rk_Terminate(VADriverContextP ctx) {
     if (!d) return VA_STATUS_SUCCESS;
 
     /* destroy any leftover objects */
-    rk_object_heap_finish(&d->config_heap);
+    rk_object_heap_finish(&d->context_heap);
+    rk_object_heap_finish(&d->surface_heap);
+    rk_object_heap_finish(&d->image_heap);
     rk_object_heap_finish(&d->buffer_heap);
-    for (int i = 0; i < MAX_SURFACES; i++) {
-        if (!d->surfaces[i].used) continue;
-        if (d->surfaces[i].frame) mpp_frame_deinit(&d->surfaces[i].frame);
-        if (d->surfaces[i].prime_fd >= 0) close(d->surfaces[i].prime_fd);
-        if (d->surfaces[i].priv_buf)   mpp_buffer_put(d->surfaces[i].priv_buf);
-        if (d->surfaces[i].priv_group) mpp_buffer_group_put(d->surfaces[i].priv_group);
-        pthread_cond_destroy(&d->surfaces[i].cond);
-        pthread_mutex_destroy(&d->surfaces[i].lock);
-    }
-    for (int i = 0; i < MAX_CONTEXTS; i++) {
-        if (!d->contexts[i].used) continue;
-        if (d->contexts[i].mpp) mpp_destroy(d->contexts[i].mpp);
-    }
+    rk_object_heap_finish(&d->config_heap);
     pthread_mutex_destroy(&d->object_lock);
     free(d);
     ctx->pDriverData = NULL;
@@ -413,30 +450,23 @@ static VAStatus rk_CreateSurfaces(VADriverContextP ctx,
 
     int allocated = 0;
     for (int s = 0; s < n; s++) {
-        unsigned i;
-        for (i = 0; i < MAX_SURFACES; i++) {
-            if (!d->surfaces[i].used) break;
-        }
-        if (i == MAX_SURFACES) {
-            /* roll back — must free placeholder buffers before zeroing */
-            for (int j = 0; j < allocated; j++) {
-                unsigned idx = ids[j] - SURFACE_ID_BASE;
-                RKSurface *rb = &d->surfaces[idx];
-                if (rb->prime_fd >= 0) close(rb->prime_fd);
-                if (rb->priv_buf)   mpp_buffer_put(rb->priv_buf);
-                if (rb->priv_group) mpp_buffer_group_put(rb->priv_group);
-                pthread_mutex_destroy(&rb->lock);
-                pthread_cond_destroy(&rb->cond);
-                memset(rb, 0, sizeof(RKSurface));
-            }
-            return VA_STATUS_ERROR_ALLOCATION_FAILED;
-        }
-        RKSurface *surf = &d->surfaces[i];
-        memset(surf, 0, sizeof(*surf));
-        surf->used     = true;
+        RKSurface *surf = calloc(1, sizeof(*surf));
+        if (!surf)
+            goto rollback;
+        rk_object_init(&surf->base, surface_destroy);
         surf->width    = width;
         surf->height   = height;
         surf->prime_fd = -1;
+
+        if (pthread_mutex_init(&surf->lock, NULL) != 0) {
+            free(surf);
+            goto rollback;
+        }
+        if (pthread_cond_init(&surf->cond, NULL) != 0) {
+            pthread_mutex_destroy(&surf->lock);
+            free(surf);
+            goto rollback;
+        }
 
         /* Pre-allocate placeholder DMA-BUF so ExportSurfaceHandle succeeds
          * before any decode (e.g. Firefox's DMABUF capability probe). */
@@ -472,12 +502,30 @@ static VAStatus rk_CreateSurfaces(VADriverContextP ctx,
             }
         }
 
-        pthread_mutex_init(&surf->lock, NULL);
-        pthread_cond_init(&surf->cond, NULL);
-        ids[s] = SURFACE_ID_BASE + i;
+        uint32_t id;
+        pthread_mutex_lock(&d->object_lock);
+        bool inserted = rk_object_heap_insert(&d->surface_heap, &surf->base,
+                                              &id);
+        pthread_mutex_unlock(&d->object_lock);
+        if (!inserted) {
+            rk_object_unref(&surf->base);
+            goto rollback;
+        }
+        ids[s] = (VASurfaceID)id;
         allocated++;
     }
     return VA_STATUS_SUCCESS;
+
+rollback:
+    for (int j = 0; j < allocated; j++) {
+        pthread_mutex_lock(&d->object_lock);
+        RKSurface *surface = (RKSurface *)rk_object_heap_remove(
+            &d->surface_heap, (uint32_t)ids[j]);
+        pthread_mutex_unlock(&d->object_lock);
+        if (surface)
+            rk_object_unref(&surface->base);
+    }
+    return VA_STATUS_ERROR_ALLOCATION_FAILED;
 }
 
 static VAStatus rk_DestroySurfaces(VADriverContextP ctx,
@@ -485,15 +533,12 @@ static VAStatus rk_DestroySurfaces(VADriverContextP ctx,
     LOG("DestroySurfaces: n=%d", n);
     RKDriver *d = drv_from_ctx(ctx);
     for (int i = 0; i < n; i++) {
-        RKSurface *s = surface_by_id(d, list[i]);
-        if (!s) continue;
-        if (s->frame)      mpp_frame_deinit(&s->frame);
-        if (s->prime_fd >= 0) close(s->prime_fd);
-        if (s->priv_buf)   { mpp_buffer_put(s->priv_buf);        s->priv_buf   = NULL; }
-        if (s->priv_group) { mpp_buffer_group_put(s->priv_group); s->priv_group = NULL; }
-        pthread_cond_destroy(&s->cond);
-        pthread_mutex_destroy(&s->lock);
-        memset(s, 0, sizeof(*s));
+        pthread_mutex_lock(&d->object_lock);
+        RKSurface *surface = (RKSurface *)rk_object_heap_remove(
+            &d->surface_heap, (uint32_t)list[i]);
+        pthread_mutex_unlock(&d->object_lock);
+        if (surface)
+            rk_object_unref(&surface->base);
     }
     return VA_STATUS_SUCCESS;
 }
@@ -535,60 +580,68 @@ static VAStatus rk_CreateContext(VADriverContextP ctx,
     if (coding == MPP_VIDEO_CodingUnused)
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
 
-    for (unsigned i = 0; i < MAX_CONTEXTS; i++) {
-        if (d->contexts[i].used) continue;
-        RKContext *c = &d->contexts[i];
-        memset(c, 0, sizeof(*c));
+    RKContext *c = calloc(1, sizeof(*c));
+    if (!c)
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    rk_object_init(&c->base, context_destroy);
 
-        LOG("CreateContext: config=0x%x %dx%d coding=%d",
-            config_id, width, height, (int)coding);
+    LOG("CreateContext: config=0x%x %dx%d coding=%d",
+        config_id, width, height, (int)coding);
 
-        MPP_RET ret = mpp_create(&c->mpp, &c->mpi);
-        if (ret != MPP_OK) {
-            LOG("mpp_create FAILED: %d", ret);
-            return VA_STATUS_ERROR_ALLOCATION_FAILED;
-        }
-        LOG("CreateContext: mpp_create OK");
-
-        ret = mpp_init(c->mpp, MPP_CTX_DEC, coding);
-        if (ret != MPP_OK) {
-            mpp_destroy(c->mpp);
-            LOG("mpp_init FAILED: %d (coding=%d)", ret, (int)coding);
-            return VA_STATUS_ERROR_ALLOCATION_FAILED;
-        }
-        LOG("CreateContext: mpp_init OK");
-
-        /* Must be set after mpp_init: split_parse=0 means we send complete
-         * access units; OUTPUT_BLOCK=0 makes decode_get_frame non-blocking. */
-        MppDecCfg dec_cfg = NULL;
-        mpp_dec_cfg_init(&dec_cfg);
-        mpp_dec_cfg_set_u32(dec_cfg, "base:split_parse", 0);
-        c->mpi->control(c->mpp, MPP_DEC_SET_CFG, dec_cfg);
-        mpp_dec_cfg_deinit(dec_cfg);
-
-        int block = 0;
-        c->mpi->control(c->mpp, MPP_SET_OUTPUT_BLOCK, (MppParam)&block);
-
-        c->used      = true;
-        c->profile   = profile;
-        c->width     = width;
-        c->height    = height;
-        c->coding    = coding;
-        c->sps_sent  = false;
-
-        *out_id = CONTEXT_ID_BASE + i;
-        return VA_STATUS_SUCCESS;
+    MPP_RET ret = mpp_create(&c->mpp, &c->mpi);
+    if (ret != MPP_OK) {
+        LOG("mpp_create FAILED: %d", ret);
+        rk_object_unref(&c->base);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
-    return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    LOG("CreateContext: mpp_create OK");
+
+    ret = mpp_init(c->mpp, MPP_CTX_DEC, coding);
+    if (ret != MPP_OK) {
+        LOG("mpp_init FAILED: %d (coding=%d)", ret, (int)coding);
+        rk_object_unref(&c->base);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
+    LOG("CreateContext: mpp_init OK");
+
+    /* Must be set after mpp_init: split_parse=0 means we send complete
+     * access units; OUTPUT_BLOCK=0 makes decode_get_frame non-blocking. */
+    MppDecCfg dec_cfg = NULL;
+    mpp_dec_cfg_init(&dec_cfg);
+    mpp_dec_cfg_set_u32(dec_cfg, "base:split_parse", 0);
+    c->mpi->control(c->mpp, MPP_DEC_SET_CFG, dec_cfg);
+    mpp_dec_cfg_deinit(dec_cfg);
+
+    int block = 0;
+    c->mpi->control(c->mpp, MPP_SET_OUTPUT_BLOCK, (MppParam)&block);
+
+    c->profile  = profile;
+    c->width    = width;
+    c->height   = height;
+    c->coding   = coding;
+    c->sps_sent = false;
+
+    uint32_t id;
+    pthread_mutex_lock(&d->object_lock);
+    bool inserted = rk_object_heap_insert(&d->context_heap, &c->base, &id);
+    pthread_mutex_unlock(&d->object_lock);
+    if (!inserted) {
+        rk_object_unref(&c->base);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
+    *out_id = (VAContextID)id;
+    return VA_STATUS_SUCCESS;
 }
 
 static VAStatus rk_DestroyContext(VADriverContextP ctx, VAContextID id) {
     LOG("DestroyContext: ctx=0x%x", id);
     RKDriver *d = drv_from_ctx(ctx);
-    RKContext *c = context_by_id(d, id);
+    pthread_mutex_lock(&d->object_lock);
+    RKContext *c = (RKContext *)rk_object_heap_remove(&d->context_heap,
+                                                      (uint32_t)id);
+    pthread_mutex_unlock(&d->object_lock);
     if (!c) return VA_STATUS_ERROR_INVALID_CONTEXT;
-    if (c->mpp) mpp_destroy(c->mpp);
-    memset(c, 0, sizeof(*c));
+    rk_object_unref(&c->base);
     return VA_STATUS_SUCCESS;
 }
 
@@ -690,7 +743,7 @@ static VAStatus rk_BeginPicture(VADriverContextP ctx,
                                  VASurfaceID render_target) {
     LOG("BeginPicture: ctx=0x%x surface=0x%x", ctx_id, render_target);
     RKDriver  *d = drv_from_ctx(ctx);
-    RKContext *c = context_by_id(d, ctx_id);
+    RKContext *c = context_acquire(d, ctx_id);
     if (!c) return VA_STATUS_ERROR_INVALID_CONTEXT;
 
     c->render_target = render_target;
@@ -701,14 +754,18 @@ static VAStatus rk_BeginPicture(VADriverContextP ctx,
      * intact so ExportSurfaceHandle always returns a valid fd (the previous
      * decoded frame or the initial placeholder). assign_mpp_frame copies the
      * new decoded pixels into priv_buf without touching prime_fd. */
-    RKSurface *s = surface_by_id(d, render_target);
-    if (s) {
-        pthread_mutex_lock(&s->lock);
-        s->decoded = false;
-        s->decode_failed = false;
-        s->ctx_id  = ctx_id;
-        pthread_mutex_unlock(&s->lock);
+    RKSurface *s = surface_acquire(d, render_target);
+    if (!s) {
+        rk_object_unref(&c->base);
+        return VA_STATUS_ERROR_INVALID_SURFACE;
     }
+    pthread_mutex_lock(&s->lock);
+    s->decoded = false;
+    s->decode_failed = false;
+    s->ctx_id  = ctx_id;
+    pthread_mutex_unlock(&s->lock);
+    rk_object_unref(&s->base);
+    rk_object_unref(&c->base);
     return VA_STATUS_SUCCESS;
 }
 
@@ -716,7 +773,7 @@ static VAStatus rk_RenderPicture(VADriverContextP ctx,
                                   VAContextID ctx_id,
                                   VABufferID *buffers, int n) {
     RKDriver  *d = drv_from_ctx(ctx);
-    RKContext *c = context_by_id(d, ctx_id);
+    RKContext *c = context_acquire(d, ctx_id);
     if (!c) return VA_STATUS_ERROR_INVALID_CONTEXT;
 
     for (int i = 0; i < n && c->n_pending < 64; i++) {
@@ -739,6 +796,7 @@ static VAStatus rk_RenderPicture(VADriverContextP ctx,
         if (b)
             rk_object_unref(&b->base);
     }
+    rk_object_unref(&c->base);
     return VA_STATUS_SUCCESS;
 }
 
@@ -763,10 +821,10 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
          * packet's PTS on its frame, so the smuggled surface id is reliable;
          * fall back to the current render target if it was lost. */
         sid = (VASurfaceID)raw_pts;
-        s   = sid ? surface_by_id(d, sid) : NULL;
+        s   = sid ? surface_acquire(d, sid) : NULL;
         if (!s) {
             sid = c->render_target;
-            s   = sid ? surface_by_id(d, sid) : NULL;
+            s   = sid ? surface_acquire(d, sid) : NULL;
         }
     } else {
         /* VP9: shown frames come out in submission order (no display
@@ -786,7 +844,7 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
         } else {
             sid = 0;
         }
-        s = sid ? surface_by_id(d, sid) : NULL;
+        s = sid ? surface_acquire(d, sid) : NULL;
     }
 
     if (!s) {
@@ -829,6 +887,7 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
         s->decode_failed = true;
         pthread_cond_broadcast(&s->cond);
         pthread_mutex_unlock(&s->lock);
+        rk_object_unref(&s->base);
         return;
     }
 
@@ -845,6 +904,7 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
     pthread_mutex_unlock(&s->lock);
     LOG("assign_mpp_frame: surface=0x%x prime_fd=%d MPP %dx%d stride=%dx%d fmt=0x%x copied=%d",
         (unsigned)sid, s->prime_fd, fwidth, fheight, fhs, fvs, (unsigned)ffmt, copied);
+    rk_object_unref(&s->base);
 }
 
 /* decode_put_packet with backpressure handling. The context runs MPP in
@@ -981,12 +1041,13 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
         LOG("do_h264_decode: no slice data, marking surface 0x%x decoded",
             (unsigned)c->render_target);
         free(pkt_data);
-        RKSurface *tgt = surface_by_id(d, c->render_target);
+        RKSurface *tgt = surface_acquire(d, c->render_target);
         if (tgt) {
             pthread_mutex_lock(&tgt->lock);
             tgt->decoded = true;
             pthread_cond_signal(&tgt->cond);
             pthread_mutex_unlock(&tgt->lock);
+            rk_object_unref(&tgt->base);
         }
         return VA_STATUS_SUCCESS;
     }
@@ -1016,11 +1077,12 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
     }
 
     for (int tries = 0; tries < 100; tries++) {
-        RKSurface *tgt = surface_by_id(d, c->render_target);
+        RKSurface *tgt = surface_acquire(d, c->render_target);
         if (tgt) {
             pthread_mutex_lock(&tgt->lock);
             bool done = tgt->decoded;
             pthread_mutex_unlock(&tgt->lock);
+            rk_object_unref(&tgt->base);
             if (done) break;
         }
         MppFrame frame = NULL;
@@ -1084,12 +1146,13 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
         LOG("do_generic_decode: no slice data, marking surface 0x%x decoded",
             (unsigned)c->render_target);
         free(pkt_data);
-        RKSurface *tgt = surface_by_id(d, c->render_target);
+        RKSurface *tgt = surface_acquire(d, c->render_target);
         if (tgt) {
             pthread_mutex_lock(&tgt->lock);
             tgt->decoded = true;
             pthread_cond_signal(&tgt->cond);
             pthread_mutex_unlock(&tgt->lock);
+            rk_object_unref(&tgt->base);
         }
         return VA_STATUS_SUCCESS;
     }
@@ -1185,12 +1248,13 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
         }
 
         /* A hidden frame that refreshes no slot cannot be shown later. */
-        RKSurface *tgt = surface_by_id(d, c->render_target);
+        RKSurface *tgt = surface_acquire(d, c->render_target);
         if (tgt) {
             pthread_mutex_lock(&tgt->lock);
             tgt->decoded = true;
             pthread_cond_signal(&tgt->cond);
             pthread_mutex_unlock(&tgt->lock);
+            rk_object_unref(&tgt->base);
         }
         return VA_STATUS_SUCCESS;
     }
@@ -1206,7 +1270,7 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
 static VAStatus rk_EndPicture(VADriverContextP ctx, VAContextID ctx_id) {
     LOG("EndPicture: ctx=0x%x", ctx_id);
     RKDriver  *d = drv_from_ctx(ctx);
-    RKContext *c = context_by_id(d, ctx_id);
+    RKContext *c = context_acquire(d, ctx_id);
     if (!c) return VA_STATUS_ERROR_INVALID_CONTEXT;
 
     VAStatus st;
@@ -1215,12 +1279,13 @@ static VAStatus rk_EndPicture(VADriverContextP ctx, VAContextID ctx_id) {
     else
         st = do_generic_decode(c, d);
 
+    rk_object_unref(&c->base);
     return st;
 }
 
 static VAStatus rk_SyncSurface(VADriverContextP ctx, VASurfaceID id) {
     RKDriver  *d = drv_from_ctx(ctx);
-    RKSurface *s = surface_by_id(d, id);
+    RKSurface *s = surface_acquire(d, id);
     if (!s) return VA_STATUS_ERROR_INVALID_SURFACE;
 
     pthread_mutex_lock(&s->lock);
@@ -1229,17 +1294,20 @@ static VAStatus rk_SyncSurface(VADriverContextP ctx, VASurfaceID id) {
     VAContextID cid = s->ctx_id;
     pthread_mutex_unlock(&s->lock);
 
-    if (failed)
+    if (failed) {
+        rk_object_unref(&s->base);
         return VA_STATUS_ERROR_DECODING_ERROR;
+    }
     if (ready) {
         LOG("SyncSurface: surface=0x%x prime_fd=%d ready", id, s->prime_fd);
+        rk_object_unref(&s->base);
         return VA_STATUS_SUCCESS;
     }
 
     /* EndPicture already polled 500ms; if the surface still isn't decoded
      * (B-frame pipeline priming, slow keyframe), actively drain MPP here
      * instead of sleeping on a cond that will never be signalled. */
-    RKContext *c = context_by_id(d, cid);
+    RKContext *c = context_acquire(d, cid);
     struct timespec deadline;
     clock_gettime(CLOCK_REALTIME, &deadline);
     deadline.tv_sec += 3;
@@ -1252,6 +1320,9 @@ static VAStatus rk_SyncSurface(VADriverContextP ctx, VASurfaceID id) {
         pthread_mutex_unlock(&s->lock);
         if (decode_failed) {
             LOG("SyncSurface: decode failed surface=0x%x", id);
+            if (c)
+                rk_object_unref(&c->base);
+            rk_object_unref(&s->base);
             return VA_STATUS_ERROR_DECODING_ERROR;
         }
         if (done) { LOG("SyncSurface: surface=0x%x OK prime_fd=%d", id, s->prime_fd); break; }
@@ -1276,6 +1347,9 @@ static VAStatus rk_SyncSurface(VADriverContextP ctx, VASurfaceID id) {
     pthread_mutex_lock(&s->lock);
     bool final_ok = s->decoded;
     pthread_mutex_unlock(&s->lock);
+    if (c)
+        rk_object_unref(&c->base);
+    rk_object_unref(&s->base);
     return final_ok ? VA_STATUS_SUCCESS : VA_STATUS_ERROR_DECODING_ERROR;
 }
 
@@ -1289,13 +1363,14 @@ static VAStatus rk_QuerySurfaceStatus(VADriverContextP ctx,
                                        VASurfaceID id,
                                        VASurfaceStatus *status) {
     RKDriver  *d = drv_from_ctx(ctx);
-    RKSurface *s = surface_by_id(d, id);
+    RKSurface *s = surface_acquire(d, id);
     if (!s) return VA_STATUS_ERROR_INVALID_SURFACE;
     pthread_mutex_lock(&s->lock);
     *status = s->decoded ? VASurfaceReady : VASurfaceRendering;
     pthread_mutex_unlock(&s->lock);
     LOG("QuerySurfaceStatus: surface=0x%x status=%s", id,
         (*status == VASurfaceReady) ? "Ready" : "Rendering");
+    rk_object_unref(&s->base);
     return VA_STATUS_SUCCESS;
 }
 
@@ -1305,14 +1380,13 @@ static VAStatus rk_ExportSurfaceHandle(VADriverContextP ctx,
                                         uint32_t flags,
                                         void *descriptor) {
     RKDriver  *d = drv_from_ctx(ctx);
-    RKSurface *s = surface_by_id(d, id);
+    RKSurface *s = surface_acquire(d, id);
     LOG("ExportSurfaceHandle: surface=0x%x mem_type=0x%x flags=0x%x",
         id, mem_type, flags);
     if (!s) return VA_STATUS_ERROR_INVALID_SURFACE;
-    (void)flags;
-
     if (mem_type != VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2) {
         LOG("ExportSurfaceHandle: unsupported mem_type 0x%x", mem_type);
+        rk_object_unref(&s->base);
         return VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE;
     }
 
@@ -1324,14 +1398,18 @@ static VAStatus rk_ExportSurfaceHandle(VADriverContextP ctx,
     pthread_mutex_unlock(&s->lock);
     if (needs_sync) {
         VAStatus sync_status = rk_SyncSurface(ctx, id);
-        if (sync_status != VA_STATUS_SUCCESS)
+        if (sync_status != VA_STATUS_SUCCESS) {
+            rk_object_unref(&s->base);
             return sync_status;
+        }
     }
 
     pthread_mutex_lock(&s->lock);
     int fd       = s->prime_fd;
     int hs       = s->hstride ? s->hstride : s->width;
     int vs       = s->vstride ? s->vstride : s->height;
+    int width    = s->width;
+    int height   = s->height;
     bool decoded = s->decoded;
     bool is_placeholder = (s->priv_buf != NULL);
     bool is_10bit = MPP_FRAME_FMT_IS_YUV_10BIT(s->fmt);
@@ -1339,22 +1417,24 @@ static VAStatus rk_ExportSurfaceHandle(VADriverContextP ctx,
 
     if (fd < 0) {
         LOG("ExportSurfaceHandle: prime_fd not ready (fd<0 decoded=%d), ERROR_INVALID_SURFACE", decoded);
+        rk_object_unref(&s->base);
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
 
     int export_fd = dup(fd);
     if (export_fd < 0) {
         LOG("ExportSurfaceHandle: dup(%d) failed errno=%d, ERROR_ALLOCATION_FAILED", fd, errno);
+        rk_object_unref(&s->base);
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
 
     LOG("ExportSurfaceHandle: surface=0x%x %dx%d stride=%dx%d export_fd=%d decoded=%d placeholder=%d 10bit=%d",
-        id, s->width, s->height, hs, vs, export_fd, decoded, is_placeholder, is_10bit);
+        id, width, height, hs, vs, export_fd, decoded, is_placeholder, is_10bit);
 
     VADRMPRIMESurfaceDescriptor *desc = descriptor;
     memset(desc, 0, sizeof(*desc));
-    desc->width       = (uint32_t)s->width;
-    desc->height      = (uint32_t)s->height;
+    desc->width       = (uint32_t)width;
+    desc->height      = (uint32_t)height;
     desc->num_objects = 1;
     desc->objects[0].fd                  = export_fd;
     desc->objects[0].drm_format_modifier = 0; /* DRM_FORMAT_MOD_LINEAR */
@@ -1375,6 +1455,7 @@ static VAStatus rk_ExportSurfaceHandle(VADriverContextP ctx,
         desc->layers[0].object_index[1] = 0;
         desc->layers[0].offset[1]       = (uint32_t)(hs * vs);
         desc->layers[0].pitch[1]        = (uint32_t)hs;
+        rk_object_unref(&s->base);
         return VA_STATUS_SUCCESS;
     }
     if (is_10bit && composed) {
@@ -1389,6 +1470,7 @@ static VAStatus rk_ExportSurfaceHandle(VADriverContextP ctx,
         desc->layers[0].object_index[1] = 0;
         desc->layers[0].offset[1]       = (uint32_t)(hs * vs * 2);
         desc->layers[0].pitch[1]        = (uint32_t)(hs * 2);
+        rk_object_unref(&s->base);
         return VA_STATUS_SUCCESS;
     }
 
@@ -1440,6 +1522,7 @@ static VAStatus rk_ExportSurfaceHandle(VADriverContextP ctx,
         desc->layers[1].offset[0]            = (uint32_t)(hs * vs);
         desc->layers[1].pitch[0]             = (uint32_t)hs;
     }
+    rk_object_unref(&s->base);
     return VA_STATUS_SUCCESS;
 }
 
@@ -1461,50 +1544,105 @@ static VAStatus rk_CreateImage(VADriverContextP ctx,
                                 int width, int height,
                                 VAImage *image) {
     RKDriver *d = drv_from_ctx(ctx);
-    (void)format;
+    if (!format || !image || width <= 0 || height <= 0 ||
+        width > USHRT_MAX || height > USHRT_MAX)
+        return VA_STATUS_ERROR_INVALID_PARAMETER;
+
+    unsigned int bytes_per_sample;
+    if (format->fourcc == VA_FOURCC_NV12)
+        bytes_per_sample = 1;
+    else if (format->fourcc == VA_FOURCC_P010)
+        bytes_per_sample = 2;
+    else
+        return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
+
+    size_t aligned_width = ((size_t)(unsigned int)width + 15u) & ~15u;
+    if (aligned_width > UINT_MAX / bytes_per_sample)
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    unsigned int pitch = (unsigned int)aligned_width * bytes_per_sample;
+    size_t allocation_size;
+    if (!rk_nv12_layout_size(pitch, (size_t)(unsigned int)height,
+                             &allocation_size) || allocation_size > UINT_MAX)
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
 
     VABufferID buf_id;
-    unsigned int stride = (unsigned int)((width + 15) & ~15);
-    unsigned int size   = stride * (unsigned int)height * 3 / 2;
+    unsigned int size = (unsigned int)allocation_size;
     VAStatus st = rk_CreateBuffer(ctx, 0, VAImageBufferType, size, 1,
                                   NULL, &buf_id);
     if (st != VA_STATUS_SUCCESS) return st;
 
+    RKBuffer *buffer = buffer_acquire(d, buf_id);
+    if (!buffer) {
+        rk_DestroyBuffer(ctx, buf_id);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
+    RKImage *image_object = calloc(1, sizeof(*image_object));
+    if (!image_object) {
+        rk_object_unref(&buffer->base);
+        rk_DestroyBuffer(ctx, buf_id);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
+    rk_object_init(&image_object->base, image_destroy);
+    image_object->buffer_id = buf_id;
+    image_object->buffer = buffer;
+    image_object->fourcc = format->fourcc;
+    image_object->width = (unsigned int)width;
+    image_object->height = (unsigned int)height;
+    image_object->pitch = pitch;
+
+    uint32_t image_id;
+    pthread_mutex_lock(&d->object_lock);
+    bool inserted = rk_object_heap_insert(&d->image_heap,
+                                          &image_object->base, &image_id);
+    pthread_mutex_unlock(&d->object_lock);
+    if (!inserted) {
+        rk_object_unref(&image_object->base);
+        rk_DestroyBuffer(ctx, buf_id);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
+
     memset(image, 0, sizeof(*image));
-    image->image_id    = buf_id; /* reuse buf_id as image_id for simplicity */
+    image->image_id    = (VAImageID)image_id;
     image->buf         = buf_id;
     image->format      = *format;
     image->width       = (unsigned short)width;
     image->height      = (unsigned short)height;
     image->num_planes  = 2;
-    image->pitches[0]  = stride;
-    image->pitches[1]  = stride;
+    image->pitches[0]  = pitch;
+    image->pitches[1]  = pitch;
     image->offsets[0]  = 0;
-    image->offsets[1]  = stride * (unsigned int)height;
+    image->offsets[1]  = pitch * (unsigned int)height;
     image->data_size   = size;
-    (void)d;
     return VA_STATUS_SUCCESS;
 }
 
 static VAStatus rk_DeriveImage(VADriverContextP ctx,
                                 VASurfaceID sid, VAImage *image) {
     RKDriver  *d = drv_from_ctx(ctx);
-    RKSurface *s = surface_by_id(d, sid);
+    RKSurface *s = surface_acquire(d, sid);
     if (!s) return VA_STATUS_ERROR_INVALID_SURFACE;
 
     /* priv_buf is not CPU-mappable as a shared VAImage; force callers to use
      * vaGetImage instead (copies pixels, but always works). */
     (void)image;
+    rk_object_unref(&s->base);
     return VA_STATUS_ERROR_OPERATION_FAILED;
-
-    VAImageFormat fmt;
-    memset(&fmt, 0, sizeof(fmt));
-    fmt.fourcc = VA_FOURCC_NV12;
-    return rk_CreateImage(ctx, &fmt, s->width, s->height, image);
 }
 
 static VAStatus rk_DestroyImage(VADriverContextP ctx, VAImageID id) {
-    return rk_DestroyBuffer(ctx, (VABufferID)id);
+    RKDriver *d = drv_from_ctx(ctx);
+    pthread_mutex_lock(&d->object_lock);
+    RKImage *image = (RKImage *)rk_object_heap_remove(&d->image_heap,
+                                                      (uint32_t)id);
+    RKBuffer *buffer = image ? (RKBuffer *)rk_object_heap_remove(
+        &d->buffer_heap, (uint32_t)image->buffer_id) : NULL;
+    pthread_mutex_unlock(&d->object_lock);
+    if (!image)
+        return VA_STATUS_ERROR_INVALID_IMAGE;
+    if (buffer)
+        rk_object_unref(&buffer->base);
+    rk_object_unref(&image->base);
+    return VA_STATUS_SUCCESS;
 }
 
 /* ── stub implementations ────────────────────────────────────── */
@@ -1523,32 +1661,65 @@ static VAStatus rk_GetImage(VADriverContextP ctx, VASurfaceID surface_id,
 {
     (void)x; (void)y; (void)w; (void)h;
     RKDriver  *d  = drv_from_ctx(ctx);
-    RKSurface *s  = surface_by_id(d, surface_id);
-    RKBuffer  *ib = buffer_acquire(d, (VABufferID)image_id);
-    if (!s || !ib || !s->priv_buf || !ib->data) {
-        if (ib)
-            rk_object_unref(&ib->base);
+    RKSurface *s = surface_acquire(d, surface_id);
+    RKImage *image = image_acquire(d, image_id);
+    RKBuffer *ib = image ? image->buffer : NULL;
+    if (!s) {
+        if (image)
+            rk_object_unref(&image->base);
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
+    if (!image || !ib || !ib->data) {
+        rk_object_unref(&s->base);
+        if (image)
+            rk_object_unref(&image->base);
+        return VA_STATUS_ERROR_INVALID_IMAGE;
+    }
 
+    pthread_mutex_lock(&s->lock);
+    if (!s->priv_buf || image->width < (unsigned int)s->width ||
+        image->height < (unsigned int)s->height) {
+        pthread_mutex_unlock(&s->lock);
+        rk_object_unref(&image->base);
+        rk_object_unref(&s->base);
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
     int hs  = s->hstride ? s->hstride : s->width;
     int vs  = s->vstride ? s->vstride : s->height;
     bool i10 = MPP_FRAME_FMT_IS_YUV_10BIT(s->fmt);
     int bpp  = i10 ? 2 : 1;
-    /* image stride matches rk_CreateImage: (width+15)&~15 */
-    int img_hs = (int)(((unsigned int)s->width + 15u) & ~15u) * bpp;
+    uint32_t expected_fourcc = i10 ? VA_FOURCC_P010 : VA_FOURCC_NV12;
+    size_t source_size;
+    size_t destination_size;
+    size_t source_pitch = (size_t)hs * (size_t)bpp;
+    size_t copy_bytes = (((size_t)(unsigned int)s->width + 15u) & ~15u) *
+                        (size_t)bpp;
+    if (image->fourcc != expected_fourcc || source_pitch < copy_bytes ||
+        !rk_nv12_layout_size(source_pitch, (size_t)vs, &source_size) ||
+        !rk_nv12_layout_size(image->pitch, image->height,
+                             &destination_size) ||
+        source_size > s->priv_size || destination_size > ib->capacity) {
+        pthread_mutex_unlock(&s->lock);
+        rk_object_unref(&image->base);
+        rk_object_unref(&s->base);
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
 
     const uint8_t *sp = (const uint8_t *)mpp_buffer_get_ptr(s->priv_buf);
     uint8_t       *dp = (uint8_t *)ib->data;
     /* Y plane */
     for (int r = 0; r < s->height; r++)
-        memcpy(dp + r * img_hs, sp + r * hs * bpp, (size_t)img_hs);
-    /* UV plane: src at hs*vs, dst at img_hs*height */
-    const uint8_t *su = sp + (size_t)hs * vs * bpp;
-    uint8_t       *du = dp + (size_t)img_hs * s->height;
+        memcpy(dp + (size_t)r * image->pitch,
+               sp + (size_t)r * source_pitch, copy_bytes);
+    /* UV plane: src at source_pitch*vs, dst at pitch*image height. */
+    const uint8_t *su = sp + source_pitch * (size_t)vs;
+    uint8_t *du = dp + (size_t)image->pitch * image->height;
     for (int r = 0; r < s->height / 2; r++)
-        memcpy(du + r * img_hs, su + r * hs * bpp, (size_t)img_hs);
-    rk_object_unref(&ib->base);
+        memcpy(du + (size_t)r * image->pitch,
+               su + (size_t)r * source_pitch, copy_bytes);
+    pthread_mutex_unlock(&s->lock);
+    rk_object_unref(&image->base);
+    rk_object_unref(&s->base);
     return VA_STATUS_SUCCESS;
 }
 
@@ -1789,7 +1960,31 @@ VAStatus __vaDriverInit_1_20(VADriverContextP ctx)  /* NOLINT */
         free(d);
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
+    if (!rk_object_heap_init(&d->context_heap, RK_OBJECT_CONTEXT)) {
+        rk_object_heap_finish(&d->config_heap);
+        pthread_mutex_destroy(&d->object_lock);
+        free(d);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
+    if (!rk_object_heap_init(&d->surface_heap, RK_OBJECT_SURFACE)) {
+        rk_object_heap_finish(&d->context_heap);
+        rk_object_heap_finish(&d->config_heap);
+        pthread_mutex_destroy(&d->object_lock);
+        free(d);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
     if (!rk_object_heap_init(&d->buffer_heap, RK_OBJECT_BUFFER)) {
+        rk_object_heap_finish(&d->surface_heap);
+        rk_object_heap_finish(&d->context_heap);
+        rk_object_heap_finish(&d->config_heap);
+        pthread_mutex_destroy(&d->object_lock);
+        free(d);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
+    if (!rk_object_heap_init(&d->image_heap, RK_OBJECT_IMAGE)) {
+        rk_object_heap_finish(&d->buffer_heap);
+        rk_object_heap_finish(&d->surface_heap);
+        rk_object_heap_finish(&d->context_heap);
         rk_object_heap_finish(&d->config_heap);
         pthread_mutex_destroy(&d->object_lock);
         free(d);
