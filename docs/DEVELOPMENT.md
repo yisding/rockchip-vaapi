@@ -34,6 +34,8 @@ rockchip-vaapi/
 │   ├── driver_internal.h      # Shared private object model and heap access
 │   ├── buffer.c               # VA buffer and image object lifecycle
 │   ├── buffer.h
+│   ├── context.c              # Context lifecycle and MPP decode workers
+│   ├── context.h
 │   ├── export.c               # DRM PRIME 2 descriptor construction
 │   ├── export.h
 │   ├── log.c                  # Thread-safe driver logging
@@ -106,7 +108,10 @@ workers cannot interleave log records. DRM PRIME 2 descriptor construction is
 isolated in `export.c`; it synchronizes pending surfaces through the narrow
 interface in `surface.h` before duplicating and describing the active DMA-BUF.
 Surface allocation, teardown, status/fence waits, and DMA-BUF-synchronized
-image readback now live together in `surface.c`.
+image readback now live together in `surface.c`. Context creation/destruction,
+picture submission, external-pool management, frame routing, and the dedicated
+MPP worker are isolated in `context.c`; the main translation unit now owns
+capability/configuration policy, stubs, initialization, and vtable wiring.
 
 ---
 
