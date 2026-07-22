@@ -21,5 +21,6 @@ int h264_write_sps(uint8_t *buf, size_t buf_size,
  * the PPS before every frame so the "default" always matches the frame. */
 int h264_write_pps(uint8_t *buf, size_t buf_size,
                    const VAPictureParameterBufferH264 *pp,
+                   const VAIQMatrixBufferH264 *iq,
                    int num_ref_idx_l0_default_minus1,
                    int num_ref_idx_l1_default_minus1);

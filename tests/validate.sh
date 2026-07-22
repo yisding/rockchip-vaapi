@@ -1,107 +1,226 @@
 #!/bin/sh
-# validate.sh — software-vs-VAAPI bit-exactness gate for rockchip-vaapi.
+# Software-vs-VAAPI bit-exactness gate for rockchip-vaapi.
 #
-# H.264 and VP9 inverse transforms are spec-exact, so a correct hardware
-# decode must produce byte-identical planes to software decode. Any
-# difference is a driver bug, not "hardware tolerance".
-#
-# Requirements: ffmpeg with vaapi + libx264 + libvpx, Rockchip MPP hardware
-# (/dev/mpp_service), and a DRM render node.
-#
-# Environment overrides:
-#   FFMPEG       ffmpeg binary            (default: ffmpeg)
-#   DRIVER_DIR   dir with the built .so   (default: repo root)
-#   RENDER_NODE  DRM node for vaInitialize (default: /dev/dri/renderD128)
-#   VP9_RUNS     repeat count for the VP9 determinism check (default: 5)
-#
-# Exit status: 0 = all green, 1 = any failure.
+# H.264 and VP9 inverse transforms are spec-exact. A decoded-frame mismatch is
+# therefore a correctness failure, not hardware tolerance.
 
 set -u
 
 FFMPEG=${FFMPEG:-ffmpeg}
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-DRIVER_DIR=${DRIVER_DIR:-$SCRIPT_DIR/..}
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)
+DRIVER_DIR=${DRIVER_DIR:-$REPO_ROOT}
 RENDER_NODE=${RENDER_NODE:-/dev/dri/renderD128}
+VECTOR_DIR=${VECTOR_DIR:-$SCRIPT_DIR/vectors}
+MANIFEST=${MANIFEST:-$SCRIPT_DIR/conformance-vectors.tsv}
+TEST_SET=${TEST_SET:-all}
+RISKY_VECTORS=${RISKY_VECTORS:-skip}
+ALLOW_QUARANTINE=${ALLOW_QUARANTINE:-0}
 VP9_RUNS=${VP9_RUNS:-5}
+KEEP_WORK=${KEEP_WORK:-0}
+
+case $TEST_SET in
+    all|conformance|synthetic) ;;
+    *) echo "error: TEST_SET must be all, conformance, or synthetic" >&2; exit 2 ;;
+esac
+case $RISKY_VECTORS in
+    skip|run) ;;
+    *) echo "error: RISKY_VECTORS must be skip or run" >&2; exit 2 ;;
+esac
 
 export LIBVA_DRIVER_NAME=rockchip
-export LIBVA_DRIVERS_PATH=$DRIVER_DIR
+export LIBVA_DRIVERS_PATH="$DRIVER_DIR"
 
-WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+WORK=$(mktemp -d "$REPO_ROOT/.test-work.validate.XXXXXX") || exit 1
+# shellcheck disable=SC2329 # Invoked by the EXIT trap.
+cleanup()
+{
+    if [ "$KEEP_WORK" = 1 ]; then
+        echo "work files retained in $WORK"
+    else
+        rm -rf "$WORK"
+    fi
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
 FAIL=0
+BLOCKED=0
+INDEX=0
 
-gen() { # gen <out> <codec-args...>
-    out=$1; shift
-    "$FFMPEG" -y -v error -f lavfi \
+checksum()
+{
+    sha256sum "$1" | awk '{print $1}'
+}
+
+sw_md5()
+{
+    "$FFMPEG" -nostdin -y -v error -i "$1" -an -vf format=yuv420p \
+        -f framemd5 "$2" >"$2.log" 2>&1
+}
+
+hw_md5()
+{
+    if [ "$3" = vaapi ]; then
+        "$FFMPEG" -nostdin -y -v error -hwaccel vaapi \
+            -hwaccel_output_format vaapi -vaapi_device "$RENDER_NODE" \
+            -i "$1" -an \
+            -vf 'hwdownload,format=nv12,format=yuv420p' \
+            -f framemd5 "$2" >"$2.log" 2>&1
+    else
+        "$FFMPEG" -nostdin -y -v error -hwaccel vaapi \
+            -vaapi_device "$RENDER_NODE" -i "$1" -an \
+            -vf format=yuv420p -f framemd5 "$2" \
+            >"$2.log" 2>&1
+    fi
+}
+
+compare_clip()
+{
+    label=$1
+    input=$2
+    decode_path=$3
+    INDEX=$((INDEX + 1))
+    sw=$WORK/$INDEX.sw.md5
+    hw=$WORK/$INDEX.hw.md5
+    unexpected_hw=$WORK/$INDEX.unexpected-hw.md5
+
+    if ! sw_md5 "$input" "$sw"; then
+        echo "FAIL  $label (software reference decode errored)"
+        tail -20 "$sw.log"
+        FAIL=1
+    elif [ "$decode_path" = software-fallback ] && \
+         hw_md5 "$input" "$unexpected_hw" vaapi; then
+        echo "FAIL  $label (VA-API unexpectedly accepted a fallback-only profile)"
+        FAIL=1
+    elif [ "$decode_path" = software-fallback ] && \
+         ! grep -q 'Failed setup for format vaapi' "$unexpected_hw.log"; then
+        echo "FAIL  $label (forced VA-API failed for an unexpected reason)"
+        tail -20 "$unexpected_hw.log"
+        FAIL=1
+    elif ! hw_md5 "$input" "$hw" "$decode_path"; then
+        echo "FAIL  $label ($decode_path decode errored)"
+        tail -20 "$hw.log"
+        FAIL=1
+    elif cmp -s "$sw" "$hw"; then
+        echo "ok    $label bit-exact ($decode_path)"
+    else
+        frames=$(grep -vc '^#' "$sw")
+        differing=$(diff "$sw" "$hw" | grep -c '^<' || true)
+        echo "FAIL  $label ($differing of $frames frames differ)"
+        FAIL=1
+    fi
+}
+
+run_conformance()
+{
+    echo "== Pinned conformance vectors =="
+    tab=$(printf '\t')
+    while IFS="$tab" read -r codec output download url download_sha member payload_sha decode_path risk <&3; do
+        case $codec in
+            ''|'#'*) continue ;;
+        esac
+        : "$download" "$url" "$download_sha" "$member"
+        input=$VECTOR_DIR/$output
+        if [ ! -f "$input" ]; then
+            echo "FAIL  $codec/$output (missing; run 'make fetch-vectors')"
+            FAIL=1
+            continue
+        fi
+        actual=$(checksum "$input")
+        if [ "$actual" != "$payload_sha" ]; then
+            echo "FAIL  $codec/$output (payload checksum mismatch)"
+            FAIL=1
+            continue
+        fi
+        if [ "$risk" != safe ] && [ "$RISKY_VECTORS" != run ]; then
+            echo "BLOCK $codec/$output ($risk; set RISKY_VECTORS=run only on a fixed kernel)"
+            BLOCKED=1
+            continue
+        fi
+        case $decode_path in
+            vaapi|software-fallback) ;;
+            *) echo "FAIL  $codec/$output (invalid decode path $decode_path)"; FAIL=1; continue ;;
+        esac
+        compare_clip "$codec/$output" "$input" "$decode_path"
+    done 3<"$MANIFEST"
+}
+
+generate()
+{
+    output=$1
+    shift
+    "$FFMPEG" -nostdin -y -v error -f lavfi \
         -i testsrc2=size=1280x720:rate=30:duration=4 \
-        "$@" -pix_fmt yuv420p "$WORK/$out" 2>/dev/null
+        "$@" -pix_fmt yuv420p "$WORK/$output" >"$WORK/$output.log" 2>&1
 }
 
-sw_md5() { # sw_md5 <in> <out>
-    "$FFMPEG" -y -v error -i "$WORK/$1" -an -vf format=yuv420p \
-        -f framemd5 "$WORK/$2" 2>/dev/null
-}
+run_synthetic()
+{
+    echo "== Supplemental H.264 reference/B-frame matrix =="
+    for cfg in ref=1:bframes=2 ref=2:bframes=0 ref=2:bframes=3 \
+               ref=4:bframes=3 ref=8:bframes=0 ref=8:bframes=3; do
+        clip="h264_$(printf %s "$cfg" | tr '=:' '__').mp4"
+        if generate "$clip" -c:v libx264 -profile:v high -x264-params "$cfg"; then
+            compare_clip "h264 $cfg" "$WORK/$clip" vaapi
+        else
+            echo "FAIL  h264 $cfg (test clip generation errored)"
+            FAIL=1
+        fi
+    done
 
-hw_md5() { # hw_md5 <in> <out>  (returns ffmpeg status)
-    "$FFMPEG" -y -v error -hwaccel vaapi -vaapi_device "$RENDER_NODE" \
-        -i "$WORK/$1" -an -vf format=yuv420p \
-        -f framemd5 "$WORK/$2" 2>/dev/null
-}
-
-check() { # check <label> <clip>
-    sw_md5 "$2" "$1.sw"
-    if ! hw_md5 "$2" "$1.hw"; then
-        echo "FAIL  $1 (hardware decode errored)"
-        FAIL=1
-    elif cmp -s "$WORK/$1.sw" "$WORK/$1.hw"; then
-        echo "ok    $1 bit-exact"
+    echo "== Supplemental 4K H.264 =="
+    if "$FFMPEG" -nostdin -y -v error -f lavfi \
+        -i testsrc2=size=3840x2160:rate=30:duration=4 \
+        -c:v libx264 -x264-params ref=3:bframes=2 -pix_fmt yuv420p \
+        "$WORK/h264_4k.mp4" >"$WORK/h264_4k.mp4.log" 2>&1; then
+        compare_clip "h264 4K ref=3:bframes=2" "$WORK/h264_4k.mp4" vaapi
     else
-        n=$(grep -vc '^#' "$WORK/$1.sw")
-        d=$("$FFMPEG" -v error 2>/dev/null; diff "$WORK/$1.sw" "$WORK/$1.hw" | grep -c '^<')
-        echo "FAIL  $1 ($d of $n frames differ)"
+        echo "FAIL  h264 4K (test clip generation errored)"
+        FAIL=1
+    fi
+
+    echo "== Supplemental VP9 determinism (x$VP9_RUNS) =="
+    if generate vp9.webm -c:v libvpx-vp9 -b:v 1M; then
+        i=1
+        while [ "$i" -le "$VP9_RUNS" ]; do
+            compare_clip "vp9 run $i" "$WORK/vp9.webm" vaapi
+            i=$((i + 1))
+        done
+    else
+        echo "FAIL  vp9 (test clip generation errored)"
+        FAIL=1
+    fi
+
+    echo "== Unadvertised-codec software fallback =="
+    if generate vp8.webm -c:v libvpx -b:v 1M && \
+       "$FFMPEG" -nostdin -y -v error -hwaccel vaapi -vaapi_device "$RENDER_NODE" \
+           -i "$WORK/vp8.webm" -an -f null - >"$WORK/vp8-fallback.log" 2>&1; then
+        echo "ok    vp8 software fallback decodes"
+    else
+        echo "FAIL  vp8 software fallback"
         FAIL=1
     fi
 }
 
-echo "== H.264 reference/B-frame matrix =="
-for cfg in ref=1:bframes=2 ref=2:bframes=0 ref=2:bframes=3 \
-           ref=4:bframes=3 ref=8:bframes=0 ref=8:bframes=3; do
-    clip="h264_$(printf %s "$cfg" | tr '=:' '__').mp4"
-    gen "$clip" -c:v libx264 -profile:v high -x264-params "$cfg"
-    check "h264 $cfg" "$clip"
-done
+case $TEST_SET in
+    all)         run_conformance; run_synthetic ;;
+    conformance) run_conformance ;;
+    synthetic)   run_synthetic ;;
+esac
 
-echo "== 4K H.264 =="
-"$FFMPEG" -y -v error -f lavfi \
-    -i testsrc2=size=3840x2160:rate=30:duration=4 \
-    -c:v libx264 -x264-params ref=3:bframes=2 -pix_fmt yuv420p \
-    "$WORK/h264_4k.mp4" 2>/dev/null
-check "h264 4K ref=3:bframes=2" h264_4k.mp4
-
-echo "== VP9 determinism (x$VP9_RUNS) =="
-gen vp9.webm -c:v libvpx-vp9 -b:v 1M
-sw_md5 vp9.webm vp9.sw
-i=1
-while [ "$i" -le "$VP9_RUNS" ]; do
-    if ! hw_md5 vp9.webm "vp9.hw$i" || ! cmp -s "$WORK/vp9.sw" "$WORK/vp9.hw$i"; then
-        echo "FAIL  vp9 run $i"
-        FAIL=1
-    else
-        echo "ok    vp9 run $i bit-exact"
-    fi
-    i=$((i + 1))
-done
-
-echo "== Unadvertised codecs fall back to software =="
-gen vp8.webm -c:v libvpx -b:v 1M
-if "$FFMPEG" -y -v error -hwaccel vaapi -vaapi_device "$RENDER_NODE" \
-     -i "$WORK/vp8.webm" -an -f null - 2>/dev/null; then
-    echo "ok    vp8 (software fallback decodes)"
-else
-    echo "FAIL  vp8 fallback"
+if [ "$BLOCKED" -ne 0 ] && [ "$ALLOW_QUARANTINE" != 1 ]; then
+    echo "BLOCKED REQUIRED VECTORS"
     FAIL=1
 fi
 
-[ "$FAIL" -eq 0 ] && echo "ALL GREEN" || echo "FAILURES PRESENT"
+if [ "$FAIL" -eq 0 ]; then
+    if [ "$BLOCKED" -ne 0 ]; then
+        echo "SAFE SUBSET GREEN; FULL GATE STILL BLOCKED"
+    else
+        echo "ALL GREEN"
+    fi
+else
+    echo "FAILURES PRESENT"
+fi
 exit "$FAIL"

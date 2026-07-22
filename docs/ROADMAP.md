@@ -153,23 +153,35 @@ relative, not calendar-exact.
 
 ### Phase 0 — Baseline & harness  ✅ mostly done (~1 wk remaining)
 
-Fork, build against the ROCK 5B stack, `framemd5` bit-exactness gate, and the
+Fork, build against the ROCK 5B stack, the original `framemd5` gate, and the
 three correctness fixes (PPS ref-counts, VP9 backpressure, VP9 PTS routing) are
-**done** (`ysp/cleanup`). Remaining to close the phase:
+**done** (`ysp/cleanup`). The remaining Phase 0 implementation also landed:
 
-- Replace synthetic `testsrc2` clips with **real conformance vectors** (ITU-T
-  H.264/H.265 reference streams, libvpx VP9 test vectors) in the gate.
+- The gate uses checksum-pinned **real conformance vectors** (ITU-T H.264 and
+  official libvpx VP9), forces declared VA-API cases through hardware-frame
+  output, and retains `testsrc2` only as a supplemental matrix.
+- Keep profile advertising tied to that gate: the SVA Constrained Baseline
+  vector is software-exact after header reconstruction but corrupt in MPP, so
+  withdraw `VAProfileH264ConstrainedBaseline` and require software fallback
+  until the hardware path is corrected.
 - **Track 14 crash hardening:** the libvpx
   `vp90-2-10-show-existing-frame2` vector exposed an independent driver
   overflow: MPP returned a 768-byte VP9 stride for a 352-pixel frame, while
   the permanent VA surface buffer was sized for a 352-byte stride. The copy
   ran past that dmabuf, and the export descriptor also claimed the larger
-  size; FFmpeg subsequently segfaulted. Size placeholder surfaces for MPP's
-  codec alignment, bounds-check every copy, and turn unexpected layouts into
+  size; FFmpeg subsequently segfaulted. Placeholder surfaces now reserve MPP's
+  codec alignment, every copy is bounds-checked, and unexpected layouts become
   `VA_STATUS_ERROR_DECODING_ERROR`.
-- Add an **ASan/UBSan build** and run the gate under it.
-- **CI skeleton:** GitHub Actions cross-compiles arm64 + runs clang-tidy on
-  every push; document the on-board hardware gate as a self-hosted/manual job.
+- The complete driver has an **ASan/UBSan build**; the safe conformance subset
+  is green with that instrumented driver loaded into FFmpeg.
+- The **CI skeleton** runs AArch64 cross-builds, sanitizer unit tests,
+  ShellCheck, and clang-tidy on every push. The on-board hardware gate is a
+  guarded manual self-hosted job.
+
+Phase 0 remains open until the fixed VP9 kernel is booted, MPP's
+`show_existing_frame` reference-accounting fix is installed, and the
+unquarantined conformance + sanitizer gate passes. A skipped required vector
+is deliberately reported as blocked, never green.
 
 **Gate:** conformance-vector decode bit-exact for the shipping profiles; gate
 green under ASan; CI builds and lints on push.

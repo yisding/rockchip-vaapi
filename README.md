@@ -10,10 +10,11 @@ applications such as Firefox.
 
 ## Fork status (yisding/rockchip-vaapi)
 
-This fork continues the upstream v1.0.11 work. Changes so far, each
-validated on a ROCK 5B (RK3588, vendor MPP stack on a 6.18 kernel) with a
-software-vs-VAAPI `framemd5` bit-exactness gate (`tests/validate.sh`,
-`make check`):
+This fork continues the upstream v1.0.11 work. Changes so far are tested on a
+ROCK 5B (RK3588, vendor MPP stack on a 6.18 kernel) with a software-vs-VAAPI
+`framemd5` bit-exactness harness (`tests/validate.sh`). The full conformance
+gate is currently blocked by the quarantined VP9 `show_existing_frame`
+kernel/MPP path; see [docs/TESTING.md](docs/TESTING.md):
 
 - **Fixed multi-reference / B-frame H.264 corruption.** VA-API never passes
   the original PPS, and the reconstructed PPS hardcoded
@@ -27,10 +28,17 @@ software-vs-VAAPI `framemd5` bit-exactness gate (`tests/validate.sh`,
   when MPP's input queue filled, `decode_put_packet` failures were treated
   as fatal and ffmpeg silently dropped frames (measured: 38 of 120 packets
   rejected on some runs, 5/10 runs corrupt). Puts now drain output frames
-  and retry, bounded. VP9 is 10/10 bit-exact.
+  and retry, bounded. The synthetic VP9 regression is 10/10 bit-exact.
 - **VP9 output routing by FIFO instead of PTS**, since a
   `show_existing_frame` repeat of a hidden altref can surface with the
   altref packet's PTS and desync every later frame.
+- **Hardened decoded-surface copies.** MPP can return a much wider VP9 stride
+  than the coded width. Surface allocation now reserves MPP's aligned layout,
+  every NV12 copy is bounds-checked, and an unexpected layout becomes a VA
+  decoding error instead of a DMA-BUF overflow and userspace segfault.
+- **Pinned real conformance vectors and CI plumbing.** The gate now uses ITU-T
+  H.264 and official libvpx VP9 vectors with payload checksums, and normal plus
+  sanitized AArch64 builds are cross-compiled in CI.
 - **Honest capability advertising.** HEVC (no header reconstruction —
   verified non-functional), VP8 (verified segfault), and the 10-bit
   profiles (MPP emits compact NV15, driver exported it as P010 — layout
@@ -51,8 +59,9 @@ library, which in turn uses the hardware VPU.
 
 Key features:
 
-- H.264 and VP9 hardware decode, bit-exact against software decode
-- Zero-copy DRM PRIME 2 surface export (NV12, DMABUF)
+- H.264 and VP9 hardware decode with byte-exact regression checking
+- DRM PRIME 2 surface export (NV12 DMA-BUF; the current decode path copies
+  from MPP into a permanent per-surface export buffer)
 - Compatible with Firefox 128+ (VA-API PDM path, RDD process)
 - Implements the full VA-API 1.20 vtable (`__vaDriverInit_1_20`)
 
@@ -60,16 +69,17 @@ Key features:
 
 | SoC | Board (tested) |
 |-----|---------------|
-| RK3588 | Orange Pi 5 Plus |
-| RK3588S | Orange Pi 5 / Rock 5B (untested, should work) |
+| RK3588 | Orange Pi 5 Plus; ROCK 5B (tested) |
+| RK3588S | Orange Pi 5 (untested) |
 | RK3576 | Likely compatible (untested) |
 
 ## Supported codecs
 
 | Codec | Profile | Validated | Notes |
 |-------|---------|-----------|-------|
-| H.264 | Constrained Baseline, Main, High | bit-exact up to 4K, refs 1–8, B-frames | |
-| VP9 | Profile 0 | bit-exact, deterministic (×10 runs) | |
+| H.264 | Main, High | safe conformance vectors bit-exact; full gate pending | scaling-list reconstruction included |
+| H.264 | Constrained Baseline | not offered | pinned SVA vector is corrupt in MPP; software fallback |
+| VP9 | Profile 0 | safe vectors under validation; full gate blocked | `show_existing_frame` quarantined until kernel + MPP fixes deploy |
 | HEVC | — | not offered | needs VPS/SPS/PPS reconstruction |
 | VP8 | — | not offered | crashes in the generic path; needs debugging |
 | AV1 | — | not offered | VA-API hands headerless tile data; MPP needs full OBUs |
@@ -144,9 +154,9 @@ chmod +x /usr/local/bin/firefox-hw
 
 ## Development
 
-See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for architecture, VA-API
-internals, MPP integration details, and how to add support for new codecs, and
-[docs/ROADMAP.md](docs/ROADMAP.md) for the production target design and the
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for architecture and VA-API/MPP
+internals, [docs/TESTING.md](docs/TESTING.md) for the reproducible test gates,
+and [docs/ROADMAP.md](docs/ROADMAP.md) for the production target design and
 phased plan (decode core → HEVC + 10-bit → hardening → encode).
 
 ## AI-assisted development

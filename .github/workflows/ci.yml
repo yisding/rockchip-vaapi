@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_hardware:
+        description: Run the RK3588 hardware job
+        required: false
+        type: boolean
+        default: false
+      run_risky_vectors:
+        description: Confirm the VP9 kernel and MPP show_existing fixes are deployed
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MPP_COMMIT: 1375813cbbae5ad6861b166475dd8fb672183220
+
+jobs:
+  lint-and-unit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: HermanChen/mpp
+          ref: ${{ env.MPP_COMMIT }}
+          path: third_party/mpp
+          persist-credentials: false
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y clang-tidy libva-dev shellcheck
+      - name: Prepare MPP headers
+        run: |
+          mkdir -p build/mpp-headers
+          ln -s "$GITHUB_WORKSPACE/third_party/mpp/inc" build/mpp-headers/rockchip
+      - name: Unit tests and sanitizers
+        run: make test test-sanitize
+      - name: Static analysis
+        run: make lint MPP_CFLAGS="-I$GITHUB_WORKSPACE/build/mpp-headers"
+      - name: Shell analysis
+        run: shellcheck tests/fetch-vectors.sh tests/validate.sh
+
+  arm64-cross-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: HermanChen/mpp
+          ref: ${{ env.MPP_COMMIT }}
+          path: third_party/mpp
+          persist-credentials: false
+      - name: Install cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            libva-dev ninja-build
+      - name: Cross-build pinned Rockchip MPP
+        run: |
+          cmake -S third_party/mpp -B build/mpp -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_SYSTEM_NAME=Linux \
+            -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+            -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
+            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+            -DBUILD_TEST=OFF
+          cmake --build build/mpp --target rockchip_mpp --parallel 2
+          mkdir -p build/mpp-headers
+          ln -s "$GITHUB_WORKSPACE/third_party/mpp/inc" build/mpp-headers/rockchip
+      - name: Cross-build driver
+        run: |
+          make -j2 \
+            CC=aarch64-linux-gnu-gcc \
+            VA_LIBS= \
+            MPP_CFLAGS="-I$GITHUB_WORKSPACE/build/mpp-headers" \
+            MPP_LIBS="-L$GITHUB_WORKSPACE/build/mpp/mpp -lrockchip_mpp"
+          aarch64-linux-gnu-readelf -h rockchip_drv_video.so | \
+            grep -q 'Machine:.*AArch64'
+      - name: Cross-build sanitized driver
+        run: |
+          make -j2 tests/.san-driver/rockchip_drv_video.so \
+            CC=aarch64-linux-gnu-gcc \
+            VA_LIBS= \
+            MPP_CFLAGS="-I$GITHUB_WORKSPACE/build/mpp-headers" \
+            MPP_LIBS="-L$GITHUB_WORKSPACE/build/mpp/mpp -lrockchip_mpp"
+          aarch64-linux-gnu-readelf \
+            -h tests/.san-driver/rockchip_drv_video.so | \
+            grep -q 'Machine:.*AArch64'
+
+  rk3588-hardware:
+    if: github.event_name == 'workflow_dispatch' && inputs.run_hardware
+    runs-on: [self-hosted, linux, ARM64, rk3588]
+    timeout-minutes: 30
+    steps:
+      # v4 supports older self-hosted runner releases than the Node 24 action.
+      - uses: actions/checkout@v4
+      - name: Verify board and boot
+        run: |
+          test "$(uname -m)" = aarch64
+          test -e /dev/mpp_service
+          test -e /dev/dri/renderD128
+          uname -a
+      - name: Build and fetch pinned vectors
+        run: |
+          make clean all test
+          make fetch-vectors
+      - name: Full conformance gate
+        env:
+          FFMPEG: /usr/bin/ffmpeg
+          RISKY_VECTORS: ${{ inputs.run_risky_vectors && 'run' || 'skip' }}
+        run: make check-conformance
+      - name: Full sanitizer gate
+        env:
+          FFMPEG: /usr/bin/ffmpeg
+          RISKY_VECTORS: ${{ inputs.run_risky_vectors && 'run' || 'skip' }}
+        run: make check-sanitize

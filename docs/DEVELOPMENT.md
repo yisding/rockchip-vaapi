@@ -33,10 +33,15 @@ rockchip-vaapi/
 │   ├── rockchip_drv_video.c   # Main driver: full VA-API vtable
 │   ├── h264.c                 # H.264 SPS/PPS Annex B reconstruction
 │   ├── h264.h
+│   ├── frame_layout.c         # Checked NV12 sizing and frame copies
+│   ├── frame_layout.h
 │   └── bs.h                   # Header-only Exp-Golomb bitstream writer
+├── tests/                     # Unit + conformance-vector harnesses
 ├── debian/                    # Debian packaging metadata
 ├── docs/
-│   └── DEVELOPMENT.md         # This file
+│   ├── DEVELOPMENT.md         # This file
+│   ├── ROADMAP.md             # Production target and phased plan
+│   └── TESTING.md             # Reproducible validation gates
 ├── Makefile
 ├── README.md
 └── INSTALL.md
@@ -61,9 +66,9 @@ Rockchip MPP
     ▼
 RK3588 VPU (hardware)
     │
-    │  DMA-BUF fd (PRIME 2)
+    │  per-surface DMA-BUF fd (PRIME 2)
     ▼
-Firefox compositor (zero-copy NV12)
+Firefox compositor (zero-copy from the exported surface onward)
 ```
 
 ### Object model
@@ -114,10 +119,10 @@ the H.264 bitstream and extracts the SPS and PPS as C structs
 (`VAPictureParameterBufferH264`, `VAIQMatrixBufferH264`), then passes them via
 `vaRenderPicture`. It does **not** pass the original binary NALUs.
 
-MPP's `decode_put_packet` requires a complete Annex B bitstream including SPS
-and PPS NALUs prepended before each IDR slice. The driver must therefore
-**reconstruct** the binary SPS/PPS from the parsed structs before each IDR
-frame.
+MPP's `decode_put_packet` requires an Annex B bitstream with SPS/PPS parameter
+sets. The driver must therefore **reconstruct** the binary parameter sets from
+the parsed VA structs. It sends an SPS on the first frame and IDRs, and a PPS
+before every frame so inferred reference counts and scaling lists stay exact.
 
 ### SPS/PPS reconstruction (`h264.c`)
 
@@ -130,7 +135,9 @@ using Exp-Golomb coding:
 3. High-profile SPS includes `chroma_format_idc` and bit-depth fields.
 4. `emulation_prevent()` scans the raw bytes and inserts `0x03` bytes before
    any `0x000001` or `0x000002` sequences (required by the H.264 spec).
-5. A 4-byte Annex B start code (`00 00 00 01`) is prepended to the output.
+5. Scaling lists from `VAIQMatrixBufferH264` are emitted explicitly in the PPS
+   in H.264 zig-zag scan order.
+6. A 4-byte Annex B start code (`00 00 00 01`) is prepended to the output.
 
 ### Slice dispatch (`do_h264_decode`)
 
@@ -138,16 +145,17 @@ For each `EndPicture` call the driver:
 
 1. Finds the `VAPictureParameterBufferH264` and all `VASliceDataBuffer` blobs
    in `pending[]`.
-2. On IDR frames (detected via `nal_ref_idc` / slice type), prepends SPS+PPS.
+2. Prepends the SPS on the first frame and IDRs, and a reconstructed PPS on
+   every frame.
 3. Prepends `00 00 00 01` start codes to each slice NALU.
 4. Packs everything into a single MPP packet; encodes the target surface ID
    as the packet `pts` (used to route the decoded frame back to the right
    surface).
 5. Calls `mpi->decode_put_packet`.
-6. Polls `mpi->decode_get_frame` in a loop; matches the output frame by `pts`
-   to find the target surface.
-7. Stores the `MppFrame` in `surface->frame`, `dup()`s the DMABUF fd into
-   `surface->prime_fd`, then signals `surface->cond`.
+6. Drains `mpi->decode_get_frame`; matches H.264 output by `pts` to find the
+   target surface.
+7. Bounds-checks and copies the linear NV12 layout into the target's permanent
+   export DMA-BUF, releases the MPP frame, then signals `surface->cond`.
 
 ---
 
@@ -155,7 +163,7 @@ For each `EndPicture` call the driver:
 
 Firefox calls `vaExportSurfaceHandle` with
 `VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2` to get a zero-copy handle to the
-decoded frame's GPU memory.
+driver's permanent per-surface export buffer.
 
 `rk_ExportSurfaceHandle` returns a `VADRMPRIMESurfaceDescriptor`:
 

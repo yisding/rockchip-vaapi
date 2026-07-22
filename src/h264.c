@@ -121,12 +121,53 @@ int h264_write_sps(uint8_t *buf, size_t buf_size,
     return (int)(4 + ep);
 }
 
+static int write_scaling_list(BSWriter *bs, const uint8_t *list,
+                              const uint8_t *scan, size_t count)
+{
+    int last_scale = 8;
+
+    for (size_t i = 0; i < count; i++) {
+        int next_scale = list[scan[i]];
+        int delta;
+
+        /* VA-API supplies resolved scaling lists. A zero value cannot be
+         * represented as an explicit list entry: in H.264 it terminates the
+         * delta-coded list and selects fallback/default inference instead. */
+        if (next_scale == 0)
+            return -1;
+
+        delta = next_scale - last_scale;
+        if (delta > 127)
+            delta -= 256;
+        else if (delta < -128)
+            delta += 256;
+        bs_write_se(bs, delta);
+        last_scale = next_scale;
+    }
+    return 0;
+}
+
 int h264_write_pps(uint8_t *buf, size_t buf_size,
                    const VAPictureParameterBufferH264 *pp,
+                   const VAIQMatrixBufferH264 *iq,
                    int num_ref_idx_l0_default_minus1,
                    int num_ref_idx_l1_default_minus1)
 {
-    uint8_t raw[256];
+    static const uint8_t scan4x4[16] = {
+         0,  1,  4,  8,  5,  2,  3,  6,
+         9, 12, 13, 10,  7, 11, 14, 15,
+    };
+    static const uint8_t scan8x8[64] = {
+         0,  1,  8, 16,  9,  2,  3, 10,
+        17, 24, 32, 25, 18, 11,  4,  5,
+        12, 19, 26, 33, 40, 48, 41, 34,
+        27, 20, 13,  6,  7, 14, 21, 28,
+        35, 42, 49, 56, 57, 50, 43, 36,
+        29, 22, 15, 23, 30, 37, 44, 51,
+        58, 59, 52, 45, 38, 31, 39, 46,
+        53, 60, 61, 54, 47, 55, 62, 63,
+    };
+    uint8_t raw[1024];
     BSWriter bs;
     bs_init(&bs, raw, sizeof(raw));
 
@@ -156,10 +197,26 @@ int h264_write_pps(uint8_t *buf, size_t buf_size,
     bs_write(&bs, pp->pic_fields.bits.redundant_pic_cnt_present_flag, 1);
 
     /* More-data present if high-profile extensions needed */
-    if (pp->pic_fields.bits.transform_8x8_mode_flag ||
+    if (iq || pp->pic_fields.bits.transform_8x8_mode_flag ||
         pp->second_chroma_qp_index_offset != pp->chroma_qp_index_offset) {
         bs_write(&bs, pp->pic_fields.bits.transform_8x8_mode_flag, 1);
-        bs_write(&bs, 0, 1); /* pic_scaling_matrix_present_flag = 0 */
+        bs_write(&bs, iq != NULL, 1); /* pic_scaling_matrix_present_flag */
+        if (iq) {
+            for (size_t i = 0; i < 6; i++) {
+                bs_write(&bs, 1, 1); /* pic_scaling_list_present_flag */
+                if (write_scaling_list(&bs, iq->ScalingList4x4[i],
+                                       scan4x4, sizeof(scan4x4)) < 0)
+                    return -1;
+            }
+            if (pp->pic_fields.bits.transform_8x8_mode_flag) {
+                for (size_t i = 0; i < 2; i++) {
+                    bs_write(&bs, 1, 1); /* pic_scaling_list_present_flag */
+                    if (write_scaling_list(&bs, iq->ScalingList8x8[i],
+                                           scan8x8, sizeof(scan8x8)) < 0)
+                        return -1;
+                }
+            }
+        }
         bs_write_se(&bs, pp->second_chroma_qp_index_offset);
     }
 

@@ -1,3 +1,18 @@
+rockchip-vaapi (1.0.11+ysp2) resolute; urgency=medium
+
+  * Add a checksum-pinned ITU-T H.264 and libvpx VP9 conformance gate, with
+    explicit VA-API, software-fallback, and kernel-crash quarantine paths.
+  * Reconstruct H.264 High-profile scaling lists from VAIQMatrixBufferH264;
+    the HCAFR1_HHI conformance vector is now bit-exact.
+  * Withdraw H.264 Constrained Baseline after SVA_Base_B exposed corrupt MPP
+    output; applications now fall back to software for that profile.
+  * Bound decoded NV12 copies and size export surfaces for MPP's aligned
+    strides, fixing the independent Track 14 userspace overflow.
+  * Add ASan/UBSan builds, unit coverage, clang-tidy, AArch64 cross-build CI,
+    and a guarded manual ROCK 5B hardware job.
+
+ -- Yi Ding <yi.s.ding@gmail.com>  Tue, 21 Jul 2026 18:05:57 -0700
+
 rockchip-vaapi (1.0.11+ysp1) resolute; urgency=medium
 
   Fork build (yisding/rockchip-vaapi). Correctness fixes, all validated on a

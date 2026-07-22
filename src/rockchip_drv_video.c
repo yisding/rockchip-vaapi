@@ -91,6 +91,8 @@ typedef struct {
 
     /* H.264 state for SPS/PPS reconstruction */
     VAPictureParameterBufferH264 last_pp;
+    VAIQMatrixBufferH264 last_iq;
+    bool         has_iq;
     bool         sps_sent;
 } RKContext;
 
@@ -163,6 +165,33 @@ static RKBuffer *buffer_by_id(RKDriver *d, VABufferID id) {
     return (idx < MAX_BUFFERS && d->buffers[idx].used) ? &d->buffers[idx] : NULL;
 }
 
+static VAStatus packet_append(uint8_t **packet, size_t *packet_size,
+                              size_t *packet_capacity, const void *data,
+                              size_t data_size)
+{
+    if (data_size == 0)
+        return VA_STATUS_SUCCESS;
+    if (!data || *packet_size > SIZE_MAX - data_size)
+        return VA_STATUS_ERROR_INVALID_PARAMETER;
+
+    size_t needed = *packet_size + data_size;
+    if (needed > *packet_capacity) {
+        size_t new_capacity = needed;
+        if (needed <= (SIZE_MAX - 4096) / 2)
+            new_capacity = needed * 2 + 4096;
+
+        uint8_t *grown = realloc(*packet, new_capacity);
+        if (!grown)
+            return VA_STATUS_ERROR_ALLOCATION_FAILED;
+        *packet = grown;
+        *packet_capacity = new_capacity;
+    }
+
+    memcpy(*packet + *packet_size, data, data_size);
+    *packet_size = needed;
+    return VA_STATUS_SUCCESS;
+}
+
 static MppCodingType profile_to_coding(VAProfile p) {
     switch (p) {
     case VAProfileH264ConstrainedBaseline:
@@ -222,9 +251,12 @@ static VAStatus rk_Terminate(VADriverContextP ctx) {
 /* Only profiles with validated decode paths are advertised (or accepted by
  * CreateConfig). Board-validated 2026-07-21 on RK3588 / kernel 6.18 via
  * software-vs-VAAPI framemd5 comparison:
- *   - H.264 CB/Main/High: bit-exact (after the per-frame PPS fix)
+ *   - H.264 Main/High: bit-exact on pinned conformance vectors
  *   - VP9 Profile 0: bit-exact
  * Deliberately not offered:
+ *   - H.264 Constrained Baseline: MPP decodes the pinned SVA_Base_B stream
+ *     incorrectly even though the reconstructed Annex B stream is
+ *     software-exact. Fall back instead of returning corrupt frames.
  *   - HEVC: no VPS/SPS/PPS reconstruction exists; MPP receives headerless
  *     slice data and decodes nothing (verified failure). Advertising it made
  *     apps pick VAAPI and break instead of falling back to software.
@@ -237,7 +269,6 @@ static VAStatus rk_Terminate(VADriverContextP ctx) {
  *     to VP9 (hardware-decoded) for AV1-capable content. */
 static bool profile_supported(VAProfile p) {
     switch (p) {
-    case VAProfileH264ConstrainedBaseline:
     case VAProfileH264Main:
     case VAProfileH264High:
     case VAProfileVP9Profile0:
@@ -251,7 +282,6 @@ static VAStatus rk_QueryConfigProfiles(VADriverContextP ctx,
                                        VAProfile *list, int *n) {
     (void)ctx;
     int i = 0;
-    list[i++] = VAProfileH264ConstrainedBaseline;
     list[i++] = VAProfileH264Main;
     list[i++] = VAProfileH264High;
     list[i++] = VAProfileVP9Profile0;
@@ -608,6 +638,7 @@ static VAStatus rk_BeginPicture(VADriverContextP ctx,
 
     c->render_target = render_target;
     c->n_pending     = 0;
+    c->has_iq        = false;
 
     /* Reset surface state for this decode cycle.  priv_buf/prime_fd are kept
      * intact so ExportSurfaceHandle always returns a valid fd (the previous
@@ -636,9 +667,17 @@ static VAStatus rk_RenderPicture(VADriverContextP ctx,
         /* Snapshot VAPictureParameterBufferH264 immediately */
         RKBuffer *b = buffer_by_id(d, buffers[i]);
         if (b && b->type == VAPictureParameterBufferType &&
-            c->coding == MPP_VIDEO_CodingAVC) {
+            c->coding == MPP_VIDEO_CodingAVC &&
+            (size_t)b->size * b->num_elements >=
+                sizeof(VAPictureParameterBufferH264)) {
             memcpy(&c->last_pp, b->data,
                    sizeof(VAPictureParameterBufferH264));
+        } else if (b && b->type == VAIQMatrixBufferType &&
+                   c->coding == MPP_VIDEO_CodingAVC &&
+                   (size_t)b->size * b->num_elements >=
+                       sizeof(VAIQMatrixBufferH264)) {
+            memcpy(&c->last_iq, b->data, sizeof(VAIQMatrixBufferH264));
+            c->has_iq = true;
         }
     }
     return VA_STATUS_SUCCESS;
@@ -778,15 +817,13 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
     size_t   pkt_cap  = 0;
     size_t   pkt_sz   = 0;
 
-#define PKT_APPEND(ptr, len) do {                           \
-    size_t _l = (len);                                      \
-    if (pkt_sz + _l > pkt_cap) {                           \
-        pkt_cap = (pkt_sz + _l) * 2 + 4096;               \
-        pkt_data = realloc(pkt_data, pkt_cap);             \
-        if (!pkt_data) return VA_STATUS_ERROR_ALLOCATION_FAILED; \
-    }                                                       \
-    memcpy(pkt_data + pkt_sz, (ptr), _l);                 \
-    pkt_sz += _l;                                          \
+#define PKT_APPEND(ptr, len) do {                                      \
+    VAStatus _append_status = packet_append(&pkt_data, &pkt_sz,        \
+                                             &pkt_cap, (ptr), (len));   \
+    if (_append_status != VA_STATUS_SUCCESS) {                         \
+        free(pkt_data);                                                \
+        return _append_status;                                         \
+    }                                                                  \
 } while (0)
 
     /* Pull the current frame's active reference counts from the first slice
@@ -819,17 +856,35 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
     }
 
     {
-        uint8_t hdr[512];
+        uint8_t hdr[2048];
+        RKConfig *config = config_by_id(d, c->config_id);
         int n;
+
+        if (!config) {
+            free(pkt_data);
+            return VA_STATUS_ERROR_INVALID_CONFIG;
+        }
         if (is_idr || !c->sps_sent) {
             n = h264_write_sps(hdr, sizeof(hdr), &c->last_pp,
-                               profile_idc(config_by_id(d, c->config_id)->profile));
-            if (n > 0) { PKT_APPEND(hdr, (size_t)n); }
+                               profile_idc(config->profile));
+            if (n <= 0) {
+                LOG("do_h264_decode: SPS reconstruction failed");
+                free(pkt_data);
+                return VA_STATUS_ERROR_DECODING_ERROR;
+            }
+            PKT_APPEND(hdr, (size_t)n);
             c->sps_sent = true;
         }
         n = h264_write_pps(hdr, sizeof(hdr), &c->last_pp,
+                           c->has_iq && profile_idc(config->profile) >= 100
+                               ? &c->last_iq : NULL,
                            ref_l0_minus1, ref_l1_minus1);
-        if (n > 0) { PKT_APPEND(hdr, (size_t)n); }
+        if (n <= 0) {
+            LOG("do_h264_decode: PPS reconstruction failed");
+            free(pkt_data);
+            return VA_STATUS_ERROR_DECODING_ERROR;
+        }
+        PKT_APPEND(hdr, (size_t)n);
     }
 
     /* append each slice with Annex B start code */
@@ -927,15 +982,13 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
     size_t   pkt_sz   = 0;
     size_t   pkt_cap  = 0;
 
-#define PKT_APPEND(ptr, len) do {                           \
-    size_t _l = (len);                                      \
-    if (pkt_sz + _l > pkt_cap) {                           \
-        pkt_cap = (pkt_sz + _l) * 2 + 4096;               \
-        pkt_data = realloc(pkt_data, pkt_cap);             \
-        if (!pkt_data) return VA_STATUS_ERROR_ALLOCATION_FAILED; \
-    }                                                       \
-    memcpy(pkt_data + pkt_sz, (ptr), _l);                 \
-    pkt_sz += _l;                                          \
+#define PKT_APPEND(ptr, len) do {                                      \
+    VAStatus _append_status = packet_append(&pkt_data, &pkt_sz,        \
+                                             &pkt_cap, (ptr), (len));   \
+    if (_append_status != VA_STATUS_SUCCESS) {                         \
+        free(pkt_data);                                                \
+        return _append_status;                                         \
+    }                                                                  \
 } while (0)
 
     for (int i = 0; i < c->n_pending; i++) {
