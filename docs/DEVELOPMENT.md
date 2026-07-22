@@ -102,12 +102,12 @@ functions that actually do meaningful work are:
 | `rk_CreateContext` | `mpp_create` + `mpp_init`; retain render-target hints; allocate `RKContext` |
 | `rk_CreateSurfaces2` | Allocate `RKSurface` objects and pre-decode placeholder DMA-BUFs |
 | `rk_CreateBuffer` | Allocate a dynamic, stale-safe `RKBuffer` object and copy caller data |
-| `rk_BeginPicture` | Store render target in `RKContext` |
-| `rk_RenderPicture` | Collect buffer IDs into `pending[]` |
-| `rk_EndPicture` | Dispatch to `do_h264_decode()` (or future codec dispatch) |
+| `rk_BeginPicture` | Reset the render target and advance its surface fence |
+| `rk_RenderPicture` | Collect buffer IDs into `pending[]` and snapshot H.264 parameters |
+| `rk_EndPicture` | Build an owned packet and enqueue it to the context worker |
 | `rk_QuerySurfaceAttrs` | Report NV12 + `DRM_PRIME_2` support (critical for Firefox) |
 | `rk_ExportSurfaceHandle` | Return `VADRMPRIMESurfaceDescriptor` with `dup()`'d DMABUF fd |
-| `rk_SyncSurface` | Wait on `surface->cond` until `decoded == true` |
+| `rk_SyncSurface` / `rk_SyncSurface2` | Wait on the surface fence indefinitely or for the requested timeout |
 | `rk_Terminate` | Destroy MPP contexts; close fds; `free(RKDriver)` |
 
 All other vtable slots are filled with stubs that return `VA_STATUS_SUCCESS`
@@ -145,7 +145,7 @@ using Exp-Golomb coding:
    in H.264 zig-zag scan order.
 6. A 4-byte Annex B start code (`00 00 00 01`) is prepended to the output.
 
-### Slice dispatch (`do_h264_decode`)
+### Packet assembly and worker dispatch
 
 For each `EndPicture` call the driver:
 
@@ -154,15 +154,40 @@ For each `EndPicture` call the driver:
 2. Prepends the SPS on the first frame and IDRs, and a reconstructed PPS on
    every frame.
 3. Prepends `00 00 00 01` start codes to each slice NALU.
-4. Packs everything into a single MPP packet; encodes the target surface ID
-   as the packet `pts` (used to route the decoded frame back to the right
-   surface).
-5. Calls `mpi->decode_put_packet`.
-6. Drains `mpi->decode_get_frame`; matches H.264 output by `pts` to find the
-   target surface.
+4. Copies everything into an owned decode job carrying the target surface and
+   its current fence, then returns from `EndPicture` after queueing the job.
+5. The per-context worker assigns a unique token, calls
+   `mpi->decode_put_packet`, and handles input backpressure by draining output
+   through MPP's bounded blocking wait before retrying.
+6. The worker drains `mpi->decode_get_frame`; H.264 resolves the output token
+   after display reordering, while VP9 uses its ordered route queue.
 7. Validates the returned external buffer index and layout, binds the frame
    and backing-buffer reference to the logical VA surface, then signals
    `surface->cond`. No decoded pixels are copied.
+
+### Worker and surface-fence model
+
+Each `RKContext` creates one worker after MPP initialization. Runtime packet
+submission, output draining, info-change acknowledgement, and external-group
+configuration occur on that worker; VA calling threads never poll MPP. The
+output wait uses MPP's 20 ms blocking timeout so shutdown and newly queued
+jobs remain responsive without `usleep` loops.
+
+`BeginPicture` advances a monotonically increasing fence on the target
+surface. Every job and frame-route record carries that fence. A late frame for
+a surface that has already been reused is therefore released instead of being
+bound to the newer picture. The exception is a declared H.264 field pair:
+FFmpeg submits the two fields through separate Begin/Render/End sequences on
+one surface, while MPP emits the completed frame with the first field's PTS.
+The second field therefore shares the first field's fence and route token.
+This continuation is gated by `field_pic_flag`; applying it to VP9 surface
+reuse can expose an older hidden frame before the newer visible frame arrives.
+
+On successful binding or asynchronous failure, the worker broadcasts
+`surface->cond`. `vaSyncSurface` waits indefinitely as required by libva;
+`vaSyncSurface2` returns `VA_STATUS_ERROR_TIMEDOUT` when its nanosecond
+deadline expires. Context teardown joins the worker and fails any remaining
+queued or routed fences before destroying MPP.
 
 ---
 

@@ -207,7 +207,8 @@ gate green under ASan; CI builds and lints on push.
 
 The foundation everything else builds on. No new codecs — restructure.
 
-Progress (2026-07-21): the object-model and zero-copy portions are complete.
+Progress (2026-07-21): the object-model, zero-copy, and worker/fence portions
+are complete.
 The dynamic generation-tagged heap and driver object lock cover configs, contexts,
 surfaces, buffers, and distinct image objects. Acquired objects are
 reference-counted across short lock sections; stale/type-confused handles are
@@ -229,10 +230,25 @@ sync; the missing transition initially caused intermittent one-frame VP9
 mismatches, while the corrected path passed a focused 100-decode stress with
 zero mismatches. The pool itself is refcounted across its context and bound
 surfaces, preventing MPP orphan-group retention when a context is destroyed
-before its surfaces. After these fixes, the complete guarded Phase 0 normal
-and ASan/UBSan gates are green again. The remaining work in this phase is
-broader module separation, worker/fence synchronization, and the two-decoder/
-soak gates.
+before its surfaces. Each context now has one worker that owns runtime MPP
+submission, backpressure draining, info-change handling, and output routing.
+`EndPicture` queues an owned packet; H.264 outputs resolve a unique token and
+VP9 keeps ordered routes, with both carrying the target surface's generation
+fence. `vaSyncSurface` and `vaSyncSurface2` wait on the per-surface condition
+instead of polling MPP, and the latter honors zero/finite/infinite timeouts.
+Context teardown joins the worker and fails queued fences before MPP teardown.
+Field-coded H.264 shares one fence and route token across its two declared
+field submissions because MPP returns the completed frame with the first
+field's PTS; other codec/surface reuse advances the fence normally. This
+distinction fixed both the initially stalled CABREF field vector and an
+early-ready VP9 hidden-frame race. Focused follow-up passed the field vector
+3/3 and the previously nondeterministic big-superframe vector 20/20.
+The 1,440-frame normal and ASan/UBSan zero-copy gates remain bit-exact with
+matched worker start/stop and pool create/destroy counts, while the on-board
+lifecycle/fence gate is clean normally and under ASan/UBSan and TSan. After
+the worker slice, the complete risky-enabled Phase 0 normal and ASan/UBSan
+gates are green again. The remaining work in this phase is broader module
+separation and the two-decoder/soak gates.
 
 - Split the monolith into the module layout above; introduce the object heap.
 - Implement the **external-buffer-group zero-copy model** and delete the
@@ -348,17 +364,17 @@ concurrent with decode contexts are race-free.
   re-verified per milestone; the Chromium aliasing sidestep depends on the GPU
   sandbox continuing to allow `ioctl` without arg inspection — verify against
   the shipping Chromium, don't assume.
-- **MPP threading contract:** validate that one `mpi` per context with a
-  dedicated worker is the supported concurrency model for many simultaneous
-  contexts.
+- **MPP threading contract:** the dedicated-worker model is validated for the
+  normal single-decoder H.264/VP9 matrix and for nine simultaneous idle MPP
+  contexts. The two-active-decoder gate still must prove runtime concurrency.
 
 ## Status
 
 - Phase 0: complete on `main`; the normal and sanitized full hardware gates are
   green on the audited fixed kernel build `#3`.
-- Phase 1: in progress; object heap, all VA object migrations, and external-
-  buffer zero-copy are complete; module separation, worker/fences, and
-  concurrency/soak gates remain.
+- Phase 1: in progress; object heap, all VA object migrations, external-buffer
+  zero-copy, and worker/fence synchronization are complete; module separation
+  and concurrency/soak gates remain.
 - Phases 2–5: planned.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement

@@ -59,6 +59,7 @@ make clean all test
 make fetch-vectors
 make check-driver-objects
 make check-driver-objects-sanitize
+make check-driver-objects-tsan
 FFMPEG=/usr/bin/ffmpeg make check-zero-copy
 FFMPEG=/usr/bin/ffmpeg make check-zero-copy-sanitize
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-conformance
@@ -67,18 +68,28 @@ FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-sanitize
 
 The object-lifecycle gate crosses every former fixed-array ceiling, validates
 all five typed handle namespaces and stale-handle rejection, and creates nine
-simultaneous MPP decode contexts. Its sanitized variant applies ASan/UBSan to
-the complete driver lifecycle in-process.
+simultaneous MPP decode contexts. It also checks immediate success for a
+placeholder surface, zero-timeout behavior for a pending fence, and failure
+signaling when that fence's context is destroyed. Its sanitized and TSan
+variants apply ASan/UBSan and thread-race checking to the complete lifecycle.
 
 The zero-copy gate runs the synthetic H.264 reference/B-frame matrix, 4K
 decode, and five VP9 runs while auditing the driver log. It requires at least
 one external group and external frame, requires every created pool to be
 destroyed by normal VA teardown, and rejects internal fallback, a
 per-frame copy marker, an unknown buffer index/fd, or an unsafe layout. Its
-sanitized variant loads the complete ASan/UBSan driver for the same audit.
+worker audit also requires one clean start/stop pair per decode context and
+rejects the former caller-side MPP drain marker. Its sanitized variant loads
+the complete ASan/UBSan driver for the same audit.
 Readback uses explicit dma-buf CPU synchronization; the zero-copy and full
 conformance gates are therefore visibility/coherency regressions, not only
 routing checks.
+
+The pinned `CABREF3_Sand_D.264` case is also the worker/fence regression for
+field pictures: its two submissions per VA surface must share one fence and
+MPP route. `vp90-2-20-big_superframe-01.webm` is the counterexample—VP9 reuse
+must advance the fence so an older hidden output cannot signal the newer
+picture ready. Both behaviors are required for the full gate to be bit-exact.
 
 Do not set `RISKY_VECTORS=run` until the kernel's VP9 probability-table bounds
 fix is installed and the board has booted that kernel. The

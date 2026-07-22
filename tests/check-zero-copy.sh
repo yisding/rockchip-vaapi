@@ -22,9 +22,13 @@ RK_VAAPI_LOG=$LOG TEST_SET=synthetic RISKY_VECTORS=skip \
 ready_count=$(awk '/external_group: ready/ { count++ } END { print count + 0 }' "$LOG")
 destroyed_count=$(awk '/external_group: destroyed/ { count++ } END { print count + 0 }' "$LOG")
 frame_count=$(awk '/zero_copy=1 external=1/ { count++ } END { print count + 0 }' "$LOG")
+worker_started=$(awk '/decode worker: started/ { count++ } END { print count + 0 }' "$LOG")
+worker_stopped=$(awk '/decode worker: stopped/ { count++ } END { print count + 0 }' "$LOG")
 bad_count=$(awk '
     /mode=internal-fallback/ || /zero_copy=0/ || /copied=1/ ||
-    /external buffer mismatch/ || /unsafe internal layout/ { count++ }
+    /external buffer mismatch/ || /unsafe internal layout/ ||
+    /has no pending route/ || /submission failed/ ||
+    /output wait failed/ || /SyncSurface: .*draining MPP/ { count++ }
     END { print count + 0 }
 ' "$LOG")
 
@@ -36,9 +40,14 @@ if [ "$destroyed_count" -ne "$ready_count" ]; then
     echo "error: $ready_count external pools created but $destroyed_count destroyed" >&2
     exit 1
 fi
+if [ "$worker_started" -ne "$ready_count" ] ||
+   [ "$worker_stopped" -ne "$worker_started" ]; then
+    echo "error: worker lifecycle mismatch: started=$worker_started stopped=$worker_stopped pools=$ready_count" >&2
+    exit 1
+fi
 if [ "$bad_count" -ne 0 ]; then
     echo "error: zero-copy fallback or ownership failure found in driver log" >&2
     exit 1
 fi
 
-echo "zero-copy gate: OK ($ready_count contexts/pools, $frame_count frames)"
+echo "zero-copy/worker gate: OK ($ready_count contexts, $frame_count frames)"

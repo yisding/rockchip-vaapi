@@ -63,6 +63,28 @@ typedef struct {
 } RKConfig;
 
 typedef struct RKSurface RKSurface;
+typedef struct RKDriver RKDriver;
+
+typedef struct RKDecodeJob {
+    struct RKDecodeJob *next;
+    uint8_t            *data;
+    size_t              size;
+    VASurfaceID         target;
+    RKSurface          *surface;
+    uint64_t            fence;
+    uint64_t            token;
+    bool                h264_field;
+    bool                is_hidden;
+    uint8_t             repeat_slot;
+} RKDecodeJob;
+
+typedef struct RKFrameRoute {
+    struct RKFrameRoute *next;
+    VASurfaceID          target;
+    RKSurface           *surface;
+    uint64_t             fence;
+    uint64_t             token;
+} RKFrameRoute;
 
 typedef struct {
     RKObjectBase base;
@@ -74,6 +96,7 @@ typedef struct {
 
 typedef struct {
     RKObjectBase base;
+    RKDriver     *driver;
     VAProfile    profile;
     int          width, height;
 
@@ -87,15 +110,30 @@ typedef struct {
     int          n_targets;
     RKDecodePool *decode_pool;
 
+    /* Picture assembly is caller-side; an owned packet is handed to the
+     * worker, which is the only thread that calls the MPP data/control API. */
+    pthread_mutex_t picture_lock;
+    pthread_mutex_t work_lock;
+    pthread_cond_t  work_cond;
+    pthread_t       worker;
+    bool            sync_initialized;
+    bool            worker_started;
+    bool            worker_stop;
+    RKDecodeJob    *job_head;
+    RKDecodeJob    *job_tail;
+    RKFrameRoute   *h264_routes;
+    RKFrameRoute   *generic_head;
+    RKFrameRoute   *generic_tail;
+    unsigned int    outstanding_frames;
+    uint64_t        next_token;
+
     /* buffers collected between BeginPicture / EndPicture */
     VABufferID   pending[64];
     int          n_pending;
 
     VASurfaceID  render_target;
-
-    /* FIFO queue of surfaces waiting for MPP decoded frames (in send order) */
-    VASurfaceID  decode_queue[64];
-    int          dq_head, dq_tail;
+    RKSurface   *render_surface;
+    uint64_t     render_fence;
 
     /* H.264 state for SPS/PPS reconstruction */
     VAPictureParameterBufferH264 last_pp;
@@ -123,7 +161,9 @@ struct RKSurface {
     MppFrameFormat fmt;     /* pixel format of last decoded frame (0 = NV12 default) */
     bool         decoded;
     bool         decode_failed;
+    bool         h264_field_pending;
     VAContextID  ctx_id;   /* context currently decoding into this surface */
+    uint64_t     fence;
     pthread_mutex_t  lock;
     pthread_cond_t   cond;
 };
@@ -147,14 +187,14 @@ typedef struct {
     unsigned int pitch;
 } RKImage;
 
-typedef struct {
+struct RKDriver {
     pthread_mutex_t object_lock;
     RKObjectHeap config_heap;
     RKObjectHeap context_heap;
     RKObjectHeap surface_heap;
     RKObjectHeap buffer_heap;
     RKObjectHeap image_heap;
-} RKDriver;
+};
 
 /* ── helpers ─────────────────────────────────────────────────── */
 
@@ -202,6 +242,10 @@ static RKImage *image_acquire(RKDriver *d, VAImageID id) {
     return image;
 }
 
+static void stop_decode_worker(RKContext *context);
+static void *decode_worker_main(void *opaque);
+static void fail_pending_surface_ref(RKSurface *surface, uint64_t fence);
+
 static bool dmabuf_cpu_sync(int fd, uint64_t flags)
 {
     struct dma_buf_sync sync = { .flags = flags };
@@ -243,6 +287,7 @@ static void decode_pool_destroy(void *opaque) {
 
 static void context_destroy(void *opaque) {
     RKContext *context = opaque;
+    stop_decode_worker(context);
     if (context->mpp)
         mpp_destroy(context->mpp);
     if (context->decode_pool)
@@ -252,6 +297,11 @@ static void context_destroy(void *opaque) {
             rk_object_unref(&context->targets[i]->base);
     }
     free(context->targets);
+    if (context->sync_initialized) {
+        pthread_cond_destroy(&context->work_cond);
+        pthread_mutex_destroy(&context->work_lock);
+        pthread_mutex_destroy(&context->picture_lock);
+    }
     free(context);
 }
 
@@ -641,6 +691,24 @@ static VAStatus rk_CreateContext(VADriverContextP ctx,
     if (!c)
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
     rk_object_init(&c->base, context_destroy);
+    c->driver = d;
+
+    if (pthread_mutex_init(&c->picture_lock, NULL) != 0) {
+        free(c);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
+    if (pthread_mutex_init(&c->work_lock, NULL) != 0) {
+        pthread_mutex_destroy(&c->picture_lock);
+        free(c);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
+    if (pthread_cond_init(&c->work_cond, NULL) != 0) {
+        pthread_mutex_destroy(&c->work_lock);
+        pthread_mutex_destroy(&c->picture_lock);
+        free(c);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
+    c->sync_initialized = true;
 
     LOG("CreateContext: config=0x%x %dx%d coding=%d targets=%d",
         config_id, width, height, (int)coding, n_targets);
@@ -678,21 +746,41 @@ static VAStatus rk_CreateContext(VADriverContextP ctx,
     LOG("CreateContext: mpp_init OK");
 
     /* Must be set after mpp_init: split_parse=0 means we send complete
-     * access units; OUTPUT_BLOCK=0 makes decode_get_frame non-blocking. */
+     * access units. The worker uses a bounded blocking output wait so it can
+     * drain efficiently while still observing shutdown and newly queued work. */
     MppDecCfg dec_cfg = NULL;
-    mpp_dec_cfg_init(&dec_cfg);
-    mpp_dec_cfg_set_u32(dec_cfg, "base:split_parse", 0);
-    c->mpi->control(c->mpp, MPP_DEC_SET_CFG, dec_cfg);
+    if (mpp_dec_cfg_init(&dec_cfg) != MPP_OK ||
+        mpp_dec_cfg_set_u32(dec_cfg, "base:split_parse", 0) != MPP_OK ||
+        c->mpi->control(c->mpp, MPP_DEC_SET_CFG, dec_cfg) != MPP_OK) {
+        if (dec_cfg)
+            mpp_dec_cfg_deinit(dec_cfg);
+        LOG("CreateContext: decoder configuration failed");
+        rk_object_unref(&c->base);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
     mpp_dec_cfg_deinit(dec_cfg);
 
-    int block = 0;
-    c->mpi->control(c->mpp, MPP_SET_OUTPUT_BLOCK, (MppParam)&block);
+    RK_S64 output_timeout_ms = 20;
+    if (c->mpi->control(c->mpp, MPP_SET_OUTPUT_TIMEOUT,
+                        (MppParam)&output_timeout_ms) != MPP_OK) {
+        LOG("CreateContext: output timeout configuration failed");
+        rk_object_unref(&c->base);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
 
     c->profile  = profile;
     c->width    = width;
     c->height   = height;
     c->coding   = coding;
     c->sps_sent = false;
+    c->render_target = VA_INVALID_SURFACE;
+
+    if (pthread_create(&c->worker, NULL, decode_worker_main, c) != 0) {
+        LOG("CreateContext: decode worker creation failed");
+        rk_object_unref(&c->base);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
+    c->worker_started = true;
 
     uint32_t id;
     pthread_mutex_lock(&d->object_lock);
@@ -819,10 +907,6 @@ static VAStatus rk_BeginPicture(VADriverContextP ctx,
     RKContext *c = context_acquire(d, ctx_id);
     if (!c) return VA_STATUS_ERROR_INVALID_CONTEXT;
 
-    c->render_target = render_target;
-    c->n_pending     = 0;
-    c->has_iq        = false;
-
     /* Reusing the VA surface releases its previous output frame, returning
      * that external-group buffer to MPP once codec references are also gone.
      * priv_buf remains available as the pre-decode placeholder. */
@@ -831,24 +915,50 @@ static VAStatus rk_BeginPicture(VADriverContextP ctx,
         rk_object_unref(&c->base);
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
+
+    pthread_mutex_lock(&c->picture_lock);
+    RKSurface *previous_render_surface = c->render_surface;
+    uint64_t previous_render_fence = c->render_fence;
     pthread_mutex_lock(&s->lock);
-    MppFrame old_frame = s->frame;
-    MppBuffer old_backing = s->backing_buf;
-    RKDecodePool *old_pool = s->decode_pool;
-    s->frame = NULL;
-    s->backing_buf = NULL;
-    s->decode_pool = NULL;
+    bool continuation = c->coding == MPP_VIDEO_CodingAVC &&
+                        s->h264_field_pending && s->ctx_id == ctx_id &&
+                        !s->decoded && !s->decode_failed && s->fence != 0;
+    MppFrame old_frame = continuation ? NULL : s->frame;
+    MppBuffer old_backing = continuation ? NULL : s->backing_buf;
+    RKDecodePool *old_pool = continuation ? NULL : s->decode_pool;
+    if (!continuation) {
+        s->frame = NULL;
+        s->backing_buf = NULL;
+        s->decode_pool = NULL;
+        s->h264_field_pending = false;
+        s->fence++;
+        if (s->fence == 0)
+            s->fence++;
+    }
     s->decoded = false;
     s->decode_failed = false;
     s->ctx_id  = ctx_id;
+    c->render_target = render_target;
+    c->render_surface = s;
+    c->render_fence  = s->fence;
+    c->n_pending     = 0;
+    c->has_iq        = false;
     pthread_mutex_unlock(&s->lock);
+    LOG("BeginPicture: surface=0x%x fence=%llu%s", render_target,
+        (unsigned long long)c->render_fence,
+        continuation ? " continuation" : "");
     if (old_frame)
         mpp_frame_deinit(&old_frame);
     if (old_backing)
         mpp_buffer_put(old_backing);
     if (old_pool)
         rk_object_unref(&old_pool->base);
-    rk_object_unref(&s->base);
+    pthread_mutex_unlock(&c->picture_lock);
+    if (previous_render_surface) {
+        fail_pending_surface_ref(previous_render_surface,
+                                 previous_render_fence);
+        rk_object_unref(&previous_render_surface->base);
+    }
     rk_object_unref(&c->base);
     return VA_STATUS_SUCCESS;
 }
@@ -860,7 +970,19 @@ static VAStatus rk_RenderPicture(VADriverContextP ctx,
     RKContext *c = context_acquire(d, ctx_id);
     if (!c) return VA_STATUS_ERROR_INVALID_CONTEXT;
 
-    for (int i = 0; i < n && c->n_pending < 64; i++) {
+    if (n < 0 || (n > 0 && !buffers)) {
+        rk_object_unref(&c->base);
+        return VA_STATUS_ERROR_INVALID_PARAMETER;
+    }
+
+    pthread_mutex_lock(&c->picture_lock);
+    if (n > 64 - c->n_pending) {
+        pthread_mutex_unlock(&c->picture_lock);
+        rk_object_unref(&c->base);
+        return VA_STATUS_ERROR_MAX_NUM_EXCEEDED;
+    }
+
+    for (int i = 0; i < n; i++) {
         c->pending[c->n_pending++] = buffers[i];
         /* Snapshot VAPictureParameterBufferH264 immediately */
         RKBuffer *b = buffer_acquire(d, buffers[i]);
@@ -880,6 +1002,7 @@ static VAStatus rk_RenderPicture(VADriverContextP ctx,
         if (b)
             rk_object_unref(&b->base);
     }
+    pthread_mutex_unlock(&c->picture_lock);
     rk_object_unref(&c->base);
     return VA_STATUS_SUCCESS;
 }
@@ -993,34 +1116,139 @@ static bool external_buffer_matches_pool(RKContext *c, MppBuffer buffer,
     return true;
 }
 
+static void complete_surface_ref(RKSurface *surface, uint64_t fence,
+                                 bool success)
+{
+    if (!surface)
+        return;
+
+    pthread_mutex_lock(&surface->lock);
+    if (surface->fence == fence) {
+        surface->decoded = success;
+        surface->decode_failed = !success;
+        surface->h264_field_pending = false;
+        pthread_cond_broadcast(&surface->cond);
+    }
+    pthread_mutex_unlock(&surface->lock);
+}
+
+static RKFrameRoute *frame_route_create(const RKDecodeJob *job)
+{
+    RKFrameRoute *route = calloc(1, sizeof(*route));
+    if (!route)
+        return NULL;
+    route->target = job->target;
+    route->fence = job->fence;
+    route->token = job->token;
+    if (!rk_object_ref(&job->surface->base)) {
+        free(route);
+        return NULL;
+    }
+    route->surface = job->surface;
+    return route;
+}
+
+static void frame_route_destroy(RKFrameRoute *route)
+{
+    if (!route)
+        return;
+    if (route->surface)
+        rk_object_unref(&route->surface->base);
+    free(route);
+}
+
+static void h264_route_add(RKContext *c, RKFrameRoute *route)
+{
+    route->next = c->h264_routes;
+    c->h264_routes = route;
+}
+
+static RKFrameRoute *h264_route_find_surface(RKContext *c,
+                                             VASurfaceID target,
+                                             uint64_t fence)
+{
+    for (RKFrameRoute *route = c->h264_routes; route; route = route->next) {
+        if (route->target == target && route->fence == fence)
+            return route;
+    }
+    return NULL;
+}
+
+static RKFrameRoute *h264_route_take(RKContext *c, uint64_t token)
+{
+    RKFrameRoute **cursor = &c->h264_routes;
+    while (*cursor) {
+        if ((*cursor)->token == token) {
+            RKFrameRoute *route = *cursor;
+            *cursor = route->next;
+            route->next = NULL;
+            return route;
+        }
+        cursor = &(*cursor)->next;
+    }
+    return NULL;
+}
+
+static void generic_route_add(RKContext *c, RKFrameRoute *route)
+{
+    route->next = NULL;
+    if (c->generic_tail)
+        c->generic_tail->next = route;
+    else
+        c->generic_head = route;
+    c->generic_tail = route;
+}
+
+static RKFrameRoute *generic_route_take(RKContext *c)
+{
+    RKFrameRoute *route = c->generic_head;
+    if (!route)
+        return NULL;
+    c->generic_head = route->next;
+    if (!c->generic_head)
+        c->generic_tail = NULL;
+    route->next = NULL;
+    return route;
+}
+
+static void generic_route_remove(RKContext *c, RKFrameRoute *route)
+{
+    RKFrameRoute **cursor = &c->generic_head;
+    RKFrameRoute *previous = NULL;
+    while (*cursor) {
+        if (*cursor == route) {
+            *cursor = route->next;
+            if (c->generic_tail == route)
+                c->generic_tail = previous;
+            route->next = NULL;
+            return;
+        }
+        previous = *cursor;
+        cursor = &(*cursor)->next;
+    }
+}
+
 /* Route one MPP output frame to the right surface and mark it decoded.
- * Shared by EndPicture poll loops and the SyncSurface drain loop. */
-static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
+ * Returns true when one pending output route was consumed. */
+static bool assign_mpp_frame(MppFrame frame, RKContext *c)
 {
     if (mpp_frame_get_info_change(frame)) {
         bool external = configure_external_group(c, frame);
-        LOG("assign_mpp_frame: info_change → acknowledged mode=%s render_target=0x%x",
-            external ? "external" : "internal-fallback",
-            (unsigned)c->render_target);
+        LOG("assign_mpp_frame: info_change → acknowledged mode=%s",
+            external ? "external" : "internal-fallback");
         c->mpi->control(c->mpp, MPP_DEC_SET_INFO_CHANGE_READY, NULL);
         mpp_frame_deinit(&frame);
-        return;
+        return false;
     }
 
     RK_S64      raw_pts = mpp_frame_get_pts(frame);
-    VASurfaceID sid;
+    RKFrameRoute *route;
     RKSurface  *s;
 
     if (c->coding == MPP_VIDEO_CodingAVC) {
-        /* H.264: MPP reorders to display order but preserves each source
-         * packet's PTS on its frame, so the smuggled surface id is reliable;
-         * fall back to the current render target if it was lost. */
-        sid = (VASurfaceID)raw_pts;
-        s   = sid ? surface_acquire(d, sid) : NULL;
-        if (!s) {
-            sid = c->render_target;
-            s   = sid ? surface_acquire(d, sid) : NULL;
-        }
+        /* H.264 can reorder display output. The worker assigns a unique PTS
+         * token and resolves it back to the exact surface fence. */
+        route = h264_route_take(c, (uint64_t)raw_pts);
     } else {
         /* VP9: shown frames come out in submission order (no display
          * reordering), but PTS is NOT reliable — a show_existing_frame
@@ -1030,23 +1258,36 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
          * frame corruption before this change). The FIFO of submitted
          * shown-frame surfaces is the reliable identity, so route by it
          * unconditionally and ignore PTS. */
-        if (c->dq_head != c->dq_tail) {
-            sid = c->decode_queue[c->dq_head];
-            c->dq_head = (c->dq_head + 1) & 63;
-            if ((VASurfaceID)raw_pts != sid)
-                LOG("assign_mpp_frame: PTS=0x%llx overridden by FIFO → surface=0x%x",
-                    (unsigned long long)raw_pts, (unsigned)sid);
-        } else {
-            sid = 0;
-        }
-        s = sid ? surface_acquire(d, sid) : NULL;
+        route = generic_route_take(c);
     }
 
-    if (!s) {
-        LOG("assign_mpp_frame: PTS=0x%llx surface not found, dropped",
+    if (!route) {
+        LOG("assign_mpp_frame: PTS=0x%llx has no pending route, dropped",
             (unsigned long long)raw_pts);
         mpp_frame_deinit(&frame);
-        return;
+        return false;
+    }
+
+    VASurfaceID sid = route->target;
+    if (c->coding != MPP_VIDEO_CodingAVC &&
+        (uint64_t)raw_pts != route->token)
+        LOG("assign_mpp_frame: PTS=0x%llx overridden by FIFO → surface=0x%x fence=%llu",
+            (unsigned long long)raw_pts, (unsigned)sid,
+            (unsigned long long)route->fence);
+
+    s = route->surface;
+
+    pthread_mutex_lock(&s->lock);
+    bool current_fence = s->fence == route->fence;
+    int surface_width = s->width;
+    int surface_height = s->height;
+    pthread_mutex_unlock(&s->lock);
+    if (!current_fence) {
+        LOG("assign_mpp_frame: stale surface=0x%x fence=%llu dropped",
+            (unsigned)sid, (unsigned long long)route->fence);
+        frame_route_destroy(route);
+        mpp_frame_deinit(&frame);
+        return true;
     }
 
     MppBuffer      buf    = mpp_frame_get_buffer(frame);
@@ -1056,8 +1297,8 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
     int            fvs    = (int)mpp_frame_get_ver_stride(frame);
     MppFrameFormat ffmt   = mpp_frame_get_fmt(frame);
 
-    int  frame_w = fwidth  > 0 ? fwidth  : s->width;
-    int  frame_h = fheight > 0 ? fheight : s->height;
+    int  frame_w = fwidth  > 0 ? fwidth  : surface_width;
+    int  frame_h = fheight > 0 ? fheight : surface_height;
     int  src_hs = fhs > 0 ? fhs : frame_w;
     int  src_vs = fvs > 0 ? fvs : frame_h;
     size_t src_size = buf ? mpp_buffer_get_size(buf) : 0;
@@ -1084,6 +1325,16 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
 
     if (zero_copy) {
         pthread_mutex_lock(&s->lock);
+        if (s->fence != route->fence) {
+            pthread_mutex_unlock(&s->lock);
+            if (backing)
+                mpp_buffer_put(backing);
+            if (pool)
+                rk_object_unref(&pool->base);
+            frame_route_destroy(route);
+            mpp_frame_deinit(&frame);
+            return true;
+        }
         MppFrame old_frame = s->frame;
         MppBuffer old_backing = s->backing_buf;
         RKDecodePool *old_pool = s->decode_pool;
@@ -1097,6 +1348,7 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
         if (fvs     > 0) s->vstride = fvs;
         s->decoded = true;
         s->decode_failed = false;
+        s->h264_field_pending = false;
         pthread_cond_broadcast(&s->cond);
         pthread_mutex_unlock(&s->lock);
         if (old_frame)
@@ -1106,11 +1358,12 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
         if (old_pool)
             rk_object_unref(&old_pool->base);
         LOG("assign_mpp_frame: surface=0x%x MPP %dx%d stride=%dx%d "
-            "fmt=0x%x zero_copy=1 external=%d pool_index=%d fd=%d",
+            "fmt=0x%x zero_copy=1 external=%d pool_index=%d fd=%d fence=%llu",
             (unsigned)sid, fwidth, fheight, fhs, fvs, (unsigned)ffmt,
-            external_ready, pool_index, mpp_buffer_get_fd(buf));
-        rk_object_unref(&s->base);
-        return;
+            external_ready, pool_index, mpp_buffer_get_fd(buf),
+            (unsigned long long)route->fence);
+        frame_route_destroy(route);
+        return true;
     }
 
     if (external_ready) {
@@ -1120,48 +1373,73 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
             buf ? mpp_buffer_get_fd(buf) : -1, (unsigned)ffmt,
             src_hs, src_vs, layout_size, src_size);
         mpp_frame_deinit(&frame);
-        pthread_mutex_lock(&s->lock);
-        s->decode_failed = true;
-        pthread_cond_broadcast(&s->cond);
-        pthread_mutex_unlock(&s->lock);
-        rk_object_unref(&s->base);
-        return;
+        complete_surface_ref(s, route->fence, false);
+        frame_route_destroy(route);
+        return true;
     }
     mpp_frame_deinit(&frame);
     LOG("assign_mpp_frame: unsafe internal layout surface=0x%x fmt=0x%x "
         "stride=%dx%d layout=%zu src=%zu; decode failed",
         (unsigned)sid, (unsigned)ffmt, src_hs, src_vs, layout_size,
         src_size);
-    pthread_mutex_lock(&s->lock);
-    s->decode_failed = true;
-    pthread_cond_broadcast(&s->cond);
-    pthread_mutex_unlock(&s->lock);
-    rk_object_unref(&s->base);
+    complete_surface_ref(s, route->fence, false);
+    frame_route_destroy(route);
+    return true;
 }
 
-/* decode_put_packet with backpressure handling. The context runs MPP in
- * non-blocking mode, so when MPP's input queue is full put fails instead of
- * waiting; give it its consumer (drain output frames) and retry, bounded.
+/* decode_put_packet with backpressure handling. Input remains non-blocking,
+ * so when MPP's queue is full the worker gives it its output consumer and
+ * retries. decode_get_frame itself uses the configured bounded timeout; no
+ * caller thread polls and no sleep loop is needed.
  * Without this, fast submission silently drops frames (measured on VP9:
  * 38 of 120 packets rejected, nondeterministically, before this fix). */
-static MPP_RET put_packet_draining(RKContext *c, RKDriver *d, MppPacket pkt)
+static bool decode_worker_stopping(RKContext *c)
+{
+    pthread_mutex_lock(&c->work_lock);
+    bool stopping = c->worker_stop;
+    pthread_mutex_unlock(&c->work_lock);
+    return stopping;
+}
+
+static MPP_RET put_packet_draining(RKContext *c, MppPacket pkt)
 {
     MPP_RET ret = MPP_OK;
     for (int tries = 0; tries < 500; tries++) {
+        if (decode_worker_stopping(c))
+            return MPP_NOK;
         ret = c->mpi->decode_put_packet(c->mpp, pkt);
         if (ret == MPP_OK) return MPP_OK;
         MppFrame f = NULL;
-        while (c->mpi->decode_get_frame(c->mpp, &f) == MPP_OK && f) {
-            assign_mpp_frame(f, c, d);
-            f = NULL;
-        }
-        usleep(1000);
+        if (c->mpi->decode_get_frame(c->mpp, &f) == MPP_OK && f &&
+            assign_mpp_frame(f, c) && c->outstanding_frames > 0)
+            c->outstanding_frames--;
     }
     return ret;
 }
 
-/* Build Annex B bitstream from VA-API buffers and send to MPP */
-static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
+static RKDecodeJob *decode_job_create(RKContext *c, uint8_t *data,
+                                      size_t size)
+{
+    RKDecodeJob *job = calloc(1, sizeof(*job));
+    if (!job)
+        return NULL;
+    job->data = data;
+    job->size = size;
+    job->target = c->render_target;
+    job->fence = c->render_fence;
+    job->repeat_slot = 8;
+    if (!c->render_surface ||
+        !rk_object_ref(&c->render_surface->base)) {
+        free(job);
+        return NULL;
+    }
+    job->surface = c->render_surface;
+    return job;
+}
+
+/* Build an owned Annex B access unit for the decode worker. */
+static VAStatus build_h264_job(RKContext *c, RKDriver *d,
+                               RKDecodeJob **job_out)
 {
     /* gather slice data */
     uint8_t *pkt_data = NULL;
@@ -1269,77 +1547,16 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
     }
 #undef PKT_APPEND
 
-    if (!pkt_sz) {
-        LOG("do_h264_decode: no slice data, marking surface 0x%x decoded",
-            (unsigned)c->render_target);
+    RKDecodeJob *job = decode_job_create(c, pkt_data, pkt_sz);
+    if (!job) {
         free(pkt_data);
-        RKSurface *tgt = surface_acquire(d, c->render_target);
-        if (tgt) {
-            pthread_mutex_lock(&tgt->lock);
-            tgt->decoded = true;
-            pthread_cond_signal(&tgt->cond);
-            pthread_mutex_unlock(&tgt->lock);
-            rk_object_unref(&tgt->base);
-        }
-        return VA_STATUS_SUCCESS;
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
-
-    /* Pre-drain: consume frames MPP already has ready from previous packets */
-    {
-        MppFrame f = NULL;
-        while (c->mpi->decode_get_frame(c->mpp, &f) == MPP_OK && f) {
-            assign_mpp_frame(f, c, d);
-            f = NULL;
-        }
-    }
-
-    LOG("do_h264_decode: sending %zu bytes target=0x%x", pkt_sz, (unsigned)c->render_target);
-    MppPacket pkt = NULL;
-    mpp_packet_init(&pkt, pkt_data, pkt_sz);
-    mpp_packet_set_length(pkt, pkt_sz);
-    mpp_packet_set_pts(pkt, (RK_S64)c->render_target);
-
-    MPP_RET ret = put_packet_draining(c, d, pkt);
-    mpp_packet_deinit(&pkt);
-    free(pkt_data);
-
-    if (ret != MPP_OK) {
-        LOG("decode_put_packet failed: %d", ret);
-        return VA_STATUS_ERROR_DECODING_ERROR;
-    }
-
-    for (int tries = 0; tries < 100; tries++) {
-        RKSurface *tgt = surface_acquire(d, c->render_target);
-        if (tgt) {
-            pthread_mutex_lock(&tgt->lock);
-            bool done = tgt->decoded;
-            pthread_mutex_unlock(&tgt->lock);
-            rk_object_unref(&tgt->base);
-            if (done) break;
-        }
-        MppFrame frame = NULL;
-        if (c->mpi->decode_get_frame(c->mpp, &frame) == MPP_OK && frame)
-            assign_mpp_frame(frame, c, d);
-        else
-            usleep(1000);
-    }
-
+    job->h264_field = c->last_pp.pic_fields.bits.field_pic_flag != 0;
+    LOG("build_h264_job: queued %zu bytes target=0x%x fence=%llu",
+        pkt_sz, (unsigned)job->target, (unsigned long long)job->fence);
+    *job_out = job;
     return VA_STATUS_SUCCESS;
-}
-
-static bool decode_queue_push(RKContext *c, VASurfaceID sid)
-{
-    int next = (c->dq_tail + 1) & 63;
-    if (next == c->dq_head)
-        return false;
-    c->decode_queue[c->dq_tail] = sid;
-    c->dq_tail = next;
-    return true;
-}
-
-static void decode_queue_undo_push(RKContext *c)
-{
-    c->dq_tail = (c->dq_tail - 1) & 63;
 }
 
 static uint8_t first_refresh_slot(uint8_t refresh_frame_flags)
@@ -1351,8 +1568,10 @@ static uint8_t first_refresh_slot(uint8_t refresh_frame_flags)
     return 8;
 }
 
-/* For VP9 / HEVC / AV1: slice data is already a complete coded picture */
-static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
+/* For VP9, slice data is already a complete coded picture. The worker owns
+ * the MPP submission and the hidden-reference repeat transaction. */
+static VAStatus build_generic_job(RKContext *c, RKDriver *d,
+                                  RKDecodeJob **job_out)
 {
     uint8_t *pkt_data = NULL;
     size_t   pkt_sz   = 0;
@@ -1374,129 +1593,307 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
             return append_status;
         }
     }
-    if (!pkt_sz) {
-        LOG("do_generic_decode: no slice data, marking surface 0x%x decoded",
-            (unsigned)c->render_target);
-        free(pkt_data);
-        RKSurface *tgt = surface_acquire(d, c->render_target);
-        if (tgt) {
-            pthread_mutex_lock(&tgt->lock);
-            tgt->decoded = true;
-            pthread_cond_signal(&tgt->cond);
-            pthread_mutex_unlock(&tgt->lock);
-            rk_object_unref(&tgt->base);
-        }
-        return VA_STATUS_SUCCESS;
-    }
-
     RKVP9FrameInfo vp9_info = {0};
     bool is_vp9 = c->coding == MPP_VIDEO_CodingVP9;
-    if (is_vp9 &&
+    if (pkt_sz && is_vp9 &&
         !rk_vp9_parse_profile0_frame(pkt_data, pkt_sz, &vp9_info)) {
-        LOG("do_generic_decode: malformed or unsupported VP9 header");
+        LOG("build_generic_job: malformed or unsupported VP9 header");
         free(pkt_data);
         return VA_STATUS_ERROR_DECODING_ERROR;
     }
-    bool is_hidden = is_vp9 && !vp9_info.show_existing_frame &&
+    bool is_hidden = pkt_sz && is_vp9 && !vp9_info.show_existing_frame &&
                      !vp9_info.show_frame;
 
-    /* Pre-drain: consume any frames MPP already has ready from previous
-     * packets.  Keyframes that timed out in the previous EndPicture poll
-     * window land here at the start of the next call. */
-    {
-        MppFrame f = NULL;
-        while (c->mpi->decode_get_frame(c->mpp, &f) == MPP_OK && f) {
-            assign_mpp_frame(f, c, d);
-            f = NULL;
-        }
-    }
-
-    /* Enqueue this surface into the FIFO decode queue (PTS-routing fallback).
-     * Altref frames are skipped: MPP never outputs them, so enqueuing would
-     * leave a permanent entry the head can never advance past. */
-    if (!is_hidden && !decode_queue_push(c, c->render_target)) {
-        LOG("do_generic_decode: decode queue full");
+    RKDecodeJob *job = decode_job_create(c, pkt_data, pkt_sz);
+    if (!job) {
         free(pkt_data);
-        return VA_STATUS_ERROR_DECODING_ERROR;
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
-
-    LOG("do_generic_decode: sending %zu bytes to MPP (coding=%d) target=0x%x%s",
-        pkt_sz, (int)c->coding, (unsigned)c->render_target,
+    job->is_hidden = is_hidden;
+    if (is_hidden)
+        job->repeat_slot = first_refresh_slot(vp9_info.refresh_frame_flags);
+    LOG("build_generic_job: queued %zu bytes target=0x%x fence=%llu%s",
+        pkt_sz, (unsigned)job->target, (unsigned long long)job->fence,
         is_hidden ? " [altref]" : "");
-    MppPacket pkt = NULL;
-    mpp_packet_init(&pkt, pkt_data, pkt_sz);
-    mpp_packet_set_length(pkt, pkt_sz);
-    mpp_packet_set_pts(pkt, (RK_S64)c->render_target);
-
-    MPP_RET ret = put_packet_draining(c, d, pkt);
-    mpp_packet_deinit(&pkt);
-    free(pkt_data);
-
-    if (ret != MPP_OK) {
-        LOG("decode_put_packet failed: %d", ret);
-        if (!is_hidden) decode_queue_undo_push(c);
-        return VA_STATUS_ERROR_DECODING_ERROR;
-    }
-
-    /* FFmpeg handles show_existing_frame itself and does not issue a VA call
-     * for that packet. MPP, meanwhile, keeps show_frame=0 output internal.
-     * Ask MPP to expose the newly refreshed reference through its display
-     * queue with a synthetic one-byte show_existing_frame packet. This copies
-     * the hidden pixels into the VA target before FFmpeg later reuses it. MPP
-     * keeps the display slot non-ready until SLOT_HAL_OUTPUT is cleared, so
-     * decode_get_frame cannot return it before hardware completion. */
-    if (is_hidden) {
-        uint8_t slot = first_refresh_slot(vp9_info.refresh_frame_flags);
-        if (slot < 8) {
-            uint8_t repeat_data;
-            MppPacket repeat = NULL;
-
-            if (!rk_vp9_make_profile0_show_existing(slot, &repeat_data) ||
-                !decode_queue_push(c, c->render_target)) {
-                LOG("do_generic_decode: cannot queue hidden VP9 surface");
-                return VA_STATUS_ERROR_DECODING_ERROR;
-            }
-
-            ret = mpp_packet_init(&repeat, &repeat_data,
-                                  sizeof(repeat_data));
-            if (ret != MPP_OK) {
-                decode_queue_undo_push(c);
-                LOG("do_generic_decode: hidden VP9 packet init failed: %d",
-                    ret);
-                return VA_STATUS_ERROR_ALLOCATION_FAILED;
-            }
-            mpp_packet_set_length(repeat, sizeof(repeat_data));
-            mpp_packet_set_pts(repeat, (RK_S64)c->render_target);
-            ret = put_packet_draining(c, d, repeat);
-            mpp_packet_deinit(&repeat);
-            if (ret != MPP_OK) {
-                decode_queue_undo_push(c);
-                LOG("do_generic_decode: hidden VP9 repeat failed: %d", ret);
-                return VA_STATUS_ERROR_DECODING_ERROR;
-            }
-            LOG("do_generic_decode: queued hidden VP9 target=0x%x via ref slot %u",
-                (unsigned)c->render_target, (unsigned)slot);
-            return VA_STATUS_SUCCESS;
-        }
-
-        /* A hidden frame that refreshes no slot cannot be shown later. */
-        RKSurface *tgt = surface_acquire(d, c->render_target);
-        if (tgt) {
-            pthread_mutex_lock(&tgt->lock);
-            tgt->decoded = true;
-            pthread_cond_signal(&tgt->cond);
-            pthread_mutex_unlock(&tgt->lock);
-            rk_object_unref(&tgt->base);
-        }
-        return VA_STATUS_SUCCESS;
-    }
-
-    /* Do NOT poll here — return immediately so Firefox's decode thread is never
-     * stalled. 4K keyframes (835KB) can take >1.6s in MPP; blocking EndPicture
-     * for that long freezes Firefox's media pipeline and triggers NS_ERROR at
-     * DASH segment boundaries. SyncSurface already has a drain loop and is the
-     * correct place to wait for the decoded frame. */
+    *job_out = job;
     return VA_STATUS_SUCCESS;
+}
+
+static void decode_job_destroy(RKDecodeJob *job)
+{
+    if (!job)
+        return;
+    free(job->data);
+    if (job->surface)
+        rk_object_unref(&job->surface->base);
+    free(job);
+}
+
+static MPP_RET submit_decode_packet(RKContext *c, const uint8_t *data,
+                                    size_t size, uint64_t token)
+{
+    MppPacket packet = NULL;
+    MPP_RET ret = mpp_packet_init(&packet, (void *)data, size);
+    if (ret != MPP_OK)
+        return ret;
+    mpp_packet_set_length(packet, size);
+    mpp_packet_set_pts(packet, (RK_S64)token);
+    ret = put_packet_draining(c, packet);
+    mpp_packet_deinit(&packet);
+    return ret;
+}
+
+static void worker_submit_job(RKContext *c, RKDecodeJob *job)
+{
+    if (job->size == 0) {
+        complete_surface_ref(job->surface, job->fence, true);
+        return;
+    }
+
+    if (c->coding == MPP_VIDEO_CodingAVC) {
+        RKFrameRoute *route = job->h264_field
+                            ? h264_route_find_surface(c, job->target,
+                                                      job->fence)
+                            : NULL;
+        bool new_route = route == NULL;
+        if (new_route) {
+            route = frame_route_create(job);
+            if (!route) {
+                complete_surface_ref(job->surface, job->fence, false);
+                return;
+            }
+            h264_route_add(c, route);
+        }
+        uint64_t route_token = route->token;
+        MPP_RET ret = submit_decode_packet(c, job->data, job->size,
+                                           route_token);
+        if (ret != MPP_OK) {
+            RKFrameRoute *failed = h264_route_take(c, route_token);
+            if (!new_route && failed && c->outstanding_frames > 0)
+                c->outstanding_frames--;
+            frame_route_destroy(failed);
+            LOG("decode worker: H.264 packet submission failed: %d", ret);
+            complete_surface_ref(job->surface, job->fence, false);
+            return;
+        }
+        if (new_route) {
+            c->outstanding_frames++;
+        } else if (!h264_route_find_surface(c, job->target, job->fence)) {
+            /* Backpressure draining consumed the prior field route while the
+             * continuation packet was being accepted. Track its later output
+             * with the same token instead of leaving it unroutable. */
+            RKFrameRoute *replacement = frame_route_create(job);
+            if (!replacement) {
+                complete_surface_ref(job->surface, job->fence, false);
+                return;
+            }
+            replacement->token = route_token;
+            h264_route_add(c, replacement);
+            c->outstanding_frames++;
+        } else {
+            LOG("decode worker: paired H.264 field surface=0x%x fence=%llu",
+                (unsigned)job->target, (unsigned long long)job->fence);
+        }
+        return;
+    }
+
+    /* A VP9 hidden frame is first submitted without a display route. When it
+     * refreshes a reference slot, a synthetic show_existing_frame packet is
+     * then routed to the logical VA surface as one atomic worker transaction. */
+    if (job->is_hidden) {
+        MPP_RET ret = submit_decode_packet(c, job->data, job->size,
+                                           job->token);
+        if (ret != MPP_OK) {
+            LOG("decode worker: hidden VP9 packet submission failed: %d", ret);
+            complete_surface_ref(job->surface, job->fence, false);
+            return;
+        }
+        if (job->repeat_slot >= 8) {
+            complete_surface_ref(job->surface, job->fence, true);
+            return;
+        }
+
+        uint8_t repeat_data;
+        RKFrameRoute *route = frame_route_create(job);
+        if (!route ||
+            !rk_vp9_make_profile0_show_existing(job->repeat_slot,
+                                                 &repeat_data)) {
+            frame_route_destroy(route);
+            complete_surface_ref(job->surface, job->fence, false);
+            return;
+        }
+        generic_route_add(c, route);
+        ret = submit_decode_packet(c, &repeat_data, sizeof(repeat_data),
+                                   job->token);
+        if (ret != MPP_OK) {
+            generic_route_remove(c, route);
+            frame_route_destroy(route);
+            LOG("decode worker: hidden VP9 repeat submission failed: %d", ret);
+            complete_surface_ref(job->surface, job->fence, false);
+            return;
+        }
+        c->outstanding_frames++;
+        LOG("decode worker: hidden VP9 target=0x%x fence=%llu via ref slot %u",
+            (unsigned)job->target, (unsigned long long)job->fence,
+            (unsigned)job->repeat_slot);
+        return;
+    }
+
+    RKFrameRoute *route = frame_route_create(job);
+    if (!route) {
+        complete_surface_ref(job->surface, job->fence, false);
+        return;
+    }
+    generic_route_add(c, route);
+    MPP_RET ret = submit_decode_packet(c, job->data, job->size, job->token);
+    if (ret != MPP_OK) {
+        generic_route_remove(c, route);
+        frame_route_destroy(route);
+        LOG("decode worker: packet submission failed: %d", ret);
+        complete_surface_ref(job->surface, job->fence, false);
+        return;
+    }
+    c->outstanding_frames++;
+}
+
+static void worker_drain_one(RKContext *c)
+{
+    MppFrame frame = NULL;
+    MPP_RET ret = c->mpi->decode_get_frame(c->mpp, &frame);
+    if (ret == MPP_OK && frame) {
+        if (assign_mpp_frame(frame, c) &&
+            c->outstanding_frames > 0)
+            c->outstanding_frames--;
+    } else if (ret != MPP_OK && ret != MPP_ERR_TIMEOUT) {
+        LOG("decode worker: output wait failed: %d", ret);
+    }
+}
+
+static void *decode_worker_main(void *opaque)
+{
+    RKContext *c = opaque;
+    LOG("decode worker: started coding=%d", (int)c->coding);
+
+    for (;;) {
+        pthread_mutex_lock(&c->work_lock);
+        while (!c->worker_stop && !c->job_head &&
+               c->outstanding_frames == 0)
+            pthread_cond_wait(&c->work_cond, &c->work_lock);
+
+        if (c->worker_stop) {
+            pthread_mutex_unlock(&c->work_lock);
+            break;
+        }
+
+        RKDecodeJob *job = c->job_head;
+        if (job) {
+            c->job_head = job->next;
+            if (!c->job_head)
+                c->job_tail = NULL;
+            job->next = NULL;
+        }
+        pthread_mutex_unlock(&c->work_lock);
+
+        if (job) {
+            worker_submit_job(c, job);
+            decode_job_destroy(job);
+        } else {
+            worker_drain_one(c);
+        }
+    }
+
+    LOG("decode worker: stopped coding=%d", (int)c->coding);
+    return NULL;
+}
+
+static bool enqueue_decode_job(RKContext *c, RKDecodeJob *job)
+{
+    pthread_mutex_lock(&c->work_lock);
+    if (c->worker_stop) {
+        pthread_mutex_unlock(&c->work_lock);
+        return false;
+    }
+    c->next_token++;
+    if (c->next_token == 0 || c->next_token > INT64_MAX)
+        c->next_token = 1;
+    job->token = c->next_token;
+    job->next = NULL;
+    if (c->job_tail)
+        c->job_tail->next = job;
+    else
+        c->job_head = job;
+    c->job_tail = job;
+    pthread_cond_signal(&c->work_cond);
+    pthread_mutex_unlock(&c->work_lock);
+    return true;
+}
+
+static void fail_pending_surface_ref(RKSurface *surface, uint64_t fence)
+{
+    if (!surface)
+        return;
+    pthread_mutex_lock(&surface->lock);
+    if (surface->fence == fence && !surface->decoded) {
+        surface->decode_failed = true;
+        pthread_cond_broadcast(&surface->cond);
+    }
+    pthread_mutex_unlock(&surface->lock);
+}
+
+static void stop_decode_worker(RKContext *c)
+{
+    if (!c->sync_initialized)
+        return;
+
+    if (c->worker_started) {
+        pthread_mutex_lock(&c->work_lock);
+        c->worker_stop = true;
+        pthread_cond_broadcast(&c->work_cond);
+        pthread_mutex_unlock(&c->work_lock);
+        pthread_join(c->worker, NULL);
+        c->worker_started = false;
+    }
+
+    RKDecodeJob *job = c->job_head;
+    c->job_head = NULL;
+    c->job_tail = NULL;
+    while (job) {
+        RKDecodeJob *next = job->next;
+        fail_pending_surface_ref(job->surface, job->fence);
+        decode_job_destroy(job);
+        job = next;
+    }
+
+    RKFrameRoute *route = c->h264_routes;
+    c->h264_routes = NULL;
+    while (route) {
+        RKFrameRoute *next = route->next;
+        fail_pending_surface_ref(route->surface, route->fence);
+        frame_route_destroy(route);
+        route = next;
+    }
+    route = c->generic_head;
+    c->generic_head = NULL;
+    c->generic_tail = NULL;
+    while (route) {
+        RKFrameRoute *next = route->next;
+        fail_pending_surface_ref(route->surface, route->fence);
+        frame_route_destroy(route);
+        route = next;
+    }
+    c->outstanding_frames = 0;
+
+    pthread_mutex_lock(&c->picture_lock);
+    RKSurface *render_surface = c->render_surface;
+    uint64_t fence = c->render_fence;
+    c->render_target = VA_INVALID_SURFACE;
+    c->render_surface = NULL;
+    c->render_fence = 0;
+    pthread_mutex_unlock(&c->picture_lock);
+    if (render_surface) {
+        fail_pending_surface_ref(render_surface, fence);
+        rk_object_unref(&render_surface->base);
+    }
 }
 
 static VAStatus rk_EndPicture(VADriverContextP ctx, VAContextID ctx_id) {
@@ -1505,90 +1902,118 @@ static VAStatus rk_EndPicture(VADriverContextP ctx, VAContextID ctx_id) {
     RKContext *c = context_acquire(d, ctx_id);
     if (!c) return VA_STATUS_ERROR_INVALID_CONTEXT;
 
+    RKDecodeJob *job = NULL;
     VAStatus st;
+    pthread_mutex_lock(&c->picture_lock);
+    if (c->render_target == VA_INVALID_SURFACE || !c->render_surface ||
+        c->render_fence == 0) {
+        pthread_mutex_unlock(&c->picture_lock);
+        rk_object_unref(&c->base);
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
     if (c->coding == MPP_VIDEO_CodingAVC)
-        st = do_h264_decode(c, d);
+        st = build_h264_job(c, d, &job);
     else
-        st = do_generic_decode(c, d);
+        st = build_generic_job(c, d, &job);
+    RKSurface *render_surface = c->render_surface;
+    uint64_t render_fence = c->render_fence;
+    if (st == VA_STATUS_SUCCESS && job) {
+        pthread_mutex_lock(&render_surface->lock);
+        if (render_surface->fence == render_fence)
+            render_surface->h264_field_pending = job->h264_field;
+        pthread_mutex_unlock(&render_surface->lock);
+    }
+    c->n_pending = 0;
+    c->render_target = VA_INVALID_SURFACE;
+    c->render_surface = NULL;
+    c->render_fence = 0;
+    pthread_mutex_unlock(&c->picture_lock);
+    if (st == VA_STATUS_SUCCESS && !job)
+        st = VA_STATUS_ERROR_ALLOCATION_FAILED;
+    if (st != VA_STATUS_SUCCESS)
+        fail_pending_surface_ref(render_surface, render_fence);
+    rk_object_unref(&render_surface->base);
+
+    if (st != VA_STATUS_SUCCESS) {
+        decode_job_destroy(job);
+        job = NULL;
+    }
+
+    if (st == VA_STATUS_SUCCESS && !enqueue_decode_job(c, job)) {
+        complete_surface_ref(job->surface, job->fence, false);
+        decode_job_destroy(job);
+        st = VA_STATUS_ERROR_OPERATION_FAILED;
+    }
 
     rk_object_unref(&c->base);
     return st;
 }
 
-static VAStatus rk_SyncSurface(VADriverContextP ctx, VASurfaceID id) {
+static VAStatus sync_surface_timeout(VADriverContextP ctx, VASurfaceID id,
+                                     uint64_t timeout_ns) {
     RKDriver  *d = drv_from_ctx(ctx);
     RKSurface *s = surface_acquire(d, id);
     if (!s) return VA_STATUS_ERROR_INVALID_SURFACE;
 
+    struct timespec deadline = {0};
+    bool timed = timeout_ns != VA_TIMEOUT_INFINITE;
+    if (timed && timeout_ns != 0) {
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        uint64_t seconds = timeout_ns / 1000000000u;
+        uint64_t nanoseconds = timeout_ns % 1000000000u;
+        deadline.tv_sec += (time_t)seconds;
+        deadline.tv_nsec += (long)nanoseconds;
+        if (deadline.tv_nsec >= 1000000000L) {
+            deadline.tv_sec++;
+            deadline.tv_nsec -= 1000000000L;
+        }
+    }
+
     pthread_mutex_lock(&s->lock);
-    bool failed = s->decode_failed;
-    bool ready  = s->decoded || (s->ctx_id == 0);  /* not started = placeholder valid */
-    VAContextID cid = s->ctx_id;
-    pthread_mutex_unlock(&s->lock);
-
-    if (failed) {
-        rk_object_unref(&s->base);
-        return VA_STATUS_ERROR_DECODING_ERROR;
-    }
-    if (ready) {
-        LOG("SyncSurface: surface=0x%x ready", id);
-        rk_object_unref(&s->base);
-        return VA_STATUS_SUCCESS;
-    }
-
-    /* EndPicture already polled 500ms; if the surface still isn't decoded
-     * (B-frame pipeline priming, slow keyframe), actively drain MPP here
-     * instead of sleeping on a cond that will never be signalled. */
-    RKContext *c = context_acquire(d, cid);
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec += 3;
-
-    LOG("SyncSurface: surface=0x%x draining MPP ctx=0x%x", id, cid);
     for (;;) {
-        pthread_mutex_lock(&s->lock);
-        bool done = s->decoded;
-        bool decode_failed = s->decode_failed;
-        pthread_mutex_unlock(&s->lock);
-        if (decode_failed) {
+        if (s->decode_failed) {
+            pthread_mutex_unlock(&s->lock);
             LOG("SyncSurface: decode failed surface=0x%x", id);
-            if (c)
-                rk_object_unref(&c->base);
             rk_object_unref(&s->base);
             return VA_STATUS_ERROR_DECODING_ERROR;
         }
-        if (done) { LOG("SyncSurface: surface=0x%x OK", id); break; }
-
-        struct timespec now;
-        clock_gettime(CLOCK_REALTIME, &now);
-        if (now.tv_sec > deadline.tv_sec ||
-            (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) {
-            LOG("SyncSurface: TIMEOUT surface=0x%x", id);
-            break;
+        if (s->decoded || s->ctx_id == 0) {
+            pthread_mutex_unlock(&s->lock);
+            LOG("SyncSurface: surface=0x%x ready", id);
+            rk_object_unref(&s->base);
+            return VA_STATUS_SUCCESS;
+        }
+        if (timeout_ns == 0) {
+            pthread_mutex_unlock(&s->lock);
+            rk_object_unref(&s->base);
+            return VA_STATUS_ERROR_TIMEDOUT;
         }
 
-        if (c) {
-            MppFrame frame = NULL;
-            if (c->mpi->decode_get_frame(c->mpp, &frame) == MPP_OK && frame) {
-                assign_mpp_frame(frame, c, d);
-                continue; /* recheck immediately without sleeping */
-            }
+        int wait_status = timed
+                        ? pthread_cond_timedwait(&s->cond, &s->lock,
+                                                 &deadline)
+                        : pthread_cond_wait(&s->cond, &s->lock);
+        if (wait_status == ETIMEDOUT) {
+            pthread_mutex_unlock(&s->lock);
+            LOG("SyncSurface: timeout surface=0x%x", id);
+            rk_object_unref(&s->base);
+            return VA_STATUS_ERROR_TIMEDOUT;
         }
-        usleep(1000);
+        if (wait_status != 0) {
+            pthread_mutex_unlock(&s->lock);
+            rk_object_unref(&s->base);
+            return VA_STATUS_ERROR_OPERATION_FAILED;
+        }
     }
-    pthread_mutex_lock(&s->lock);
-    bool final_ok = s->decoded;
-    pthread_mutex_unlock(&s->lock);
-    if (c)
-        rk_object_unref(&c->base);
-    rk_object_unref(&s->base);
-    return final_ok ? VA_STATUS_SUCCESS : VA_STATUS_ERROR_DECODING_ERROR;
+}
+
+static VAStatus rk_SyncSurface(VADriverContextP ctx, VASurfaceID id) {
+    return sync_surface_timeout(ctx, id, VA_TIMEOUT_INFINITE);
 }
 
 static VAStatus rk_SyncSurface2(VADriverContextP ctx,
                                   VASurfaceID id, uint64_t timeout_ns) {
-    (void)timeout_ns;
-    return rk_SyncSurface(ctx, id);
+    return sync_surface_timeout(ctx, id, timeout_ns);
 }
 
 static VAStatus rk_QuerySurfaceStatus(VADriverContextP ctx,

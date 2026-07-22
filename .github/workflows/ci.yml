@@ -119,6 +119,7 @@ jobs:
         run: |
           make check-driver-objects
           make check-driver-objects-sanitize
+          make check-driver-objects-tsan
       - name: External-buffer zero-copy gate
         env:
           FFMPEG: /usr/bin/ffmpeg

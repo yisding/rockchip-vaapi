@@ -158,6 +158,13 @@ static void test_contexts(struct VADriverVTable *v, VADriverContextP ctx,
     CHECK_STATUS(v->vaCreateContext(ctx, config, 16, 16, 0,
                                    &invalid_target, 1, &invalid_context),
                  VA_STATUS_ERROR_INVALID_SURFACE);
+
+    CHECK_STATUS(v->vaSyncSurface2(ctx, surfaces[2], 0),
+                 VA_STATUS_SUCCESS);
+    CHECK_STATUS(v->vaBeginPicture(ctx, contexts[0], surfaces[1]),
+                 VA_STATUS_SUCCESS);
+    CHECK_STATUS(v->vaSyncSurface2(ctx, surfaces[1], 0),
+                 VA_STATUS_ERROR_TIMEDOUT);
 }
 
 int main(void)
@@ -189,6 +196,8 @@ int main(void)
     for (size_t i = 0; i < CONTEXT_COUNT; i++)
         CHECK_STATUS(vtable.vaDestroyContext(&ctx, contexts[i]),
                      VA_STATUS_SUCCESS);
+    CHECK_STATUS(vtable.vaSyncSurface2(&ctx, surfaces[1], 0),
+                 VA_STATUS_ERROR_DECODING_ERROR);
     CHECK_STATUS(vtable.vaDestroyContext(&ctx, contexts[0]),
                  VA_STATUS_ERROR_INVALID_CONTEXT);
 

@@ -27,8 +27,8 @@ ASan/UBSan gates are green on the audited fixed kernel build; see
 - **Fixed nondeterministic VP9 frame drops.** `EndPicture` is non-blocking;
   when MPP's input queue filled, `decode_put_packet` failures were treated
   as fatal and ffmpeg silently dropped frames (measured: 38 of 120 packets
-  rejected on some runs, 5/10 runs corrupt). Puts now drain output frames
-  and retry, bounded. The synthetic VP9 regression is 10/10 bit-exact.
+  rejected on some runs, 5/10 runs corrupt). A per-context worker now owns
+  MPP submission and bounded output draining, then retries backpressured puts.
 - **VP9 output routing by FIFO instead of PTS**, since a
   `show_existing_frame` repeat of a hidden altref can surface with the
   altref packet's PTS and desync every later frame.
@@ -45,6 +45,12 @@ ASan/UBSan gates are green on the audited fixed kernel build; see
   use that buffer directly, with dma-buf CPU synchronization around readback.
   The old per-frame CPU copy is gone, and pool lifetime is shared with bound
   surfaces so context teardown does not orphan MPP allocations.
+- **Honest surface fences.** Decode jobs carry unique route tokens and the
+  target's generation fence. The worker signals completion through the
+  surface condition variable; `vaSyncSurface2` honors zero, finite, and
+  infinite timeouts, and stale late frames cannot overwrite a reused surface.
+  Declared H.264 field pairs share one fence/route, matching MPP's first-field
+  PTS behavior without weakening VP9 reuse isolation.
 - **Pinned real conformance vectors and CI plumbing.** The gate now uses ITU-T
   H.264 and official libvpx VP9 vectors with payload checksums, and normal plus
   sanitized AArch64 builds are cross-compiled in CI.

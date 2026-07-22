@@ -111,6 +111,15 @@ check-driver-objects-sanitize: tests/driver_objects_test.san
 	ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
 	UBSAN_OPTIONS=halt_on_error=1 ./tests/driver_objects_test.san
 
+tests/driver_objects_test.tsan: tests/driver_objects_test.c $(SRCS) \
+		src/object_heap.h src/frame_layout.h src/h264.h src/vp9.h
+	$(CC) $(CPPFLAGS) $(TSAN_CFLAGS) $(WARNINGS) $(VA_CFLAGS) $(MPP_CFLAGS) \
+		-Isrc tests/driver_objects_test.c $(SRCS) $(TSAN_LDFLAGS) \
+		$(LDLIBS) -o $@
+
+check-driver-objects-tsan: tests/driver_objects_test.tsan
+	TSAN_OPTIONS=halt_on_error=1 ./tests/driver_objects_test.tsan
+
 tests/object_heap_test: tests/object_heap_test.c src/object_heap.c src/object_heap.h
 	$(TEST_COMPILE) tests/object_heap_test.c src/object_heap.c -lpthread -o $@
 
@@ -197,11 +206,12 @@ lint:
 
 clean:
 	rm -f $(OBJS) $(SAN_OBJS) $(TARGET) $(UNIT_TESTS) $(SAN_TESTS) \
-		$(TSAN_TESTS) $(HARDWARE_TESTS) tests/driver_objects_test.san
+		$(TSAN_TESTS) $(HARDWARE_TESTS) tests/driver_objects_test.san \
+		tests/driver_objects_test.tsan
 	rm -rf $(SAN_DIR)
 
 .PHONY: all install fetch-vectors check check-conformance check-synthetic \
 	check-safe check-zero-copy check-zero-copy-sanitize test test-valgrind \
 	test-sanitize sanitize check-sanitize \
 	test-tsan check-sanitize-safe check-driver-objects \
-	check-driver-objects-sanitize lint clean
+	check-driver-objects-sanitize check-driver-objects-tsan lint clean
