@@ -5,6 +5,7 @@ src/*.o
 tests/vectors/
 tests/frame_layout_test
 tests/h264_test
+tests/hevc_test
 tests/driver_objects_test
 tests/object_heap_test
 tests/vp9_test

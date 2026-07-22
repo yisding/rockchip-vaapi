@@ -56,8 +56,9 @@ decoder gates, and two-hour 4K resource soak are also complete; see
 - **Pinned real conformance vectors and CI plumbing.** The gate now uses ITU-T
   H.264 and official libvpx VP9 vectors with payload checksums, and normal plus
   sanitized AArch64 builds are cross-compiled in CI.
-- **Honest capability advertising.** HEVC (no header reconstruction —
-  verified non-functional), VP8 (verified segfault), and the 10-bit
+- **Honest capability advertising.** HEVC reconstruction is under Phase 2
+  validation but remains hidden until its hardware conformance gate passes;
+  VP8 (verified segfault), and the 10-bit
   profiles (MPP emits compact NV15, driver exported it as P010 — layout
   mismatch) are no longer advertised, so applications fall back to software
   instead of breaking. They can return as their decode paths get built.
@@ -96,7 +97,7 @@ Key features:
 | H.264 | Main, High | full normal + ASan/UBSan gates bit-exact | scaling-list reconstruction included |
 | H.264 | Constrained Baseline | not offered | pinned SVA vector is corrupt in MPP; software fallback |
 | VP9 | Profile 0 | full normal + ASan/UBSan gates bit-exact | hidden-reference vector included on audited kernel |
-| HEVC | — | not offered | needs VPS/SPS/PPS reconstruction |
+| HEVC | Main (under development) | not offered | host-validated VPS/SPS/PPS + scaling reconstruction; hardware conformance pending |
 | VP8 | — | not offered | crashes in the generic path; needs debugging |
 | AV1 | — | not offered | VA-API hands headerless tile data; MPP needs full OBUs |
 | 10-bit (High10, VP9 P2) | — | not offered | MPP outputs compact NV15; P010 export path pending |

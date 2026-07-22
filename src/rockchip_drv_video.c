@@ -61,9 +61,8 @@ static VAStatus rk_Terminate(VADriverContextP ctx) {
  *   - H.264 Constrained Baseline: MPP decodes the pinned SVA_Base_B stream
  *     incorrectly even though the reconstructed Annex B stream is
  *     software-exact. Fall back instead of returning corrupt frames.
- *   - HEVC: no VPS/SPS/PPS reconstruction exists; MPP receives headerless
- *     slice data and decodes nothing (verified failure). Advertising it made
- *     apps pick VAAPI and break instead of falling back to software.
+ *   - HEVC: reconstruction and worker routing exist, but the profile remains
+ *     hidden until the pinned Main vectors pass the on-device bit-exact gate.
  *   - VP8: verified segfault in the generic path.
  *   - H.264 High10 / VP9 Profile 2 (10-bit): MPP outputs compact NV15, but
  *     the export/readback path treats 10-bit as 2-byte-per-sample P010 — layout

@@ -305,6 +305,20 @@ TSan; two simultaneous decoders in one process decode correctly; multi-hour
 - Backfill **H.264 spec-honesty**: honor `VAIQMatrixBufferH264` scaling
   matrices, derive level from the stream instead of hardcoding 5.1.
 
+**Progress (2026-07-22, host slice):** H.264 scaling-list reconstruction was
+already present; SPS level selection now derives the lowest representable
+Annex A level from frame size, DPB size, and the preserved bi-pred constraint.
+HEVC Main/Main10 VPS/SPS/PPS reconstruction, scaling lists, current RPS
+materialization, slice PPS-ID parsing, Annex B packet assembly, and
+display-reordering-safe token routing are implemented fail-closed. Normal,
+ASan/UBSan, Valgrind, and clang-tidy checks pass, and FFmpeg's independent
+`trace_headers` parser accepts both Main and Main10 bundles (including 10-bit
+scaling data). Eight checksum-pinned FFmpeg FATE HEVC Main conformance streams
+are in the manifest but deliberately remain `software-fallback`: no HEVC
+profile is advertised until the full on-device bit-exact gate passes. The
+current session has no MPP/DRM/RGA device nodes, so that hardware result is
+still pending rather than inferred from host checks.
+
 **Gate:** HEVC Main bit-exact vs software on conformance vectors; HEVC Main10 /
 VP9 P2 validated (PSNR-bounded, since RGA P010 conversion is not
 transform-exact — or NV15-space bit-exact if direct export lands); HDR HEVC
@@ -408,7 +422,9 @@ concurrent with decode contexts are race-free.
 - Phase 1: complete on `main`; object heap/object migrations, external-buffer
   zero-copy, worker/fence synchronization, module separation, two active
   decoders, sanitizer gates, and the multi-hour 4K resource soak are green.
-- Phases 2–5: planned.
+- Phase 2: in progress; the first host reconstruction/routing slice is green,
+  while HEVC Main hardware conformance and all 10-bit/HDR work remain open.
+- Phases 3–5: planned.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement
 map and driver-review finding as the decision/evidence record.

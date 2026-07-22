@@ -36,10 +36,31 @@ gate remains a Phase 1 exit requirement.
 The manifest at `tests/conformance-vectors.tsv` pins both the downloaded file
 and extracted payload SHA-256. It currently covers three ITU-T H.264 streams
 (Constrained Baseline fallback, Main field-coded VA-API, and High VA-API with
-scaling lists) and four official WebM/libvpx VP9 VA-API streams. The
+scaling lists), eight FFmpeg FATE HEVC Main conformance streams, and four
+official WebM/libvpx VP9 VA-API streams. The HEVC cases exercise long-term
+references, PPS syntax, RPS, scaling lists, tiles, VPS IDs, WPP, and weighted
+prediction; they remain `software-fallback` until the Phase 2 hardware gate is
+bit-exact. The
 `decode_path` column makes hardware expectations explicit; `vaapi` cases force
 hardware-frame output so an accidental software fallback cannot turn the gate
 green.
+
+`tests/hevc_test` independently round-trips the reconstructed Main/Main10
+syntax, scaling-list scan order, current short/long-term references, tile
+layout, and slice PPS IDs. It also exhaustively feeds every repeated-byte short
+prefix through the slice parser and checks that incomplete or unrepresentable
+VA state is rejected. For an additional parser outside the driver, emit either
+header bundle and run FFmpeg's `trace_headers` bitstream filter:
+
+```sh
+tests/hevc_test --emit-headers > main.h265
+tests/hevc_test --emit-main10-headers > main10.h265
+ffmpeg -f hevc -i main10.h265 -c copy -bsf:v trace_headers -f null /dev/null
+```
+
+Header-only streams can make the null muxer report missing picture dimensions;
+the validation evidence is successful VPS/SPS/PPS parsing with the expected
+profile, bit depth, and scaling-list fields.
 
 Fetch or verify them without using `/tmp`:
 

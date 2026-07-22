@@ -130,7 +130,7 @@ functions that actually do meaningful work are:
 | `rk_CreateSurfaces2` | Allocate `RKSurface` objects and pre-decode placeholder DMA-BUFs |
 | `rk_CreateBuffer` | Allocate a dynamic, stale-safe `RKBuffer` object and copy caller data |
 | `rk_BeginPicture` | Reset the render target and advance its surface fence |
-| `rk_RenderPicture` | Collect buffer IDs into `pending[]` and snapshot H.264 parameters |
+| `rk_RenderPicture` | Collect buffer IDs into `pending[]` and snapshot H.264/HEVC picture and IQ state |
 | `rk_EndPicture` | Build an owned packet and enqueue it to the context worker |
 | `rk_QuerySurfaceAttrs` | Report NV12 + `DRM_PRIME_2` support (critical for Firefox) |
 | `rk_ExportSurfaceHandle` | Return `VADRMPRIMESurfaceDescriptor` with `dup()`'d DMABUF fd |
@@ -186,8 +186,8 @@ For each `EndPicture` call the driver:
 5. The per-context worker assigns a unique token, calls
    `mpi->decode_put_packet`, and handles input backpressure by draining output
    through MPP's bounded blocking wait before retrying.
-6. The worker drains `mpi->decode_get_frame`; H.264 resolves the output token
-   after display reordering, while VP9 uses its ordered route queue.
+6. The worker drains `mpi->decode_get_frame`; H.264 and HEVC resolve the output
+   token after display reordering, while VP9 uses its ordered route queue.
 7. Validates the returned external buffer index and layout, binds the frame
    and backing-buffer reference to the logical VA surface, then signals
    `surface->cond`. No decoded pixels are copied.
@@ -360,24 +360,21 @@ val++ → find bit length k of val → write k zeros → write val in k+1 bits
 
 ---
 
-## Extending to other codecs
+## HEVC decode pipeline (under validation)
 
-To add HEVC/VP9/AV1 decode, implement a `do_hevc_decode()` (etc.) function
-analogous to `do_h264_decode()`:
+`hevc.c` reconstructs Annex B VPS/SPS/PPS units from the picture and IQ
+buffers, including Main/Main10 profile-tier-level syntax, scaling-list scan
+order, tiles, and the current short/long-term reference set. The first slice
+NAL is parsed only far enough to recover its PPS ID; malformed and unsupported
+state fails before a worker job is queued. `mpp_dec.c` prepends the parameter
+bundle, preserves already-prefixed slices, and adds a start code to bare NALs.
+HEVC shares H.264's token-based output routing because both codecs may reorder
+display output.
 
-1. In `rk_EndPicture`, dispatch on `ctx->coding`:
-   ```c
-   if (ctx->coding == MPP_VIDEO_CodingHEVC)
-       return do_hevc_decode(d, ctx, target);
-   ```
-2. HEVC/VP9/AV1 use `VAPictureParameterBufferHEVC`, `VASliceParameterBufferHEVC`,
-   etc. The header reconstruction challenge is codec-specific:
-   - HEVC: reconstruct VPS/SPS/PPS NALUs (more complex than H.264)
-   - VP9/AV1: no NAL structure; MPP accepts raw IVF/OBU frames directly
-
-3. Update `profile_supported`, `rk_QueryConfigProfiles`, and the conformance
-   manifest together. The driver currently advertises only validated H.264
-   Main/High and VP9 Profile 0 decode.
+This path is intentionally not advertised yet. Adding a profile requires
+changing `profile_supported`, its surface attributes, and the conformance
+manifest together only after the on-device bit-exact gate passes. VP9 Profile
+0 remains the other shipping path; VP9 Profile 2 and AV1 remain future work.
 
 ---
 
@@ -396,15 +393,13 @@ patching Firefox's sandbox policy).
 
 ## Known limitations
 
-- H.264 SPS reconstruction uses `level_idc=51` (5.1) unconditionally. The
-  actual level is not exposed by `VAPictureParameterBufferH264`; 5.1 is safe
-  for all content up to 4K@60fps.
-- `num_ref_idx_l0/l1_default` in PPS is hardcoded to 0 (= 1 reference).
-  Multi-reference B-frame content may require this to match the stream.
-- Maximum 64 surfaces / 8 concurrent decode contexts. Increase `MAX_SURFACES`
-  and `MAX_CONTEXTS` if needed.
-- Only H.264 header reconstruction is implemented. HEVC/VP9/AV1 decode paths
-  call `do_h264_decode` as a stub; full implementation is pending.
+- VA-API does not preserve the original H.264 `level_idc`; the driver derives
+  the lowest Annex A level supported by the available frame/DPB constraints.
+  Bitrate and frame-rate distinctions cannot be recovered from this buffer.
+- HEVC reconstruction is host-validated but unadvertised pending the pinned
+  on-device Main conformance gate and external-buffer parity audit.
+- HEVC Main10 and VP9 Profile 2 need the NV15-to-P010 output path before they
+  can be offered. VP8 and AV1 are also unadvertised.
 
 ---
 

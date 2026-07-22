@@ -13,6 +13,7 @@
 
 #include "frame_layout.h"
 #include "h264.h"
+#include "hevc.h"
 #include "vp9.h"
 
 static void decode_pool_destroy(void *opaque) {
@@ -58,7 +59,7 @@ static VAStatus packet_append(uint8_t **packet, size_t *packet_size,
     return VA_STATUS_SUCCESS;
 }
 
-static int profile_idc(VAProfile p) {
+static int h264_profile_idc(VAProfile p) {
     switch (p) {
     case VAProfileH264ConstrainedBaseline: return 66;
     case VAProfileH264Main:                return 77;
@@ -66,6 +67,12 @@ static int profile_idc(VAProfile p) {
     case VAProfileH264High10:              return 110;
     default:                               return 100;
     }
+}
+
+static bool codec_uses_token_routes(const RKContext *c)
+{
+    return c->coding == MPP_VIDEO_CodingAVC ||
+           c->coding == MPP_VIDEO_CodingHEVC;
 }
 
 static bool configure_external_group(RKContext *c, MppFrame info_frame)
@@ -306,8 +313,8 @@ static bool assign_mpp_frame(MppFrame frame, RKContext *c)
     RKFrameRoute *route;
     RKSurface  *s;
 
-    if (c->coding == MPP_VIDEO_CodingAVC) {
-        /* H.264 can reorder display output. The worker assigns a unique PTS
+    if (codec_uses_token_routes(c)) {
+        /* H.264 and HEVC can reorder display output. The worker assigns a unique PTS
          * token and resolves it back to the exact surface fence. */
         route = h264_route_take(c, (uint64_t)raw_pts);
     } else {
@@ -330,7 +337,7 @@ static bool assign_mpp_frame(MppFrame frame, RKContext *c)
     }
 
     VASurfaceID sid = route->target;
-    if (c->coding != MPP_VIDEO_CodingAVC &&
+    if (!codec_uses_token_routes(c) &&
         (uint64_t)raw_pts != route->token)
         LOG("assign_mpp_frame: PTS=0x%llx overridden by FIFO → surface=0x%x fence=%llu",
             (unsigned long long)raw_pts, (unsigned)sid,
@@ -564,7 +571,7 @@ static VAStatus build_h264_job(RKContext *c, RKDriver *d,
 
         if (is_idr || !c->sps_sent) {
             n = h264_write_sps(hdr, sizeof(hdr), &c->last_pp,
-                               profile_idc(c->profile));
+                               h264_profile_idc(c->profile));
             if (n <= 0) {
                 LOG("do_h264_decode: SPS reconstruction failed");
                 free(pkt_data);
@@ -574,7 +581,7 @@ static VAStatus build_h264_job(RKContext *c, RKDriver *d,
             c->sps_sent = true;
         }
         n = h264_write_pps(hdr, sizeof(hdr), &c->last_pp,
-                           c->has_iq && profile_idc(c->profile) >= 100
+                           c->has_iq && h264_profile_idc(c->profile) >= 100
                                ? &c->last_iq : NULL,
                            ref_l0_minus1, ref_l1_minus1);
         if (n <= 0) {
@@ -616,6 +623,109 @@ static VAStatus build_h264_job(RKContext *c, RKDriver *d,
     job->h264_field = c->last_pp.pic_fields.bits.field_pic_flag != 0;
     LOG("build_h264_job: queued %zu bytes target=0x%x fence=%llu",
         pkt_sz, (unsigned)job->target, (unsigned long long)job->fence);
+    *job_out = job;
+    return VA_STATUS_SUCCESS;
+}
+
+static bool has_annex_b_prefix(const uint8_t *data, size_t size)
+{
+    return data &&
+           ((size >= 3 && data[0] == 0 && data[1] == 0 && data[2] == 1) ||
+            (size >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 0 &&
+             data[3] == 1));
+}
+
+/* MPP consumes complete Annex B access units, while VA-API supplies the
+ * active HEVC parameter state and bare slice NAL units independently. */
+static VAStatus build_hevc_job(RKContext *c, RKDriver *d,
+                               RKDecodeJob **job_out)
+{
+    enum { HEVC_HEADER_CAPACITY = 65536 };
+    static const uint8_t start_code[4] = { 0, 0, 0, 1 };
+    RKHEVCSliceInfo slice_info;
+    bool found_slice = false;
+
+    if (!c->has_hevc_pp) {
+        LOG("build_hevc_job: missing picture parameters");
+        return VA_STATUS_ERROR_DECODING_ERROR;
+    }
+
+    for (int i = 0; i < c->n_pending; i++) {
+        RKBuffer *b = buffer_acquire(d, c->pending[i]);
+        if (!b)
+            continue;
+        if (b->type == VASliceDataBufferType && b->capacity > 0) {
+            found_slice = rk_hevc_parse_slice_info(b->data, b->capacity,
+                                                   &slice_info);
+            rk_object_unref(&b->base);
+            break;
+        }
+        rk_object_unref(&b->base);
+    }
+    if (!found_slice) {
+        LOG("build_hevc_job: missing or malformed slice NAL");
+        return VA_STATUS_ERROR_DECODING_ERROR;
+    }
+
+    uint8_t *headers = malloc(HEVC_HEADER_CAPACITY);
+    if (!headers)
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    int header_size = rk_hevc_write_parameter_sets(
+        headers, HEVC_HEADER_CAPACITY, &c->last_hevc_pp,
+        c->has_hevc_iq ? &c->last_hevc_iq : NULL, slice_info.pps_id,
+        c->profile == VAProfileHEVCMain10 ? 2 : 1);
+    if (header_size <= 0) {
+        LOG("build_hevc_job: parameter-set reconstruction failed");
+        free(headers);
+        return VA_STATUS_ERROR_DECODING_ERROR;
+    }
+
+    uint8_t *packet = NULL;
+    size_t packet_size = 0;
+    size_t packet_capacity = 0;
+    VAStatus status = packet_append(&packet, &packet_size, &packet_capacity,
+                                    headers, (size_t)header_size);
+    free(headers);
+    if (status != VA_STATUS_SUCCESS) {
+        free(packet);
+        return status;
+    }
+
+    unsigned int slice_count = 0;
+    for (int i = 0; i < c->n_pending; i++) {
+        RKBuffer *b = buffer_acquire(d, c->pending[i]);
+        if (!b)
+            continue;
+        if (b->type != VASliceDataBufferType || b->capacity == 0) {
+            rk_object_unref(&b->base);
+            continue;
+        }
+        if (!has_annex_b_prefix(b->data, b->capacity))
+            status = packet_append(&packet, &packet_size, &packet_capacity,
+                                   start_code, sizeof(start_code));
+        if (status == VA_STATUS_SUCCESS)
+            status = packet_append(&packet, &packet_size, &packet_capacity,
+                                   b->data, b->capacity);
+        rk_object_unref(&b->base);
+        if (status != VA_STATUS_SUCCESS) {
+            free(packet);
+            return status;
+        }
+        slice_count++;
+    }
+    if (slice_count == 0) {
+        free(packet);
+        return VA_STATUS_ERROR_DECODING_ERROR;
+    }
+
+    RKDecodeJob *job = decode_job_create(c, packet, packet_size);
+    if (!job) {
+        free(packet);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
+    LOG("build_hevc_job: queued %zu bytes in %u slice(s) target=0x%x fence=%llu",
+        packet_size, slice_count, (unsigned)job->target,
+        (unsigned long long)job->fence);
     *job_out = job;
     return VA_STATUS_SUCCESS;
 }
@@ -711,8 +821,10 @@ static void worker_submit_job(RKContext *c, RKDecodeJob *job)
         return;
     }
 
-    if (c->coding == MPP_VIDEO_CodingAVC) {
-        RKFrameRoute *route = job->h264_field
+    if (codec_uses_token_routes(c)) {
+        bool paired_field = c->coding == MPP_VIDEO_CodingAVC &&
+                            job->h264_field;
+        RKFrameRoute *route = paired_field
                             ? h264_route_find_surface(c, job->target,
                                                       job->fence)
                             : NULL;
@@ -733,7 +845,7 @@ static void worker_submit_job(RKContext *c, RKDecodeJob *job)
             if (!new_route && failed && c->outstanding_frames > 0)
                 c->outstanding_frames--;
             frame_route_destroy(failed);
-            LOG("decode worker: H.264 packet submission failed: %d", ret);
+            LOG("decode worker: token-routed packet submission failed: %d", ret);
             complete_surface_ref(job->surface, job->fence, false);
             return;
         }
@@ -962,6 +1074,8 @@ VAStatus rk_mpp_dec_build_job(RKContext *context, RKDriver *driver,
 {
     if (context->coding == MPP_VIDEO_CodingAVC)
         return build_h264_job(context, driver, job);
+    if (context->coding == MPP_VIDEO_CodingHEVC)
+        return build_hevc_job(context, driver, job);
     return build_generic_job(context, driver, job);
 }
 
@@ -972,4 +1086,3 @@ void rk_mpp_dec_reject_job(RKDecodeJob *job)
     complete_surface_ref(job->surface, job->fence, false);
     rk_mpp_dec_job_destroy(job);
 }
-

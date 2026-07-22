@@ -18,11 +18,11 @@ LDLIBS     ?= $(VA_LIBS) $(MPP_LIBS) -lpthread
 TARGET := rockchip_drv_video.so
 SRCS   := src/rockchip_drv_video.c src/buffer.c src/context.c src/export.c \
 	src/log.c src/mpp_dec.c src/object_heap.c src/surface.c src/h264.c \
-	src/frame_layout.c src/vp9.c
+	src/frame_layout.c src/hevc.c src/vp9.c
 OBJS   := $(SRCS:.c=.o)
 
 UNIT_TESTS := tests/object_heap_test tests/frame_layout_test tests/h264_test \
-	tests/vp9_test
+	tests/hevc_test tests/vp9_test
 HARDWARE_TESTS := tests/driver_objects_test
 
 VALGRIND        ?= valgrind
@@ -36,7 +36,7 @@ SAN_DIR      := tests/.san-driver
 SAN_TARGET   := $(SAN_DIR)/$(TARGET)
 SAN_OBJS     := $(SRCS:.c=.san.o)
 SAN_TESTS    := tests/object_heap_test.san tests/frame_layout_test.san \
-	tests/h264_test.san tests/vp9_test.san
+	tests/h264_test.san tests/hevc_test.san tests/vp9_test.san
 TSAN_CFLAGS  ?= -O1 -g3 -fno-omit-frame-pointer -fsanitize=thread
 TSAN_LDFLAGS ?= -fsanitize=thread
 TSAN_TESTS   := tests/object_heap_test.tsan
@@ -72,12 +72,13 @@ src/export.o: src/driver_internal.h src/export.h src/log.h src/object_heap.h \
 	src/surface.h
 src/log.o: src/log.h
 src/mpp_dec.o: src/driver_internal.h src/frame_layout.h src/h264.h src/log.h \
-	src/mpp_dec.h src/object_heap.h src/vp9.h
+	src/hevc.h src/mpp_dec.h src/object_heap.h src/vp9.h
 src/object_heap.o: src/object_heap.h
 src/surface.o: src/driver_internal.h src/frame_layout.h src/log.h \
 	src/object_heap.h src/surface.h
 src/frame_layout.o: src/frame_layout.h
 src/h264.o: src/h264.h src/bs.h
+src/hevc.o: src/hevc.h src/bs.h
 src/vp9.o: src/vp9.h
 
 install: $(TARGET)
@@ -131,7 +132,7 @@ check-safe: $(TARGET) test
 tests/driver_objects_test: tests/driver_objects_test.c $(SRCS) \
 		src/buffer.h src/context.h src/driver_internal.h src/export.h \
 		src/object_heap.h src/frame_layout.h src/h264.h src/log.h \
-		src/mpp_dec.h src/surface.h src/vp9.h
+		src/hevc.h src/mpp_dec.h src/surface.h src/vp9.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(VA_CFLAGS) $(MPP_CFLAGS) \
 		-Isrc tests/driver_objects_test.c $(SRCS) $(LDLIBS) -o $@
 
@@ -141,7 +142,7 @@ check-driver-objects: $(HARDWARE_TESTS)
 tests/driver_objects_test.san: tests/driver_objects_test.c $(SRCS) \
 		src/buffer.h src/context.h src/driver_internal.h src/export.h \
 		src/object_heap.h src/frame_layout.h src/h264.h src/log.h \
-		src/mpp_dec.h src/surface.h src/vp9.h
+		src/hevc.h src/mpp_dec.h src/surface.h src/vp9.h
 	$(CC) $(CPPFLAGS) $(SAN_CFLAGS) $(WARNINGS) $(VA_CFLAGS) $(MPP_CFLAGS) \
 		-Isrc tests/driver_objects_test.c $(SRCS) $(SAN_LDFLAGS) \
 		$(LDLIBS) -o $@
@@ -153,7 +154,7 @@ check-driver-objects-sanitize: tests/driver_objects_test.san
 tests/driver_objects_test.tsan: tests/driver_objects_test.c $(SRCS) \
 		src/buffer.h src/context.h src/driver_internal.h src/export.h \
 		src/object_heap.h src/frame_layout.h src/h264.h src/log.h \
-		src/mpp_dec.h src/surface.h src/vp9.h
+		src/hevc.h src/mpp_dec.h src/surface.h src/vp9.h
 	$(CC) $(CPPFLAGS) $(TSAN_CFLAGS) $(WARNINGS) $(VA_CFLAGS) $(MPP_CFLAGS) \
 		-Isrc tests/driver_objects_test.c $(SRCS) $(TSAN_LDFLAGS) \
 		$(LDLIBS) -o $@
@@ -169,6 +170,9 @@ tests/frame_layout_test: tests/frame_layout_test.c src/frame_layout.c src/frame_
 
 tests/h264_test: tests/h264_test.c src/h264.c src/h264.h src/bs.h
 	$(TEST_COMPILE) tests/h264_test.c src/h264.c -o $@
+
+tests/hevc_test: tests/hevc_test.c src/hevc.c src/hevc.h src/bs.h
+	$(TEST_COMPILE) tests/hevc_test.c src/hevc.c -o $@
 
 tests/vp9_test: tests/vp9_test.c src/vp9.c src/vp9.h
 	$(TEST_COMPILE) tests/vp9_test.c src/vp9.c -o $@
@@ -199,7 +203,7 @@ src/%.tsan.o: src/%.c
 	$(TSAN_DRIVER_COMPILE) -c $< -o $@
 
 $(TSAN_OBJS): src/buffer.h src/context.h src/driver_internal.h src/export.h \
-	src/frame_layout.h src/h264.h src/log.h src/mpp_dec.h src/object_heap.h \
+	src/frame_layout.h src/h264.h src/hevc.h src/log.h src/mpp_dec.h src/object_heap.h \
 	src/surface.h src/vp9.h
 
 src/rockchip_drv_video.san.o: src/buffer.h src/context.h \
@@ -213,12 +217,13 @@ src/export.san.o: src/driver_internal.h src/export.h src/log.h \
 	src/object_heap.h src/surface.h
 src/log.san.o: src/log.h
 src/mpp_dec.san.o: src/driver_internal.h src/frame_layout.h src/h264.h \
-	src/log.h src/mpp_dec.h src/object_heap.h src/vp9.h
+	src/hevc.h src/log.h src/mpp_dec.h src/object_heap.h src/vp9.h
 src/object_heap.san.o: src/object_heap.h
 src/surface.san.o: src/driver_internal.h src/frame_layout.h src/log.h \
 	src/object_heap.h src/surface.h
 src/frame_layout.san.o: src/frame_layout.h
 src/h264.san.o: src/h264.h src/bs.h
+src/hevc.san.o: src/hevc.h src/bs.h
 src/vp9.san.o: src/vp9.h
 
 tests/object_heap_test.san: tests/object_heap_test.c src/object_heap.c src/object_heap.h
@@ -231,6 +236,9 @@ tests/frame_layout_test.san: tests/frame_layout_test.c src/frame_layout.c src/fr
 
 tests/h264_test.san: tests/h264_test.c src/h264.c src/h264.h src/bs.h
 	$(SAN_TEST_COMPILE) tests/h264_test.c src/h264.c $(SAN_LDFLAGS) -o $@
+
+tests/hevc_test.san: tests/hevc_test.c src/hevc.c src/hevc.h src/bs.h
+	$(SAN_TEST_COMPILE) tests/hevc_test.c src/hevc.c $(SAN_LDFLAGS) -o $@
 
 tests/vp9_test.san: tests/vp9_test.c src/vp9.c src/vp9.h
 	$(SAN_TEST_COMPILE) tests/vp9_test.c src/vp9.c $(SAN_LDFLAGS) -o $@

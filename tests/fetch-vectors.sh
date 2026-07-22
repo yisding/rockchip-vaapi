@@ -1,5 +1,6 @@
 #!/bin/sh
-# Fetch the pinned ITU-T H.264 and WebM/libvpx VP9 conformance vectors.
+# Fetch the pinned ITU-T H.264, FFmpeg FATE HEVC, and WebM/libvpx VP9
+# conformance vectors.
 
 set -eu
 

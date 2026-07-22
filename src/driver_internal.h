@@ -10,6 +10,7 @@
 #include <rockchip/mpp_frame.h>
 #include <rockchip/rk_mpi.h>
 #include <va/va_backend.h>
+#include <va/va_dec_hevc.h>
 
 #include "log.h"
 #include "object_heap.h"
@@ -93,6 +94,11 @@ typedef struct {
     VAIQMatrixBufferH264 last_iq;
     bool has_iq;
     bool sps_sent;
+
+    VAPictureParameterBufferHEVC last_hevc_pp;
+    VAIQMatrixBufferHEVC last_hevc_iq;
+    bool has_hevc_pp;
+    bool has_hevc_iq;
 } RKContext;
 
 struct RKSurface {

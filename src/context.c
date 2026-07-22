@@ -235,6 +235,8 @@ VAStatus rk_BeginPicture(VADriverContextP ctx,
     c->render_fence  = s->fence;
     c->n_pending     = 0;
     c->has_iq        = false;
+    c->has_hevc_pp   = false;
+    c->has_hevc_iq   = false;
     pthread_mutex_unlock(&s->lock);
     LOG("BeginPicture: surface=0x%x fence=%llu%s", render_target,
         (unsigned long long)c->render_fence,
@@ -276,7 +278,8 @@ VAStatus rk_RenderPicture(VADriverContextP ctx,
 
     for (int i = 0; i < n; i++) {
         c->pending[c->n_pending++] = buffers[i];
-        /* Snapshot VAPictureParameterBufferH264 immediately */
+        /* Snapshot picture-wide state immediately: applications may destroy
+         * the VA buffers as soon as RenderPicture returns. */
         RKBuffer *b = buffer_acquire(d, buffers[i]);
         if (b && b->type == VAPictureParameterBufferType &&
             c->coding == MPP_VIDEO_CodingAVC &&
@@ -290,6 +293,20 @@ VAStatus rk_RenderPicture(VADriverContextP ctx,
                        sizeof(VAIQMatrixBufferH264)) {
             memcpy(&c->last_iq, b->data, sizeof(VAIQMatrixBufferH264));
             c->has_iq = true;
+        } else if (b && b->type == VAPictureParameterBufferType &&
+                   c->coding == MPP_VIDEO_CodingHEVC &&
+                   (size_t)b->size * b->num_elements >=
+                       sizeof(VAPictureParameterBufferHEVC)) {
+            memcpy(&c->last_hevc_pp, b->data,
+                   sizeof(VAPictureParameterBufferHEVC));
+            c->has_hevc_pp = true;
+        } else if (b && b->type == VAIQMatrixBufferType &&
+                   c->coding == MPP_VIDEO_CodingHEVC &&
+                   (size_t)b->size * b->num_elements >=
+                       sizeof(VAIQMatrixBufferHEVC)) {
+            memcpy(&c->last_hevc_iq, b->data,
+                   sizeof(VAIQMatrixBufferHEVC));
+            c->has_hevc_iq = true;
         }
         if (b)
             rk_object_unref(&b->base);

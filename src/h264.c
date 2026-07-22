@@ -23,6 +23,62 @@
 #include <string.h>
 #include <stdint.h>
 
+typedef struct {
+    uint8_t level_idc;
+    uint32_t max_fs;
+    uint32_t max_dpb_mbs;
+} H264LevelLimit;
+
+/* H.264 Annex A, table A-1.  Entries whose frame/DPB limits are identical
+ * are intentionally collapsed to the lower level: VA decode parameters do
+ * not carry bitrate or frame-rate, so those higher-level distinctions cannot
+ * be recovered honestly. */
+static const H264LevelLimit h264_level_limits[] = {
+    { 10,     99,    396 },
+    { 11,    396,    900 },
+    { 12,    396,   2376 },
+    { 21,    792,   4752 },
+    { 22,   1620,   8100 },
+    { 31,   3600,  18000 },
+    { 32,   5120,  20480 },
+    { 40,   8192,  32768 },
+    { 42,   8704,  34816 },
+    { 50,  22080, 110400 },
+    { 51,  36864, 184320 },
+    { 60, 139264, 696320 },
+};
+
+int h264_derive_level_idc(const VAPictureParameterBufferH264 *pp)
+{
+    if (!pp)
+        return 62;
+
+    uint64_t width_mbs = (uint64_t)pp->picture_width_in_mbs_minus1 + 1;
+    uint64_t height_mbs = (uint64_t)pp->picture_height_in_mbs_minus1 + 1;
+    uint64_t frame_mbs = width_mbs * height_mbs;
+    uint64_t dpb_mbs = frame_mbs * pp->num_ref_frames;
+
+    for (size_t i = 0;
+         i < sizeof(h264_level_limits) / sizeof(h264_level_limits[0]); i++) {
+        const H264LevelLimit *limit = &h264_level_limits[i];
+
+        /* FFmpeg preserves this derived SPS constraint in the VA buffer. */
+        if (pp->seq_fields.bits.MinLumaBiPredSize8x8 &&
+            limit->level_idc < 31)
+            continue;
+        if (frame_mbs > limit->max_fs ||
+            width_mbs * width_mbs > UINT64_C(8) * limit->max_fs ||
+            height_mbs * height_mbs > UINT64_C(8) * limit->max_fs ||
+            dpb_mbs > limit->max_dpb_mbs)
+            continue;
+        return limit->level_idc;
+    }
+
+    /* Level 6.2 is the highest standardized value.  Oversized hostile input
+     * is rejected elsewhere by surface/context limits; never wrap this byte. */
+    return 62;
+}
+
 /* Insert emulation prevention bytes (0x03) to avoid 0x000001/0x000002 sequences */
 static size_t emulation_prevent(const uint8_t *in, size_t in_sz,
                                 uint8_t *out, size_t out_cap) {
@@ -63,7 +119,7 @@ int h264_write_sps(uint8_t *buf, size_t buf_size,
     bs_write(&bs, 0, 1); /* constraint_set2 */
     bs_write(&bs, 0, 5); /* constraint_set3..5 (3) + reserved_zero_2bits (2) */
 
-    bs_write(&bs, 51, 8); /* level_idc = 5.1 (safe for all content) */
+    bs_write(&bs, (uint32_t)h264_derive_level_idc(pp), 8);
 
     bs_write_ue(&bs, 0); /* seq_parameter_set_id */
 

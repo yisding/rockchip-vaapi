@@ -161,10 +161,69 @@ static void test_matrix_absence_and_rejection(void)
     assert(h264_write_pps(nal, sizeof(nal), &pp, &iq, 2, 1) < 0);
 }
 
+static unsigned sps_level_idc(const VAPictureParameterBufferH264 *pp,
+                              int profile_idc)
+{
+    uint8_t nal[2048];
+    uint8_t rbsp[1024];
+    int nal_size = h264_write_sps(nal, sizeof(nal), pp, profile_idc);
+
+    assert(nal_size > 0);
+    size_t rbsp_size = unescape_nal(nal, (size_t)nal_size,
+                                    rbsp, sizeof(rbsp));
+    assert(rbsp_size >= 4);
+    assert(rbsp[0] == 0x67);
+    assert(rbsp[1] == (uint8_t)profile_idc);
+    return rbsp[3];
+}
+
+static void test_level_derivation(void)
+{
+    VAPictureParameterBufferH264 pp = {0};
+
+    /* 176x144, one reference: Level 1 frame and DPB limits. */
+    pp.picture_width_in_mbs_minus1 = 10;
+    pp.picture_height_in_mbs_minus1 = 8;
+    pp.num_ref_frames = 1;
+    assert(h264_derive_level_idc(&pp) == 10);
+    assert(sps_level_idc(&pp, 77) == 10);
+
+    /* The VA flag preserves the source SPS's >= 3.1 bi-pred constraint. */
+    pp.seq_fields.bits.MinLumaBiPredSize8x8 = 1;
+    assert(h264_derive_level_idc(&pp) == 31);
+    pp.seq_fields.bits.MinLumaBiPredSize8x8 = 0;
+
+    /* 1920x1088 (120x68 macroblocks) fits Level 4.0. */
+    pp.picture_width_in_mbs_minus1 = 119;
+    pp.picture_height_in_mbs_minus1 = 67;
+    pp.num_ref_frames = 4;
+    assert(h264_derive_level_idc(&pp) == 40);
+    assert(sps_level_idc(&pp, 100) == 40);
+
+    /* The same frame with five references exceeds the Level 4.0 DPB. */
+    pp.num_ref_frames = 5;
+    assert(h264_derive_level_idc(&pp) == 50);
+
+    /* 3840x2160 rounds to 240x135 macroblocks and requires Level 5.1. */
+    pp.picture_width_in_mbs_minus1 = 239;
+    pp.picture_height_in_mbs_minus1 = 134;
+    pp.num_ref_frames = 4;
+    assert(h264_derive_level_idc(&pp) == 51);
+
+    /* Out-of-range hostile dimensions saturate at the standardized maximum. */
+    pp.picture_width_in_mbs_minus1 = UINT16_MAX;
+    pp.picture_height_in_mbs_minus1 = UINT16_MAX;
+    pp.num_ref_frames = UINT8_MAX;
+    assert(h264_derive_level_idc(&pp) == 62);
+    assert(sps_level_idc(&pp, 100) == 62);
+    assert(h264_derive_level_idc(NULL) == 62);
+}
+
 int main(void)
 {
     test_scaling_matrices();
     test_matrix_absence_and_rejection();
+    test_level_derivation();
     puts("H.264 reconstruction tests: OK");
     return 0;
 }
