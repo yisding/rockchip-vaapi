@@ -13,7 +13,9 @@ applications such as Firefox.
 This fork continues the upstream v1.0.11 work. Changes so far are tested on a
 ROCK 5B (RK3588, vendor MPP stack on a 6.18 kernel) with a software-vs-VAAPI
 `framemd5` bit-exactness harness (`tests/validate.sh`). The full normal and
-ASan/UBSan gates are green on the audited fixed kernel build; see
+ASan/UBSan gates are green on the audited fixed kernel build. The Phase 1
+object model, module split, zero-copy worker/fence architecture, concurrent
+decoder gates, and two-hour 4K resource soak are also complete; see
 [docs/TESTING.md](docs/TESTING.md):
 
 - **Fixed multi-reference / B-frame H.264 corruption.** VA-API never passes

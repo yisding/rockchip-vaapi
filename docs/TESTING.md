@@ -186,3 +186,13 @@ or buffer-slot change. On that boot, both the unquarantined normal conformance
 gate and the full ASan/UBSan gate pass, including the hidden-reference vector,
 the supplemental matrix, and five VP9 determinism runs. This closes the Phase
 0 hardware gate.
+
+On 2026-07-22, the Phase 1 exit gates passed on the same board and kernel. Two
+active H.264/VP9 contexts in one FFmpeg process produced 240/240 external
+frames with overlapping workers and bit-exact normal plus ASan/UBSan output;
+the suppression-free complete-driver TSan variant also consumed all 240
+downloaded frames cleanly. The paced 4K soak then ran for 7,200 seconds and
+216,005 external frames. Post-warmup RSS was 191,288 KiB initially and 203,512
+KiB finally with a 47,844 KiB span; fd head/tail medians were 55/55 with a
+24-fd transient span, and every pool/worker lifecycle matched. The complete
+risky-enabled Phase 0 normal and ASan/UBSan gates were green again afterward.

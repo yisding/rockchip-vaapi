@@ -203,14 +203,13 @@ never green.
 **Gate:** ✅ conformance-vector decode bit-exact for the shipping profiles;
 gate green under ASan; CI builds and lints on push.
 
-### Phase 1 — Architectural renovation (decode core)  (~2–3 wk)
+### Phase 1 — Architectural renovation (decode core)  ✅ complete
 
 The foundation everything else builds on. No new codecs — restructure.
 
-Progress (2026-07-21): the object-model, zero-copy, and worker/fence portions
-are complete.
-The dynamic generation-tagged heap and driver object lock cover configs, contexts,
-surfaces, buffers, and distinct image objects. Acquired objects are
+Completed 2026-07-22.
+The dynamic generation-tagged heap and driver object lock cover configs,
+contexts, surfaces, buffers, and distinct image objects. Acquired objects are
 reference-counted across short lock sections; stale/type-confused handles are
 rejected; exhausted-generation slots are retired; contexts retain their
 resolved profile independently of config lifetime. The on-board lifecycle
@@ -271,14 +270,17 @@ The bit-exact workload passes normally and with the complete ASan/UBSan driver.
 The complete TSan driver downloads all 240 NV12 frames directly to rawvideo
 sinks with no suppressions; its harness limits FFmpeg to one decoder thread
 per input so uninstrumented FFmpeg frame-thread and swscale races do not
-obscure the two instrumented driver workers. The remaining Phase 1 exit work
-is the multi-hour 4K memory/fd soak.
+obscure the two instrumented driver workers.
 
-The soak harness is now in place and its 40-second qualification smoke is
-green: 1,205 external 4K frames, matched repeated pool/worker lifecycles, a
-36,660 KiB post-warmup RSS span with no growth, and identical head/tail fd
-medians. This proves the monitor and teardown audit; it does not satisfy the
-7,200-second Phase 1 duration requirement.
+The final paced 4K soak ran for 7,200 seconds and completed 216,005 external
+frames with every observed external-pool and worker creation matched by
+teardown. Post-warmup RSS started at 191,288 KiB and ended at 203,512 KiB,
+with a 47,844 KiB span; the fd head/tail medians were both 55 with a bounded
+24-fd transient span. No fallback, stale route, submission, ownership, or
+unsafe-layout marker appeared. After the soak, the complete risky-enabled
+Phase 0 gate was rerun on the final tree: all pinned vectors, supplemental
+H.264 matrix, 4K case, five VP9 determinism runs, and software fallback passed
+both normally and with the complete ASan/UBSan driver.
 
 - Split the monolith into the module layout above; introduce the object heap.
 - Implement the **external-buffer-group zero-copy model** and delete the
@@ -287,10 +289,10 @@ medians. This proves the monitor and teardown audit; it does not satisfy the
   polling.
 - Add the driver lock; make **two concurrent decode contexts** correct.
 
-**Gate:** H.264 + VP9 still conformance-vector bit-exact; **no per-frame copy**
-(verify via perf counters / memory bandwidth); clean under ASan **and** TSan;
-two simultaneous decoders in one process decode correctly; multi-hour 4K soak
-with flat memory and no fd leaks.
+**Gate:** ✅ H.264 + VP9 remain conformance-vector bit-exact; **no per-frame
+copy** (verify via perf counters / memory bandwidth); clean under ASan **and**
+TSan; two simultaneous decoders in one process decode correctly; multi-hour
+4K soak with flat memory and no fd leaks.
 
 ### Phase 2 — HEVC decode + 10-bit / HDR  (~2–3 wk)
 
@@ -403,9 +405,9 @@ concurrent with decode contexts are race-free.
 
 - Phase 0: complete on `main`; the normal and sanitized full hardware gates are
   green on the audited fixed kernel build `#3`.
-- Phase 1: in progress; object heap, all VA object migrations, external-buffer
-  zero-copy, worker/fence synchronization, module separation, and the
-  two-active-decoder gate are complete; the multi-hour soak remains.
+- Phase 1: complete on `main`; object heap/object migrations, external-buffer
+  zero-copy, worker/fence synchronization, module separation, two active
+  decoders, sanitizer gates, and the multi-hour 4K resource soak are green.
 - Phases 2–5: planned.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement
