@@ -159,6 +159,14 @@ three correctness fixes (PPS ref-counts, VP9 backpressure, VP9 PTS routing) are
 
 - Replace synthetic `testsrc2` clips with **real conformance vectors** (ITU-T
   H.264/H.265 reference streams, libvpx VP9 test vectors) in the gate.
+- **Track 14 crash hardening:** the libvpx
+  `vp90-2-10-show-existing-frame2` vector exposed an independent driver
+  overflow: MPP returned a 768-byte VP9 stride for a 352-pixel frame, while
+  the permanent VA surface buffer was sized for a 352-byte stride. The copy
+  ran past that dmabuf, and the export descriptor also claimed the larger
+  size; FFmpeg subsequently segfaulted. Size placeholder surfaces for MPP's
+  codec alignment, bounds-check every copy, and turn unexpected layouts into
+  `VA_STATUS_ERROR_DECODING_ERROR`.
 - Add an **ASan/UBSan build** and run the gate under it.
 - **CI skeleton:** GitHub Actions cross-compiles arm64 + runs clang-tidy on
   every push; document the on-board hardware gate as a self-hosted/manual job.

@@ -37,6 +37,7 @@
 #include <sys/ioctl.h>
 #include <errno.h>
 
+#include "frame_layout.h"
 #include "h264.h"
 
 /* ── logging ─────────────────────────────────────────────────── */
@@ -111,9 +112,11 @@ typedef struct {
      * capability probes (Firefox DMABUF probe before any decode). */
     MppBufferGroup priv_group;
     MppBuffer      priv_buf;
+    size_t         priv_size;
 
     MppFrameFormat fmt;     /* pixel format of last decoded frame (0 = NV12 default) */
     bool         decoded;
+    bool         decode_failed;
     VAContextID  ctx_id;   /* context currently decoding into this surface */
     pthread_mutex_t  lock;
     pthread_cond_t   cond;
@@ -384,22 +387,25 @@ static VAStatus rk_CreateSurfaces(VADriverContextP ctx,
         /* Pre-allocate placeholder DMA-BUF so ExportSurfaceHandle succeeds
          * before any decode (e.g. Firefox's DMABUF capability probe). */
         {
-            unsigned hs = (unsigned)((width  + 15) & ~15);
-            unsigned vs = (unsigned)((height + 15) & ~15);
+            size_t alloc_size = 0;
             MppBufferGroup grp = NULL;
             MppBuffer      buf = NULL;
-            if (mpp_buffer_group_get_internal(&grp, MPP_BUFFER_TYPE_DRM) == MPP_OK &&
-                mpp_buffer_get(grp, &buf, hs * vs * 3) == MPP_OK) {
+            if (rk_surface_buffer_size((unsigned)width, (unsigned)height,
+                                       &alloc_size) &&
+                mpp_buffer_group_get_internal(&grp, MPP_BUFFER_TYPE_DRM) == MPP_OK &&
+                mpp_buffer_get(grp, &buf, alloc_size) == MPP_OK) {
                 int raw_fd = mpp_buffer_get_fd(buf);
                 int dup_fd = (raw_fd > 0) ? dup(raw_fd) : -1;
                 if (dup_fd > 0) {
                     surf->priv_group = grp;
                     surf->priv_buf   = buf;
+                    surf->priv_size  = mpp_buffer_get_size(buf);
                     surf->prime_fd   = dup_fd;
-                    surf->hstride    = (int)hs;
-                    surf->vstride    = (int)vs;
-                    LOG("CreateSurfaces: surface %ux%u placeholder prime_fd=%d",
-                        (unsigned)width, (unsigned)height, surf->prime_fd);
+                    surf->hstride    = (int)((width  + 15) & ~15);
+                    surf->vstride    = (int)((height + 15) & ~15);
+                    LOG("CreateSurfaces: surface %ux%u placeholder prime_fd=%d size=%zu",
+                        (unsigned)width, (unsigned)height, surf->prime_fd,
+                        surf->priv_size);
                 } else {
                     LOG("CreateSurfaces: mpp_buffer_get_fd failed (raw_fd=%d), no placeholder", raw_fd);
                     mpp_buffer_put(buf);
@@ -611,6 +617,7 @@ static VAStatus rk_BeginPicture(VADriverContextP ctx,
     if (s) {
         pthread_mutex_lock(&s->lock);
         s->decoded = false;
+        s->decode_failed = false;
         s->ctx_id  = ctx_id;
         pthread_mutex_unlock(&s->lock);
     }
@@ -702,27 +709,30 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
     int  copy_h = fheight > 0 ? fheight : s->height;
     int  src_hs = fhs > 0 ? fhs : copy_w;
     int  src_vs = fvs > 0 ? fvs : copy_h;
-    bool i10    = MPP_FRAME_FMT_IS_YUV_10BIT(ffmt);
-    int  bpp    = i10 ? 2 : 1;
+    size_t src_size = buf ? mpp_buffer_get_size(buf) : 0;
+    size_t layout_size = 0;
+    bool linear_nv12 = (ffmt & MPP_FRAME_FMT_MASK) == MPP_FMT_YUV420SP;
     int  copied = 0;
     void *src = buf ? mpp_buffer_get_ptr(buf) : NULL;
     void *dst = s->priv_buf ? mpp_buffer_get_ptr(s->priv_buf) : NULL;
-    if (src && dst) {
-        const uint8_t *sy = (const uint8_t *)src;
-        uint8_t       *dy = (uint8_t       *)dst;
-        for (int r = 0; r < copy_h; r++)
-            memcpy(dy + (size_t)r * src_hs * bpp,
-                   sy + (size_t)r * src_hs * bpp,
-                   (size_t)src_hs * bpp);
-        const uint8_t *su = sy + (size_t)src_hs * src_vs * bpp;
-        uint8_t       *du = dy + (size_t)src_hs * src_vs * bpp;
-        for (int r = 0; r < copy_h / 2; r++)
-            memcpy(du + (size_t)r * src_hs * bpp,
-                   su + (size_t)r * src_hs * bpp,
-                   (size_t)src_hs * bpp);
+    if (linear_nv12 && src_hs > 0 && src_vs > 0 &&
+        rk_nv12_layout_size((size_t)src_hs, (size_t)src_vs, &layout_size) &&
+        rk_copy_nv12_frame(dst, s->priv_size, src, src_size,
+                           (size_t)src_hs, (size_t)src_vs))
         copied = 1;
-    }
     mpp_frame_deinit(&frame);
+
+    if (!copied) {
+        LOG("assign_mpp_frame: unsafe layout surface=0x%x fmt=0x%x "
+            "stride=%dx%d layout=%zu src=%zu dst=%zu; decode failed",
+            (unsigned)sid, (unsigned)ffmt, src_hs, src_vs, layout_size,
+            src_size, s->priv_size);
+        pthread_mutex_lock(&s->lock);
+        s->decode_failed = true;
+        pthread_cond_broadcast(&s->cond);
+        pthread_mutex_unlock(&s->lock);
+        return;
+    }
 
     pthread_mutex_lock(&s->lock);
     s->frame  = NULL;
@@ -732,6 +742,7 @@ static void assign_mpp_frame(MppFrame frame, RKContext *c, RKDriver *d)
     if (fhs     > 0) s->hstride = fhs;
     if (fvs     > 0) s->vstride = fvs;
     s->decoded  = true;
+    s->decode_failed = false;
     pthread_cond_signal(&s->cond);
     pthread_mutex_unlock(&s->lock);
     LOG("assign_mpp_frame: surface=0x%x prime_fd=%d MPP %dx%d stride=%dx%d fmt=0x%x copied=%d",
@@ -1038,10 +1049,13 @@ static VAStatus rk_SyncSurface(VADriverContextP ctx, VASurfaceID id) {
     if (!s) return VA_STATUS_ERROR_INVALID_SURFACE;
 
     pthread_mutex_lock(&s->lock);
+    bool failed = s->decode_failed;
     bool ready  = s->decoded || (s->ctx_id == 0);  /* not started = placeholder valid */
     VAContextID cid = s->ctx_id;
     pthread_mutex_unlock(&s->lock);
 
+    if (failed)
+        return VA_STATUS_ERROR_DECODING_ERROR;
     if (ready) {
         LOG("SyncSurface: surface=0x%x prime_fd=%d ready", id, s->prime_fd);
         return VA_STATUS_SUCCESS;
@@ -1059,7 +1073,12 @@ static VAStatus rk_SyncSurface(VADriverContextP ctx, VASurfaceID id) {
     for (;;) {
         pthread_mutex_lock(&s->lock);
         bool done = s->decoded;
+        bool decode_failed = s->decode_failed;
         pthread_mutex_unlock(&s->lock);
+        if (decode_failed) {
+            LOG("SyncSurface: decode failed surface=0x%x", id);
+            return VA_STATUS_ERROR_DECODING_ERROR;
+        }
         if (done) { LOG("SyncSurface: surface=0x%x OK prime_fd=%d", id, s->prime_fd); break; }
 
         struct timespec now;
@@ -1128,8 +1147,11 @@ static VAStatus rk_ExportSurfaceHandle(VADriverContextP ctx,
     pthread_mutex_lock(&s->lock);
     bool needs_sync = !s->decoded && (s->ctx_id != 0);
     pthread_mutex_unlock(&s->lock);
-    if (needs_sync)
-        rk_SyncSurface(ctx, id);
+    if (needs_sync) {
+        VAStatus sync_status = rk_SyncSurface(ctx, id);
+        if (sync_status != VA_STATUS_SUCCESS)
+            return sync_status;
+    }
 
     pthread_mutex_lock(&s->lock);
     int fd       = s->prime_fd;

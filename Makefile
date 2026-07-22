@@ -12,8 +12,9 @@ LDLIBS  := $(shell pkg-config --libs libva 2>/dev/null) \
            -lrockchip_mpp -lpthread
 
 TARGET  := rockchip_drv_video.so
-SRCS    := src/rockchip_drv_video.c src/h264.c
+SRCS    := src/rockchip_drv_video.c src/h264.c src/frame_layout.c
 OBJS    := $(SRCS:.c=.o)
+UNIT_TEST := tests/frame_layout_test
 
 all: $(TARGET)
 
@@ -23,15 +24,25 @@ $(TARGET): $(OBJS)
 src/%.o: src/%.c
 	$(CC) $(CFLAGS) -Isrc -c $< -o $@
 
+src/rockchip_drv_video.o: src/frame_layout.h src/h264.h
+src/frame_layout.o: src/frame_layout.h
+src/h264.o: src/h264.h
+
 install: $(TARGET)
 	install -D -m 755 $(TARGET) $(DESTDIR)$(DRIVERDIR)/$(TARGET)
 
 # Software-vs-VAAPI bit-exactness gate; needs an ffmpeg with vaapi support
 # and Rockchip MPP hardware. See tests/validate.sh for options.
-check: $(TARGET)
+check: $(TARGET) test
 	tests/validate.sh
 
-clean:
-	rm -f $(OBJS) $(TARGET)
+$(UNIT_TEST): tests/frame_layout_test.c src/frame_layout.c src/frame_layout.h
+	$(CC) $(CFLAGS) -Isrc tests/frame_layout_test.c src/frame_layout.c -o $@
 
-.PHONY: all install check clean
+test: $(UNIT_TEST)
+	./$(UNIT_TEST)
+
+clean:
+	rm -f $(OBJS) $(TARGET) $(UNIT_TEST)
+
+.PHONY: all install check test clean
