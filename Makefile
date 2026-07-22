@@ -16,10 +16,12 @@ MPP_LIBS   ?= -lrockchip_mpp
 LDLIBS     ?= $(VA_LIBS) $(MPP_LIBS) -lpthread
 
 TARGET := rockchip_drv_video.so
-SRCS   := src/rockchip_drv_video.c src/h264.c src/frame_layout.c src/vp9.c
+SRCS   := src/rockchip_drv_video.c src/object_heap.c src/h264.c \
+	src/frame_layout.c src/vp9.c
 OBJS   := $(SRCS:.c=.o)
 
-UNIT_TESTS := tests/frame_layout_test tests/h264_test tests/vp9_test
+UNIT_TESTS := tests/object_heap_test tests/frame_layout_test tests/h264_test \
+	tests/vp9_test
 
 VALGRIND        ?= valgrind
 VALGRIND_FLAGS  ?= --quiet --error-exitcode=99 --leak-check=full \
@@ -31,7 +33,11 @@ SAN_LDFLAGS ?= -fsanitize=address,undefined
 SAN_DIR      := tests/.san-driver
 SAN_TARGET   := $(SAN_DIR)/$(TARGET)
 SAN_OBJS     := $(SRCS:.c=.san.o)
-SAN_TESTS    := tests/frame_layout_test.san tests/h264_test.san tests/vp9_test.san
+SAN_TESTS    := tests/object_heap_test.san tests/frame_layout_test.san \
+	tests/h264_test.san tests/vp9_test.san
+TSAN_CFLAGS  ?= -O1 -g3 -fno-omit-frame-pointer -fsanitize=thread
+TSAN_LDFLAGS ?= -fsanitize=thread
+TSAN_TESTS   := tests/object_heap_test.tsan
 
 DRIVER_COMPILE = $(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) -fPIC \
 	$(VA_CFLAGS) $(MPP_CFLAGS) -Isrc
@@ -49,7 +55,8 @@ $(TARGET): $(OBJS)
 src/%.o: src/%.c
 	$(DRIVER_COMPILE) -c $< -o $@
 
-src/rockchip_drv_video.o: src/frame_layout.h src/h264.h src/vp9.h
+src/rockchip_drv_video.o: src/frame_layout.h src/h264.h src/object_heap.h src/vp9.h
+src/object_heap.o: src/object_heap.h
 src/frame_layout.o: src/frame_layout.h
 src/h264.o: src/h264.h src/bs.h
 src/vp9.o: src/vp9.h
@@ -75,6 +82,9 @@ check-synthetic: $(TARGET) test
 # This is intentionally not the release gate.
 check-safe: $(TARGET) test
 	TEST_SET=conformance ALLOW_QUARANTINE=1 tests/validate.sh
+
+tests/object_heap_test: tests/object_heap_test.c src/object_heap.c src/object_heap.h
+	$(TEST_COMPILE) tests/object_heap_test.c src/object_heap.c -lpthread -o $@
 
 tests/frame_layout_test: tests/frame_layout_test.c src/frame_layout.c src/frame_layout.h
 	$(TEST_COMPILE) tests/frame_layout_test.c src/frame_layout.c -o $@
@@ -103,10 +113,15 @@ $(SAN_TARGET): $(SAN_OBJS)
 src/%.san.o: src/%.c
 	$(SAN_DRIVER_COMPILE) -c $< -o $@
 
-src/rockchip_drv_video.san.o: src/frame_layout.h src/h264.h src/vp9.h
+src/rockchip_drv_video.san.o: src/frame_layout.h src/h264.h src/object_heap.h src/vp9.h
+src/object_heap.san.o: src/object_heap.h
 src/frame_layout.san.o: src/frame_layout.h
 src/h264.san.o: src/h264.h src/bs.h
 src/vp9.san.o: src/vp9.h
+
+tests/object_heap_test.san: tests/object_heap_test.c src/object_heap.c src/object_heap.h
+	$(SAN_TEST_COMPILE) tests/object_heap_test.c src/object_heap.c \
+		$(SAN_LDFLAGS) -lpthread -o $@
 
 tests/frame_layout_test.san: tests/frame_layout_test.c src/frame_layout.c src/frame_layout.h
 	$(SAN_TEST_COMPILE) tests/frame_layout_test.c src/frame_layout.c \
@@ -123,6 +138,14 @@ test-sanitize: $(SAN_TESTS)
 		ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
 		UBSAN_OPTIONS=halt_on_error=1 ./$$test_binary; \
 	done
+
+tests/object_heap_test.tsan: tests/object_heap_test.c src/object_heap.c src/object_heap.h
+	$(CC) $(CPPFLAGS) $(TSAN_CFLAGS) $(WARNINGS) -Isrc \
+		tests/object_heap_test.c src/object_heap.c $(TSAN_LDFLAGS) \
+		-lpthread -o $@
+
+test-tsan: $(TSAN_TESTS)
+	@set -e; for test_binary in $(TSAN_TESTS); do ./$$test_binary; done
 
 sanitize: $(SAN_TARGET) test-sanitize
 
@@ -145,9 +168,10 @@ lint:
 		$(VA_CFLAGS) $(MPP_CFLAGS) -Isrc
 
 clean:
-	rm -f $(OBJS) $(SAN_OBJS) $(TARGET) $(UNIT_TESTS) $(SAN_TESTS)
+	rm -f $(OBJS) $(SAN_OBJS) $(TARGET) $(UNIT_TESTS) $(SAN_TESTS) \
+		$(TSAN_TESTS)
 	rm -rf $(SAN_DIR)
 
 .PHONY: all install fetch-vectors check check-conformance check-synthetic \
 	check-safe test test-valgrind test-sanitize sanitize check-sanitize \
-	check-sanitize-safe lint clean
+	test-tsan check-sanitize-safe lint clean

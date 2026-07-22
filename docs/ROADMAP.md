@@ -207,6 +207,18 @@ gate green under ASan; CI builds and lints on push.
 
 The foundation everything else builds on. No new codecs — restructure.
 
+Progress (2026-07-21): the dynamic generation-tagged heap and the driver
+object lock are implemented and unit-tested. Configs and buffers have migrated
+off their fixed arrays; acquired objects are reference-counted across short
+lock sections, stale/type-confused handles are rejected, exhausted-generation
+slots are retired, concurrent heap lifetimes are exercised under TSan, and
+contexts retain their resolved profile independently of config lifetime.
+Contexts, surfaces, and distinct image objects remain to migrate before the
+object-model item is complete. After this slice, the entire Phase 0 suite was
+rerun from a clean build: host ASan/UBSan, TSan, Valgrind, clang-tidy, and
+ShellCheck passed; the normal and sanitized hardware gates remained bit-exact
+for every pinned and supplemental case.
+
 - Split the monolith into the module layout above; introduce the object heap.
 - Implement the **external-buffer-group zero-copy model** and delete the
   per-frame memcpy.
@@ -330,7 +342,8 @@ concurrent with decode contexts are race-free.
 
 - Phase 0: complete on `main`; the normal and sanitized full hardware gates are
   green on the audited fixed kernel build `#3`.
-- Phase 1: next.
+- Phase 1: in progress; object heap implemented, config/buffer migration
+  complete, context/surface/image migration next.
 - Phases 2–5: planned.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement

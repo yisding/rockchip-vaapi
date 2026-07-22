@@ -39,6 +39,7 @@
 
 #include "frame_layout.h"
 #include "h264.h"
+#include "object_heap.h"
 #include "vp9.h"
 
 /* ── logging ─────────────────────────────────────────────────── */
@@ -52,28 +53,24 @@ static void log_init(void) {
 } while(0)
 
 /* ── limits ──────────────────────────────────────────────────── */
-#define MAX_CONFIGS   16
 #define MAX_CONTEXTS   8
 #define MAX_SURFACES  64
-#define MAX_BUFFERS  256
 
 /* VA object ID namespaces */
-#define CONFIG_ID_BASE   0x01000000u
 #define CONTEXT_ID_BASE  0x02000000u
 #define SURFACE_ID_BASE  0x03000000u
-#define BUFFER_ID_BASE   0x04000000u
 
 /* ── data structures ─────────────────────────────────────────── */
 
 typedef struct {
-    bool          used;
+    RKObjectBase  base;
     VAProfile     profile;
     VAEntrypoint  entrypoint;
 } RKConfig;
 
 typedef struct {
     bool         used;
-    VAConfigID   config_id;
+    VAProfile    profile;
     int          width, height;
 
     MppCtx       mpp;
@@ -126,18 +123,20 @@ typedef struct {
 } RKSurface;
 
 typedef struct {
-    bool           used;
+    RKObjectBase   base;
     VABufferType   type;
     unsigned int   size;
     unsigned int   num_elements;
+    size_t         capacity;
     void          *data;
 } RKBuffer;
 
 typedef struct {
-    RKConfig   configs [MAX_CONFIGS];
+    pthread_mutex_t object_lock;
+    RKObjectHeap config_heap;
+    RKObjectHeap buffer_heap;
     RKContext  contexts[MAX_CONTEXTS];
     RKSurface  surfaces[MAX_SURFACES];
-    RKBuffer   buffers [MAX_BUFFERS];
 } RKDriver;
 
 /* ── helpers ─────────────────────────────────────────────────── */
@@ -146,9 +145,12 @@ static RKDriver *drv_from_ctx(VADriverContextP ctx) {
     return (RKDriver *)ctx->pDriverData;
 }
 
-static RKConfig *config_by_id(RKDriver *d, VAConfigID id) {
-    unsigned idx = id - CONFIG_ID_BASE;
-    return (idx < MAX_CONFIGS && d->configs[idx].used) ? &d->configs[idx] : NULL;
+static RKConfig *config_acquire(RKDriver *d, VAConfigID id) {
+    pthread_mutex_lock(&d->object_lock);
+    RKConfig *config = (RKConfig *)rk_object_heap_acquire(
+        &d->config_heap, (uint32_t)id);
+    pthread_mutex_unlock(&d->object_lock);
+    return config;
 }
 
 static RKContext *context_by_id(RKDriver *d, VAContextID id) {
@@ -161,9 +163,18 @@ static RKSurface *surface_by_id(RKDriver *d, VASurfaceID id) {
     return (idx < MAX_SURFACES && d->surfaces[idx].used) ? &d->surfaces[idx] : NULL;
 }
 
-static RKBuffer *buffer_by_id(RKDriver *d, VABufferID id) {
-    unsigned idx = id - BUFFER_ID_BASE;
-    return (idx < MAX_BUFFERS && d->buffers[idx].used) ? &d->buffers[idx] : NULL;
+static RKBuffer *buffer_acquire(RKDriver *d, VABufferID id) {
+    pthread_mutex_lock(&d->object_lock);
+    RKBuffer *buffer = (RKBuffer *)rk_object_heap_acquire(
+        &d->buffer_heap, (uint32_t)id);
+    pthread_mutex_unlock(&d->object_lock);
+    return buffer;
+}
+
+static void buffer_destroy(void *opaque) {
+    RKBuffer *buffer = opaque;
+    free(buffer->data);
+    free(buffer);
 }
 
 static VAStatus packet_append(uint8_t **packet, size_t *packet_size,
@@ -228,6 +239,8 @@ static VAStatus rk_Terminate(VADriverContextP ctx) {
     if (!d) return VA_STATUS_SUCCESS;
 
     /* destroy any leftover objects */
+    rk_object_heap_finish(&d->config_heap);
+    rk_object_heap_finish(&d->buffer_heap);
     for (int i = 0; i < MAX_SURFACES; i++) {
         if (!d->surfaces[i].used) continue;
         if (d->surfaces[i].frame) mpp_frame_deinit(&d->surfaces[i].frame);
@@ -241,9 +254,7 @@ static VAStatus rk_Terminate(VADriverContextP ctx) {
         if (!d->contexts[i].used) continue;
         if (d->contexts[i].mpp) mpp_destroy(d->contexts[i].mpp);
     }
-    for (int i = 0; i < MAX_BUFFERS; i++) {
-        if (d->buffers[i].used) free(d->buffers[i].data);
-    }
+    pthread_mutex_destroy(&d->object_lock);
     free(d);
     ctx->pDriverData = NULL;
     return VA_STATUS_SUCCESS;
@@ -346,23 +357,34 @@ static VAStatus rk_CreateConfig(VADriverContextP ctx,
     }
     (void)attribs; (void)n_attribs;
 
-    for (unsigned i = 0; i < MAX_CONFIGS; i++) {
-        if (!d->configs[i].used) {
-            d->configs[i].used = true;
-            d->configs[i].profile = profile;
-            d->configs[i].entrypoint = entrypoint;
-            *out_id = CONFIG_ID_BASE + i;
-            return VA_STATUS_SUCCESS;
-        }
+    RKConfig *config = calloc(1, sizeof(*config));
+    if (!config)
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    rk_object_init(&config->base, free);
+    config->profile = profile;
+    config->entrypoint = entrypoint;
+
+    uint32_t id;
+    pthread_mutex_lock(&d->object_lock);
+    bool inserted = rk_object_heap_insert(&d->config_heap, &config->base,
+                                          &id);
+    pthread_mutex_unlock(&d->object_lock);
+    if (!inserted) {
+        rk_object_unref(&config->base);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
-    return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    *out_id = (VAConfigID)id;
+    return VA_STATUS_SUCCESS;
 }
 
 static VAStatus rk_DestroyConfig(VADriverContextP ctx, VAConfigID id) {
     RKDriver *d = drv_from_ctx(ctx);
-    RKConfig *c = config_by_id(d, id);
+    pthread_mutex_lock(&d->object_lock);
+    RKConfig *c = (RKConfig *)rk_object_heap_remove(&d->config_heap,
+                                                    (uint32_t)id);
+    pthread_mutex_unlock(&d->object_lock);
     if (!c) return VA_STATUS_ERROR_INVALID_CONFIG;
-    c->used = false;
+    rk_object_unref(&c->base);
     return VA_STATUS_SUCCESS;
 }
 
@@ -372,12 +394,13 @@ static VAStatus rk_QueryConfigAttributes(VADriverContextP ctx,
                                           VAEntrypoint *entrypoint,
                                           VAConfigAttrib *attribs, int *n) {
     RKDriver *d = drv_from_ctx(ctx);
-    RKConfig *c = config_by_id(d, id);
+    RKConfig *c = config_acquire(d, id);
     if (!c) return VA_STATUS_ERROR_INVALID_CONFIG;
     (void)attribs;
     *profile = c->profile;
     *entrypoint = c->entrypoint;
     *n = 0;
+    rk_object_unref(&c->base);
     return VA_STATUS_SUCCESS;
 }
 
@@ -503,10 +526,12 @@ static VAStatus rk_CreateContext(VADriverContextP ctx,
     RKDriver *d = drv_from_ctx(ctx);
     (void)flag; (void)targets; (void)n_targets;
 
-    RKConfig *cfg = config_by_id(d, config_id);
+    RKConfig *cfg = config_acquire(d, config_id);
     if (!cfg) return VA_STATUS_ERROR_INVALID_CONFIG;
 
     MppCodingType coding = profile_to_coding(cfg->profile);
+    VAProfile profile = cfg->profile;
+    rk_object_unref(&cfg->base);
     if (coding == MPP_VIDEO_CodingUnused)
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
 
@@ -545,7 +570,7 @@ static VAStatus rk_CreateContext(VADriverContextP ctx,
         c->mpi->control(c->mpp, MPP_SET_OUTPUT_BLOCK, (MppParam)&block);
 
         c->used      = true;
-        c->config_id = config_id;
+        c->profile   = profile;
         c->width     = width;
         c->height    = height;
         c->coding    = coding;
@@ -577,41 +602,70 @@ static VAStatus rk_CreateBuffer(VADriverContextP ctx,
     RKDriver *d = drv_from_ctx(ctx);
     (void)context;
 
-    for (unsigned i = 0; i < MAX_BUFFERS; i++) {
-        if (d->buffers[i].used) continue;
-        RKBuffer *b = &d->buffers[i];
-        b->used         = true;
-        b->type         = type;
-        b->size         = size;
-        b->num_elements = num_elements;
-        b->data         = malloc((size_t)size * num_elements);
-        if (!b->data) {
-            b->used = false;
-            return VA_STATUS_ERROR_ALLOCATION_FAILED;
-        }
-        if (data) memcpy(b->data, data, (size_t)size * num_elements);
-        else      memset(b->data, 0,    (size_t)size * num_elements);
-        *out_id = BUFFER_ID_BASE + i;
-        return VA_STATUS_SUCCESS;
+    if (size != 0 && num_elements > SIZE_MAX / size)
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    size_t bytes = (size_t)size * num_elements;
+
+    RKBuffer *b = calloc(1, sizeof(*b));
+    if (!b)
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    rk_object_init(&b->base, buffer_destroy);
+    b->type         = type;
+    b->size         = size;
+    b->num_elements = num_elements;
+    b->capacity     = bytes;
+    b->data         = malloc(bytes ? bytes : 1u);
+    if (!b->data) {
+        rk_object_unref(&b->base);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
-    return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    if (data) memcpy(b->data, data, bytes);
+    else      memset(b->data, 0, bytes);
+
+    uint32_t id;
+    pthread_mutex_lock(&d->object_lock);
+    bool inserted = rk_object_heap_insert(&d->buffer_heap, &b->base, &id);
+    pthread_mutex_unlock(&d->object_lock);
+    if (!inserted) {
+        rk_object_unref(&b->base);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
+    *out_id = (VABufferID)id;
+    return VA_STATUS_SUCCESS;
 }
 
 static VAStatus rk_BufferSetNumElements(VADriverContextP ctx,
                                          VABufferID id, unsigned int n) {
     RKDriver *d = drv_from_ctx(ctx);
-    RKBuffer *b = buffer_by_id(d, id);
+    RKBuffer *b = buffer_acquire(d, id);
     if (!b) return VA_STATUS_ERROR_INVALID_BUFFER;
+
+    if (b->size != 0 && n > SIZE_MAX / b->size) {
+        rk_object_unref(&b->base);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
+    size_t bytes = (size_t)b->size * n;
+    void *resized = realloc(b->data, bytes ? bytes : 1u);
+    if (!resized) {
+        rk_object_unref(&b->base);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
+    if (bytes > b->capacity)
+        memset((uint8_t *)resized + b->capacity, 0, bytes - b->capacity);
+    b->data = resized;
+    b->capacity = bytes;
     b->num_elements = n;
+    rk_object_unref(&b->base);
     return VA_STATUS_SUCCESS;
 }
 
 static VAStatus rk_MapBuffer(VADriverContextP ctx,
                               VABufferID id, void **ptr) {
     RKDriver *d = drv_from_ctx(ctx);
-    RKBuffer *b = buffer_by_id(d, id);
+    RKBuffer *b = buffer_acquire(d, id);
     if (!b) return VA_STATUS_ERROR_INVALID_BUFFER;
     *ptr = b->data;
+    rk_object_unref(&b->base);
     return VA_STATUS_SUCCESS;
 }
 
@@ -622,10 +676,12 @@ static VAStatus rk_UnmapBuffer(VADriverContextP ctx, VABufferID id) {
 
 static VAStatus rk_DestroyBuffer(VADriverContextP ctx, VABufferID id) {
     RKDriver *d = drv_from_ctx(ctx);
-    RKBuffer *b = buffer_by_id(d, id);
+    pthread_mutex_lock(&d->object_lock);
+    RKBuffer *b = (RKBuffer *)rk_object_heap_remove(&d->buffer_heap,
+                                                    (uint32_t)id);
+    pthread_mutex_unlock(&d->object_lock);
     if (!b) return VA_STATUS_ERROR_INVALID_BUFFER;
-    free(b->data);
-    memset(b, 0, sizeof(*b));
+    rk_object_unref(&b->base);
     return VA_STATUS_SUCCESS;
 }
 
@@ -666,7 +722,7 @@ static VAStatus rk_RenderPicture(VADriverContextP ctx,
     for (int i = 0; i < n && c->n_pending < 64; i++) {
         c->pending[c->n_pending++] = buffers[i];
         /* Snapshot VAPictureParameterBufferH264 immediately */
-        RKBuffer *b = buffer_by_id(d, buffers[i]);
+        RKBuffer *b = buffer_acquire(d, buffers[i]);
         if (b && b->type == VAPictureParameterBufferType &&
             c->coding == MPP_VIDEO_CodingAVC &&
             (size_t)b->size * b->num_elements >=
@@ -680,6 +736,8 @@ static VAStatus rk_RenderPicture(VADriverContextP ctx,
             memcpy(&c->last_iq, b->data, sizeof(VAIQMatrixBufferH264));
             c->has_iq = true;
         }
+        if (b)
+            rk_object_unref(&b->base);
     }
     return VA_STATUS_SUCCESS;
 }
@@ -837,11 +895,18 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
      * original default couldn't have matched both either). */
     int ref_l0_minus1 = 0, ref_l1_minus1 = 0;
     for (int i = 0; i < c->n_pending; i++) {
-        RKBuffer *b = buffer_by_id(d, c->pending[i]);
-        if (!b || b->type != VASliceParameterBufferType) continue;
+        RKBuffer *b = buffer_acquire(d, c->pending[i]);
+        if (!b)
+            continue;
+        if (b->type != VASliceParameterBufferType ||
+            b->capacity < sizeof(VASliceParameterBufferH264)) {
+            rk_object_unref(&b->base);
+            continue;
+        }
         const VASliceParameterBufferH264 *sp = b->data;
         ref_l0_minus1 = sp->num_ref_idx_l0_active_minus1;
         ref_l1_minus1 = sp->num_ref_idx_l1_active_minus1;
+        rk_object_unref(&b->base);
         break;
     }
 
@@ -849,25 +914,26 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
      * parameter sets mid-stream is legal Annex B and MPP handles it. */
     bool is_idr = false;
     for (int i = 0; i < c->n_pending; i++) {
-        RKBuffer *b = buffer_by_id(d, c->pending[i]);
-        if (!b || b->type != VASliceDataBufferType) continue;
-        uint8_t nal_type = ((uint8_t *)b->data)[0] & 0x1F;
+        RKBuffer *b = buffer_acquire(d, c->pending[i]);
+        if (!b)
+            continue;
+        if (b->type != VASliceDataBufferType || b->capacity == 0) {
+            rk_object_unref(&b->base);
+            continue;
+        }
+        uint8_t nal_type = ((const uint8_t *)b->data)[0] & 0x1F;
         is_idr = (nal_type == 5);
+        rk_object_unref(&b->base);
         break;
     }
 
     {
         uint8_t hdr[2048];
-        RKConfig *config = config_by_id(d, c->config_id);
         int n;
 
-        if (!config) {
-            free(pkt_data);
-            return VA_STATUS_ERROR_INVALID_CONFIG;
-        }
         if (is_idr || !c->sps_sent) {
             n = h264_write_sps(hdr, sizeof(hdr), &c->last_pp,
-                               profile_idc(config->profile));
+                               profile_idc(c->profile));
             if (n <= 0) {
                 LOG("do_h264_decode: SPS reconstruction failed");
                 free(pkt_data);
@@ -877,7 +943,7 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
             c->sps_sent = true;
         }
         n = h264_write_pps(hdr, sizeof(hdr), &c->last_pp,
-                           c->has_iq && profile_idc(config->profile) >= 100
+                           c->has_iq && profile_idc(c->profile) >= 100
                                ? &c->last_iq : NULL,
                            ref_l0_minus1, ref_l1_minus1);
         if (n <= 0) {
@@ -891,10 +957,23 @@ static VAStatus do_h264_decode(RKContext *c, RKDriver *d)
     /* append each slice with Annex B start code */
     static const uint8_t sc[4] = {0x00, 0x00, 0x00, 0x01};
     for (int i = 0; i < c->n_pending; i++) {
-        RKBuffer *b = buffer_by_id(d, c->pending[i]);
-        if (!b || b->type != VASliceDataBufferType) continue;
-        PKT_APPEND(sc, 4);
-        PKT_APPEND(b->data, (size_t)b->size * b->num_elements);
+        RKBuffer *b = buffer_acquire(d, c->pending[i]);
+        if (!b)
+            continue;
+        if (b->type != VASliceDataBufferType) {
+            rk_object_unref(&b->base);
+            continue;
+        }
+        VAStatus append_status = packet_append(&pkt_data, &pkt_sz, &pkt_cap,
+                                               sc, sizeof(sc));
+        if (append_status == VA_STATUS_SUCCESS)
+            append_status = packet_append(&pkt_data, &pkt_sz, &pkt_cap,
+                                          b->data, b->capacity);
+        rk_object_unref(&b->base);
+        if (append_status != VA_STATUS_SUCCESS) {
+            free(pkt_data);
+            return append_status;
+        }
     }
 #undef PKT_APPEND
 
@@ -985,22 +1064,22 @@ static VAStatus do_generic_decode(RKContext *c, RKDriver *d)
     size_t   pkt_sz   = 0;
     size_t   pkt_cap  = 0;
 
-#define PKT_APPEND(ptr, len) do {                                      \
-    VAStatus _append_status = packet_append(&pkt_data, &pkt_sz,        \
-                                             &pkt_cap, (ptr), (len));   \
-    if (_append_status != VA_STATUS_SUCCESS) {                         \
-        free(pkt_data);                                                \
-        return _append_status;                                         \
-    }                                                                  \
-} while (0)
-
     for (int i = 0; i < c->n_pending; i++) {
-        RKBuffer *b = buffer_by_id(d, c->pending[i]);
-        if (!b || b->type != VASliceDataBufferType) continue;
-        PKT_APPEND(b->data, (size_t)b->size * b->num_elements);
+        RKBuffer *b = buffer_acquire(d, c->pending[i]);
+        if (!b)
+            continue;
+        if (b->type != VASliceDataBufferType) {
+            rk_object_unref(&b->base);
+            continue;
+        }
+        VAStatus append_status = packet_append(
+            &pkt_data, &pkt_sz, &pkt_cap, b->data, b->capacity);
+        rk_object_unref(&b->base);
+        if (append_status != VA_STATUS_SUCCESS) {
+            free(pkt_data);
+            return append_status;
+        }
     }
-#undef PKT_APPEND
-
     if (!pkt_sz) {
         LOG("do_generic_decode: no slice data, marking surface 0x%x decoded",
             (unsigned)c->render_target);
@@ -1445,8 +1524,12 @@ static VAStatus rk_GetImage(VADriverContextP ctx, VASurfaceID surface_id,
     (void)x; (void)y; (void)w; (void)h;
     RKDriver  *d  = drv_from_ctx(ctx);
     RKSurface *s  = surface_by_id(d, surface_id);
-    RKBuffer  *ib = buffer_by_id(d, (VABufferID)image_id);
-    if (!s || !ib || !s->priv_buf || !ib->data) return VA_STATUS_ERROR_INVALID_SURFACE;
+    RKBuffer  *ib = buffer_acquire(d, (VABufferID)image_id);
+    if (!s || !ib || !s->priv_buf || !ib->data) {
+        if (ib)
+            rk_object_unref(&ib->base);
+        return VA_STATUS_ERROR_INVALID_SURFACE;
+    }
 
     int hs  = s->hstride ? s->hstride : s->width;
     int vs  = s->vstride ? s->vstride : s->height;
@@ -1465,6 +1548,7 @@ static VAStatus rk_GetImage(VADriverContextP ctx, VASurfaceID surface_id,
     uint8_t       *du = dp + (size_t)img_hs * s->height;
     for (int r = 0; r < s->height / 2; r++)
         memcpy(du + r * img_hs, su + r * hs * bpp, (size_t)img_hs);
+    rk_object_unref(&ib->base);
     return VA_STATUS_SUCCESS;
 }
 
@@ -1538,11 +1622,12 @@ static VAStatus rk_BufferInfo(VADriverContextP ctx, VABufferID buf_id,
                                unsigned int *num_elements)
 {
     RKDriver *d = drv_from_ctx(ctx);
-    RKBuffer *b = buffer_by_id(d, buf_id);
+    RKBuffer *b = buffer_acquire(d, buf_id);
     if (!b) return VA_STATUS_ERROR_INVALID_BUFFER;
     if (type)         *type         = b->type;
     if (size)         *size         = b->size;
     if (num_elements) *num_elements = b->num_elements;
+    rk_object_unref(&b->base);
     return VA_STATUS_SUCCESS;
 }
 
@@ -1695,6 +1780,21 @@ VAStatus __vaDriverInit_1_20(VADriverContextP ctx)  /* NOLINT */
     LOG("__vaDriverInit_1_20: entry");
     RKDriver *d = calloc(1, sizeof(*d));
     if (!d) return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    if (pthread_mutex_init(&d->object_lock, NULL) != 0) {
+        free(d);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
+    if (!rk_object_heap_init(&d->config_heap, RK_OBJECT_CONFIG)) {
+        pthread_mutex_destroy(&d->object_lock);
+        free(d);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
+    if (!rk_object_heap_init(&d->buffer_heap, RK_OBJECT_BUFFER)) {
+        rk_object_heap_finish(&d->config_heap);
+        pthread_mutex_destroy(&d->object_lock);
+        free(d);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
     ctx->pDriverData = d;
 
     ctx->version_major        = VA_MAJOR_VERSION;

@@ -35,6 +35,10 @@ rockchip-vaapi/
 │   ├── h264.h
 │   ├── frame_layout.c         # Checked NV12 sizing and frame copies
 │   ├── frame_layout.h
+│   ├── object_heap.c          # Dynamic generation-tagged VA handles
+│   ├── object_heap.h
+│   ├── vp9.c                  # VP9 header parsing/repeat construction
+│   ├── vp9.h
 │   └── bs.h                   # Header-only Exp-Golomb bitstream writer
 ├── tests/                     # Unit + conformance-vector harnesses
 ├── debian/                    # Debian packaging metadata
@@ -73,15 +77,17 @@ Firefox compositor (zero-copy from the exported surface onward)
 
 ### Object model
 
-The driver maintains four ID-namespaced flat arrays in a single `RKDriver`
-heap allocation (`ctx->pDriverData`):
+Phase 1 is replacing the original fixed arrays with the dynamic heap in
+`object_heap.c`. Configs and buffers have migrated; contexts and surfaces are
+the remaining fixed-array users, and images temporarily share their backing
+buffer handle.
 
-| Array | Max | ID base | Struct |
-|-------|-----|---------|--------|
-| `configs` | 16 | `0x01000000` | `RKConfig` |
-| `contexts` | 8 | `0x02000000` | `RKContext` |
-| `surfaces` | 64 | `0x03000000` | `RKSurface` |
-| `buffers` | 256 | `0x04000000` | `RKBuffer` |
+Heap handles encode a 4-bit object type, an 8-bit generation, and a 20-bit
+slot index. Lookup rejects the wrong type and any stale generation. Slots grow
+dynamically, and a slot is retired instead of wrapping its generation, so an
+old handle cannot alias a later object. Objects are atomically reference-counted:
+the driver holds `object_lock` only while acquiring/removing a heap entry, and
+the acquired object remains alive after that short critical section.
 
 ---
 
@@ -95,7 +101,7 @@ functions that actually do meaningful work are:
 | `rk_CreateConfig` | Validate profile/entrypoint; allocate `RKConfig` |
 | `rk_CreateContext` | `mpp_create` + `mpp_init`; allocate `RKContext` |
 | `rk_CreateSurfaces2` | Allocate `RKSurface` slots; surface dimensions stored |
-| `rk_CreateBuffer` | `malloc` + copy caller data into `RKBuffer` |
+| `rk_CreateBuffer` | Allocate a dynamic, stale-safe `RKBuffer` object and copy caller data |
 | `rk_BeginPicture` | Store render target in `RKContext` |
 | `rk_RenderPicture` | Collect buffer IDs into `pending[]` |
 | `rk_EndPicture` | Dispatch to `do_h264_decode()` (or future codec dispatch) |
@@ -267,12 +273,10 @@ MPP frame immediately. This avoids two earlier bugs:
   ~3 buffers for 4K; exporting MPP's fd directly meant MPP overwrote a buffer the
   compositor was still showing. Copying into a dedicated per-surface buffer fixes
   this.
-- **Stale altref export**: VP9 altref (hidden, `show_frame=0`) frames are decoded
-  by MPP as references but **not** output via `decode_get_frame` in this
-  environment. The driver therefore does **not** poll/block for them (blocking
-  per altref accumulated latency until Firefox's pipeline underran); it sends the
-  altref to MPP, marks the surface decoded immediately, and lets the permanent
-  `priv_buf` keep `ExportSurfaceHandle` valid.
+- **Hidden-reference export**: MPP normally withholds VP9 `show_frame=0`
+  frames from `decode_get_frame`. The driver parses the refresh mask and sends
+  a minimal `show_existing_frame` repeat, causing MPP to expose the completed
+  hidden reference so it can be copied into the correct permanent surface.
 
 ## `bs.h` — Exp-Golomb bitstream writer
 
@@ -313,8 +317,9 @@ analogous to `do_h264_decode()`:
    - HEVC: reconstruct VPS/SPS/PPS NALUs (more complex than H.264)
    - VP9/AV1: no NAL structure; MPP accepts raw IVF/OBU frames directly
 
-3. Update `rk_QueryConfigProfiles` and `rk_QueryConfigEntrypoints` to expose
-   the new profile (already done in the current driver for all four codecs).
+3. Update `profile_supported`, `rk_QueryConfigProfiles`, and the conformance
+   manifest together. The driver currently advertises only validated H.264
+   Main/High and VP9 Profile 0 decode.
 
 ---
 

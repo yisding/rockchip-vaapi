@@ -11,6 +11,7 @@ Run the unit tests, the complete sanitized build, and static analysis with:
 ```sh
 make test
 make sanitize
+make test-tsan
 make test-valgrind
 make lint
 shellcheck tests/fetch-vectors.sh tests/validate.sh
@@ -24,6 +25,10 @@ or UBSan finding. `make test-valgrind` runs the same unit tests with full leak
 checking and treats every reported leak kind or memory error as a failure. On
 AArch64, install both `valgrind` and the matching `libc6-dbg`; Valgrind needs
 the dynamic loader's symbols before it can start.
+
+`make test-tsan` stress-tests concurrent object insertion, lookup, removal,
+and refcounted destruction under ThreadSanitizer. The full two-decoder TSan
+gate remains a Phase 1 exit requirement.
 
 ## Pinned conformance vectors
 

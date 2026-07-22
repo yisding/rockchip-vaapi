@@ -44,7 +44,7 @@ jobs:
           mkdir -p build/mpp-headers
           ln -s "$GITHUB_WORKSPACE/third_party/mpp/inc" build/mpp-headers/rockchip
       - name: Unit tests and sanitizers
-        run: make test test-sanitize test-valgrind
+        run: make test test-sanitize test-tsan test-valgrind
       - name: Static analysis
         run: make lint MPP_CFLAGS="-I$GITHUB_WORKSPACE/build/mpp-headers"
       - name: Shell analysis
