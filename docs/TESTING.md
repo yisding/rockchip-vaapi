@@ -198,7 +198,7 @@ driver build includes the hidden-reference bridge, `/usr/bin/ffmpeg` has
 VA-API, and the build dependencies, `curl`, `unzip`, and `sha256sum` are
 installed.
 
-As of 2026-07-21, this board is booted into fixed kernel build `#3`, identified
+On 2026-07-21, this board was booted into fixed kernel build `#3`, identified
 by kernel-notes SHA-256
 `5708409f759669c2ff6a9d32597acb452632ef658c57a1f2b75a981733d7559a`.
 The pinned MPP revision already contains Rockchip's January 2026 parser
@@ -208,7 +208,29 @@ gate and the full ASan/UBSan gate pass, including the hidden-reference vector,
 the supplemental matrix, and five VP9 determinism runs. This closes the Phase
 0 hardware gate.
 
-On 2026-07-22, the Phase 1 exit gates passed on the same board and kernel. Two
+On 2026-07-22, the board moved to forward-port kernel build `#4`
+(`Pd222-C4ad2`, patches `0001`–`0058` less `0012`), identified by kernel-notes
+SHA-256
+`db292410e58bd9c658a0b32b6fc7c7895f3ac4a349ae3c292c441e92e340690e`;
+the booted vmlinuz md5 matches the deb payload. The build-`#4` audit: its tail
+is a superset of build `#3`'s and carries the proven root-cause fix for the
+risky-vector hard-lock (`0058`, clientless `RELEASE_FD` guard) plus the `0055`
+register-translation bounds check and `0053`/`0054` hardening, and the `0058`
+deterministic reproducer and `0057` cross reproducer passed on this exact boot
+with a zero-flagged kernel journal. On that basis the risky fingerprint
+defaults were advanced to build `#4`, and the full gate ladder passed on it:
+host checks, all three object-lifecycle gates, both zero-copy gates, all three
+concurrent-decode gates, and the risky-enabled normal plus ASan/UBSan
+conformance gates — every vector bit-exact including
+`vp90-2-10-show-existing-frame2.webm` and the five VP9 determinism runs, with
+zero fatal kernel-journal signatures across the window. Boundary: build `#4`
+is a KASAN debug build and the run shared the board with a kernel compile, so
+this closes correctness gates only; the two-hour 4K soak (a performance claim)
+was not re-run and stands on build `#3`'s Phase 1 evidence pending a
+production rebuild of the same tail. The generic procedure now lives in the
+ysp repo's `kernel-drivers/docs/kernel-validation-runbook.md`.
+
+Earlier on 2026-07-22, the Phase 1 exit gates passed on build `#3`. Two
 active H.264/VP9 contexts in one FFmpeg process produced 240/240 external
 frames with overlapping workers and bit-exact normal plus ASan/UBSan output;
 the suppression-free complete-driver TSan variant also consumed all 240
