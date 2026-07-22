@@ -714,6 +714,7 @@ static VAStatus rk_CreateContext(VADriverContextP ctx,
         config_id, width, height, (int)coding, n_targets);
 
     if (n_targets > 0) {
+        // NOLINTNEXTLINE(bugprone-sizeof-expression) -- pointer array.
         c->targets = calloc((size_t)n_targets, sizeof(*c->targets));
         if (!c->targets) {
             rk_object_unref(&c->base);
