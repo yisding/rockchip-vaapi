@@ -48,7 +48,7 @@ jobs:
       - name: Static analysis
         run: make lint MPP_CFLAGS="-I$GITHUB_WORKSPACE/build/mpp-headers"
       - name: Shell analysis
-        run: shellcheck tests/fetch-vectors.sh tests/validate.sh
+        run: shellcheck tests/check-zero-copy.sh tests/fetch-vectors.sh tests/validate.sh
 
   arm64-cross-build:
     runs-on: ubuntu-24.04
@@ -119,6 +119,12 @@ jobs:
         run: |
           make check-driver-objects
           make check-driver-objects-sanitize
+      - name: External-buffer zero-copy gate
+        env:
+          FFMPEG: /usr/bin/ffmpeg
+        run: |
+          make check-zero-copy
+          make check-zero-copy-sanitize
       - name: Full conformance gate
         env:
           FFMPEG: /usr/bin/ffmpeg

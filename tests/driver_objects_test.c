@@ -1,10 +1,12 @@
 #include <va/va.h>
 #include <va/va_backend.h>
+#include <va/va_drmcommon.h>
 
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 extern VAStatus __vaDriverInit_1_20(VADriverContextP ctx);
 
@@ -120,16 +122,42 @@ static void test_surfaces(struct VADriverVTable *v, VADriverContextP ctx,
     VASurfaceStatus status;
     CHECK_STATUS(v->vaQuerySurfaceStatus(ctx, surfaces[SURFACE_COUNT - 1],
                                         &status), VA_STATUS_SUCCESS);
+
+    VADRMPRIMESurfaceDescriptor descriptor = {0};
+    CHECK_STATUS(v->vaExportSurfaceHandle(
+                     ctx, surfaces[0],
+                     VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+                     VA_EXPORT_SURFACE_READ_ONLY |
+                         VA_EXPORT_SURFACE_SEPARATE_LAYERS,
+                     &descriptor),
+                 VA_STATUS_SUCCESS);
+    if (descriptor.num_objects != 1 || descriptor.objects[0].fd < 0 ||
+        descriptor.objects[0].size < 16u * 16u * 3u / 2u ||
+        descriptor.num_layers != 2) {
+        fputs("placeholder PRIME descriptor changed unexpectedly\n", stderr);
+        exit(1);
+    }
+    close(descriptor.objects[0].fd);
 }
 
 static void test_contexts(struct VADriverVTable *v, VADriverContextP ctx,
                           VAConfigID config,
+                          VASurfaceID surfaces[SURFACE_COUNT],
                           VAContextID contexts[CONTEXT_COUNT])
 {
     for (size_t i = 0; i < CONTEXT_COUNT; i++) {
-        CHECK_STATUS(v->vaCreateContext(ctx, config, 16, 16, 0, NULL, 0,
+        VASurfaceID *targets = i == 0 ? surfaces : NULL;
+        int target_count = i == 0 ? 2 : 0;
+        CHECK_STATUS(v->vaCreateContext(ctx, config, 16, 16, 0,
+                                       targets, target_count,
                                        &contexts[i]), VA_STATUS_SUCCESS);
     }
+
+    VASurfaceID invalid_target = VA_INVALID_SURFACE;
+    VAContextID invalid_context;
+    CHECK_STATUS(v->vaCreateContext(ctx, config, 16, 16, 0,
+                                   &invalid_target, 1, &invalid_context),
+                 VA_STATUS_ERROR_INVALID_SURFACE);
 }
 
 int main(void)
@@ -149,7 +177,7 @@ int main(void)
     test_buffers(&vtable, &ctx, buffers);
     test_images(&vtable, &ctx, images);
     test_surfaces(&vtable, &ctx, surfaces);
-    test_contexts(&vtable, &ctx, configs[0], contexts);
+    test_contexts(&vtable, &ctx, configs[0], surfaces, contexts);
 
     CHECK_STATUS(vtable.vaDestroyBuffer(&ctx, configs[0]),
                  VA_STATUS_ERROR_INVALID_BUFFER);

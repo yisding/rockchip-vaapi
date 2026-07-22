@@ -60,7 +60,7 @@ Firefox (RDD process)
     │
     │  VA-API calls (libva 1.20)
     ▼
-rockchip_drv_video.so          ← this driver
+rockchip_drv_video.so          ← this driver; owns the external decode pool
     │
     │  MppApi calls (librockchip-mpp1)
     ▼
@@ -70,7 +70,7 @@ Rockchip MPP
     ▼
 RK3588 VPU (hardware)
     │
-    │  per-surface DMA-BUF fd (PRIME 2)
+    │  retained external-pool DMA-BUF fd (PRIME 2)
     ▼
 Firefox compositor (zero-copy from the exported surface onward)
 ```
@@ -99,8 +99,8 @@ functions that actually do meaningful work are:
 | Function | Role |
 |----------|------|
 | `rk_CreateConfig` | Validate profile/entrypoint; allocate `RKConfig` |
-| `rk_CreateContext` | `mpp_create` + `mpp_init`; allocate `RKContext` |
-| `rk_CreateSurfaces2` | Allocate `RKSurface` slots; surface dimensions stored |
+| `rk_CreateContext` | `mpp_create` + `mpp_init`; retain render-target hints; allocate `RKContext` |
+| `rk_CreateSurfaces2` | Allocate `RKSurface` objects and pre-decode placeholder DMA-BUFs |
 | `rk_CreateBuffer` | Allocate a dynamic, stale-safe `RKBuffer` object and copy caller data |
 | `rk_BeginPicture` | Store render target in `RKContext` |
 | `rk_RenderPicture` | Collect buffer IDs into `pending[]` |
@@ -160,8 +160,9 @@ For each `EndPicture` call the driver:
 5. Calls `mpi->decode_put_packet`.
 6. Drains `mpi->decode_get_frame`; matches H.264 output by `pts` to find the
    target surface.
-7. Bounds-checks and copies the linear NV12 layout into the target's permanent
-   export DMA-BUF, releases the MPP frame, then signals `surface->cond`.
+7. Validates the returned external buffer index and layout, binds the frame
+   and backing-buffer reference to the logical VA surface, then signals
+   `surface->cond`. No decoded pixels are copied.
 
 ---
 
@@ -169,7 +170,7 @@ For each `EndPicture` call the driver:
 
 Firefox calls `vaExportSurfaceHandle` with
 `VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2` to get a zero-copy handle to the
-driver's permanent per-surface export buffer.
+surface's currently bound decode buffer (or its placeholder before decode).
 
 `rk_ExportSurfaceHandle` returns a `VADRMPRIMESurfaceDescriptor`:
 
@@ -189,13 +190,22 @@ desc->layers[1].object_index[0] = 0;
 desc->layers[1].offset[0] = hstride * vstride;
 desc->layers[1].pitch[0]  = hstride;
 // Object (shared DMABUF)
-desc->objects[0].fd             = dup(surface->prime_fd);
-desc->objects[0].size           = hstride * vstride * 3 / 2;
+desc->objects[0].fd             = dup(mpp_buffer_get_fd(active_buffer));
+desc->objects[0].size           = mpp_buffer_get_size(active_buffer);
 desc->objects[0].drm_format_modifier = DRM_FORMAT_MOD_LINEAR;
 ```
 
-The `dup()` is essential: Firefox closes the fd when done; the driver keeps the
-original alive in `surface->prime_fd` (tied to `surface->frame`).
+The `dup()` is essential: Firefox closes the exported fd when done. The
+surface retains the `MppFrame`; for an external buffer it also retains the
+driver-owned backing `MppBuffer`, because MPP's `EXT_DMA` wrapper borrows the
+fd rather than closing it. Context and bound surfaces share a refcounted
+decode-pool object, so group teardown occurs only after the final frame and
+backing reference is returned; no MPP orphan group is left until process exit.
+
+`vaGetImage` reads through the retained backing object and brackets CPU access
+with `DMA_BUF_IOCTL_SYNC` start/end operations. Without that ownership
+transition, the direct VPU-written mapping produced an intermittent stale
+frame even though routing and buffer indices were correct.
 
 ### Why `vaQuerySurfaceAttributes` matters
 
@@ -223,30 +233,28 @@ attrs[3].value.value.i = 4320;
 
 ## Memory model and the CMA constraint (4K)
 
-There are two distinct pools of memory in play, and confusing them leads to
-chasing the wrong bug:
+There are three driver/decoder allocations in play:
 
 | Buffer | Allocated by | Backing memory | Must be contiguous? |
 |--------|--------------|----------------|---------------------|
-| Per-surface output buffer (`priv_buf`) | this driver, in `CreateSurfaces` via `mpp_buffer_group_get_internal(MPP_BUFFER_TYPE_DRM)` | **system** dma-heap (not CMA) | no |
-| MPP decode DPB (reference + work frames) | MPP internally | **CMA** (the VPU does DMA into it) | **yes** |
-| GPU compositor textures | Mali / Mesa in Firefox | **CMA** | **yes** |
+| Per-surface placeholder (`priv_buf`) | driver, at surface creation | MPP DRM allocator | platform-dependent |
+| 24-buffer decode pool | driver, after MPP info-change | MPP DRM allocator, committed as `EXT_DMA` | VPU-compatible dma-buf |
+| GPU compositor textures | Mali / Mesa in the application | GPU allocator | platform-dependent |
 
-The driver copies each decoded frame out of MPP's DPB buffer into the surface's
-own `priv_buf` (in `assign_mpp_frame`) so that MPP can immediately recycle its
-small internal pool — see *Per-surface output buffers* below. Because `priv_buf`
-lives in system memory, the driver is **not** a significant CMA consumer; you
-can allocate hundreds of MB of surfaces without touching CMA.
+MPP writes directly into the 24-buffer context pool. `assign_mpp_frame` keeps
+MPP's display-frame reference on the VA surface, so MPP cannot recycle that
+buffer while the application may still display it. Surface reuse drops the
+old frame, backing, and shared-pool references. A separate per-surface
+allocation remains only so pre-decode PRIME capability probes can succeed.
 
-The CMA pressure comes entirely from **MPP's DPB + the GPU compositor**, which
-share the single kernel CMA region (`cma=` on the kernel command line, default
-256 MB on most RK3588 images). A 4K NV12 frame is ~12.5 MB; VP9 keeps ~10
-references, so the DPB alone is ~125–200 MB. Add the GPU's 4K compositing
-buffers and 256 MB is not enough.
+The exact physical placement of the DRM allocations is platform-dependent.
+At 4K, the decode pool and GPU compositor can still put substantial pressure
+on the board's CMA/IOMMU resources, so deployment sizing and the Phase 1
+memory/fd soak gate remain important.
 
 **Symptom of CMA exhaustion (important — it does not look like a driver bug):**
-the 4K context acknowledges `info_change`, decodes 70–80 frames cleanly
-(`copied=1`, no `TIMEOUT`, no VA error), then Firefox reports
+the 4K context acknowledges `info_change`, decodes frames cleanly
+(`zero_copy=1`, no `TIMEOUT`, no VA error), then Firefox reports
 `NS_ERROR_DOM_MEDIA_FATAL_ERR` with **no driver-side error at all**. MPP cannot
 surface a failed contiguous allocation through the libva API, so from the
 driver's point of view every call succeeded. The standalone `va_barcode_test`
@@ -261,22 +269,20 @@ acknowledges `info_change` and decodes zero frames, because VA-API hands MPP
 headerless tile data instead of a full OBU bitstream. CMA exhaustion is the
 opposite — decode works, then a resource runs out.
 
-### Per-surface output buffers
+### External-pool surface binding
 
-Each `RKSurface` owns a permanent `priv_buf` allocated in `CreateSurfaces` and
-kept for the surface's lifetime (its `prime_fd` never changes). `assign_mpp_frame`
-copies MPP's decoded pixels into it using MPP's *real* hor/ver strides
-(e.g. 3840×2176 for 4K — note the 2176 ver-stride padding) and then releases the
-MPP frame immediately. This avoids two earlier bugs:
+On the first info-change frame, the context allocates 24 conservative-size DRM
+buffers and commits their fds to an MPP external group with stable indices.
+`assign_mpp_frame` validates the returned index/fd pair and binds that frame to
+the intended VA surface. This fixes the old aliasing bug without a CPU copy:
 
-- **Buffer aliasing ("saltando frames")**: MPP's internal display pool is only
-  ~3 buffers for 4K; exporting MPP's fd directly meant MPP overwrote a buffer the
-  compositor was still showing. Copying into a dedicated per-surface buffer fixes
-  this.
+- **Buffer aliasing ("saltando frames")**: the retained `MppFrame` prevents
+  reuse while the VA surface is live; the retained backing buffer keeps the
+  borrowed external fd valid even if the context is destroyed first.
 - **Hidden-reference export**: MPP normally withholds VP9 `show_frame=0`
   frames from `decode_get_frame`. The driver parses the refresh mask and sends
   a minimal `show_existing_frame` repeat, causing MPP to expose the completed
-  hidden reference so it can be copied into the correct permanent surface.
+  hidden reference so it can be bound to the correct logical VA surface.
 
 ## `bs.h` — Exp-Golomb bitstream writer
 

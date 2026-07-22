@@ -79,6 +79,15 @@ check-conformance: $(TARGET) test
 check-synthetic: $(TARGET) test
 	TEST_SET=synthetic tests/validate.sh
 
+check-zero-copy: $(TARGET) test
+	tests/check-zero-copy.sh
+
+check-zero-copy-sanitize: sanitize
+	LD_PRELOAD="$(shell $(CC) -print-file-name=libasan.so)" \
+	ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
+	UBSAN_OPTIONS=halt_on_error=1 \
+	DRIVER_DIR="$(abspath $(SAN_DIR))" tests/check-zero-copy.sh
+
 # Diagnostic subset for a kernel on which risky vectors cannot safely run.
 # This is intentionally not the release gate.
 check-safe: $(TARGET) test
@@ -192,6 +201,7 @@ clean:
 	rm -rf $(SAN_DIR)
 
 .PHONY: all install fetch-vectors check check-conformance check-synthetic \
-	check-safe test test-valgrind test-sanitize sanitize check-sanitize \
+	check-safe check-zero-copy check-zero-copy-sanitize test test-valgrind \
+	test-sanitize sanitize check-sanitize \
 	test-tsan check-sanitize-safe check-driver-objects \
 	check-driver-objects-sanitize lint clean

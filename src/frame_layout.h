@@ -8,12 +8,7 @@
 bool rk_nv12_layout_size(size_t byte_stride, size_t vertical_stride,
                          size_t *size_out);
 
-/* Conservative allocation for a surface before MPP reports its actual stride. */
+/* Conservative 8-bit MPP decode allocation, including codec/HAL side data. */
 bool rk_surface_buffer_size(unsigned width, unsigned height, size_t *size_out);
-
-/* Copy one complete padded NV12 layout after checking both buffer bounds. */
-bool rk_copy_nv12_frame(void *dst, size_t dst_size,
-                        const void *src, size_t src_size,
-                        size_t byte_stride, size_t vertical_stride);
 
 #endif

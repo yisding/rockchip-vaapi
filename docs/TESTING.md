@@ -14,7 +14,7 @@ make sanitize
 make test-tsan
 make test-valgrind
 make lint
-shellcheck tests/fetch-vectors.sh tests/validate.sh
+shellcheck tests/check-zero-copy.sh tests/fetch-vectors.sh tests/validate.sh
 ```
 
 `make sanitize` builds the whole driver and runs its hardware-independent unit
@@ -59,6 +59,8 @@ make clean all test
 make fetch-vectors
 make check-driver-objects
 make check-driver-objects-sanitize
+FFMPEG=/usr/bin/ffmpeg make check-zero-copy
+FFMPEG=/usr/bin/ffmpeg make check-zero-copy-sanitize
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-conformance
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-sanitize
 ```
@@ -67,6 +69,16 @@ The object-lifecycle gate crosses every former fixed-array ceiling, validates
 all five typed handle namespaces and stale-handle rejection, and creates nine
 simultaneous MPP decode contexts. Its sanitized variant applies ASan/UBSan to
 the complete driver lifecycle in-process.
+
+The zero-copy gate runs the synthetic H.264 reference/B-frame matrix, 4K
+decode, and five VP9 runs while auditing the driver log. It requires at least
+one external group and external frame, requires every created pool to be
+destroyed by normal VA teardown, and rejects internal fallback, a
+per-frame copy marker, an unknown buffer index/fd, or an unsafe layout. Its
+sanitized variant loads the complete ASan/UBSan driver for the same audit.
+Readback uses explicit dma-buf CPU synchronization; the zero-copy and full
+conformance gates are therefore visibility/coherency regressions, not only
+routing checks.
 
 Do not set `RISKY_VECTORS=run` until the kernel's VP9 probability-table bounds
 fix is installed and the board has booted that kernel. The

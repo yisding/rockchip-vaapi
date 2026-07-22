@@ -207,8 +207,8 @@ gate green under ASan; CI builds and lints on push.
 
 The foundation everything else builds on. No new codecs — restructure.
 
-Progress (2026-07-21): the object-model portion is complete. The dynamic
-generation-tagged heap and driver object lock cover configs, contexts,
+Progress (2026-07-21): the object-model and zero-copy portions are complete.
+The dynamic generation-tagged heap and driver object lock cover configs, contexts,
 surfaces, buffers, and distinct image objects. Acquired objects are
 reference-counted across short lock sections; stale/type-confused handles are
 rejected; exhausted-generation slots are retired; contexts retain their
@@ -217,9 +217,22 @@ gate exceeds every former fixed ceiling (32 configs, 9 MPP contexts, 65
 surfaces, 300 buffers, and 300 images) and passes normally and under
 ASan/UBSan. Concurrent heap lifetimes pass TSan. After the migration, the
 normal and sanitized Phase 0 decode gates remain bit-exact for every pinned and
-supplemental case. The remaining work in this phase is broader module
-separation, zero-copy external buffers, worker/fence synchronization, and the
-two-decoder/soak gates.
+supplemental case. MPP info-change now creates a driver-owned 24-buffer DRM
+pool, commits it as `EXT_DMA` with stable indices, and binds returned frames
+directly to VA surfaces. Surfaces retain the frame plus the borrowed fd's
+backing buffer until reuse; export and image readback select that active
+buffer. The per-frame decoded-pixel memcpy has been deleted. A repeatable
+normal and ASan/UBSan gate observed 1,440 bit-exact external-pool frames across
+12 H.264/VP9 contexts (including 4K and five VP9 runs), with no internal
+fallback or ownership mismatch. Direct CPU readback is bracketed by dma-buf
+sync; the missing transition initially caused intermittent one-frame VP9
+mismatches, while the corrected path passed a focused 100-decode stress with
+zero mismatches. The pool itself is refcounted across its context and bound
+surfaces, preventing MPP orphan-group retention when a context is destroyed
+before its surfaces. After these fixes, the complete guarded Phase 0 normal
+and ASan/UBSan gates are green again. The remaining work in this phase is
+broader module separation, worker/fence synchronization, and the two-decoder/
+soak gates.
 
 - Split the monolith into the module layout above; introduce the object heap.
 - Implement the **external-buffer-group zero-copy model** and delete the
@@ -323,10 +336,9 @@ concurrent with decode contexts are race-free.
 
 ## Risks & open questions
 
-- **External buffer group parity:** confirm `MPP_DEC_SET_EXT_BUF_GROUP` behaves
-  for H.264/HEVC/VP9 on our MPP build the way `libv4l-rkmpp` relies on. If a
-  codec misbehaves, fall back to a committed internal group with ref-holding
-  (still zero-copy) for that codec. *Resolve early in Phase 1.*
+- **External buffer group parity:** resolved for shipping H.264 and VP9 on the
+  pinned MPP/ROCK 5B stack. HEVC must repeat the parity gate when its decode
+  path lands; the internal-group ref-holding fallback remains zero-copy.
 - **10-bit exactness:** RGA NV15→P010 is a conversion, so 10-bit can't be
   transform-bit-exact against a P010 software reference; decide between a PSNR
   bound vs. NV15-space bit-exact comparison vs. landing direct NV15 export.
@@ -344,8 +356,9 @@ concurrent with decode contexts are race-free.
 
 - Phase 0: complete on `main`; the normal and sanitized full hardware gates are
   green on the audited fixed kernel build `#3`.
-- Phase 1: in progress; object heap and all VA object migrations complete;
-  module separation, zero-copy, worker/fences, and concurrency gates remain.
+- Phase 1: in progress; object heap, all VA object migrations, and external-
+  buffer zero-copy are complete; module separation, worker/fences, and
+  concurrency/soak gates remain.
 - Phases 2–5: planned.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement
