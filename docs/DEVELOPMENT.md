@@ -31,6 +31,11 @@ Rockchip RK3588 SoC.
 rockchip-vaapi/
 ├── src/
 │   ├── rockchip_drv_video.c   # Main driver: full VA-API vtable
+│   ├── driver_internal.h      # Shared private object model and heap access
+│   ├── buffer.c               # VA buffer and image object lifecycle
+│   ├── buffer.h
+│   ├── log.c                  # Thread-safe driver logging
+│   ├── log.h
 │   ├── h264.c                 # H.264 SPS/PPS Annex B reconstruction
 │   ├── h264.h
 │   ├── frame_layout.c         # Checked NV12 sizing and frame copies
@@ -88,6 +93,12 @@ dynamically, and a slot is retired instead of wrapping its generation, so an
 old handle cannot alias a later object. Objects are atomically reference-counted:
 the driver holds `object_lock` only while acquiring/removing a heap entry, and
 the acquired object remains alive after that short critical section.
+
+`driver_internal.h` is private to the driver translation units. It centralizes
+the shared object layouts and short heap-acquire helpers without exposing them
+as public ABI. Buffer/image ownership now lives in `buffer.c`; logging uses a
+`pthread_once`-initialized sink and stdio stream locking so independent decode
+workers cannot interleave log records.
 
 ---
 

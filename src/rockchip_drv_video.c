@@ -39,208 +39,11 @@
 #include <sys/ioctl.h>
 #include <errno.h>
 
+#include "buffer.h"
+#include "driver_internal.h"
 #include "frame_layout.h"
 #include "h264.h"
-#include "object_heap.h"
 #include "vp9.h"
-
-/* ── logging ─────────────────────────────────────────────────── */
-static FILE *g_log_fp = NULL;
-static void log_init(void) {
-    const char *p = getenv("RK_VAAPI_LOG");
-    if (p && *p) g_log_fp = fopen(p, "a");
-}
-#define LOG(fmt, ...) do { if (g_log_fp) \
-    fprintf(g_log_fp, "[rk-vaapi pid=%d] " fmt "\n", getpid(), ##__VA_ARGS__); \
-} while(0)
-
-/* ── data structures ─────────────────────────────────────────── */
-
-typedef struct {
-    RKObjectBase  base;
-    VAProfile     profile;
-    VAEntrypoint  entrypoint;
-} RKConfig;
-
-typedef struct RKSurface RKSurface;
-typedef struct RKDriver RKDriver;
-
-typedef struct RKDecodeJob {
-    struct RKDecodeJob *next;
-    uint8_t            *data;
-    size_t              size;
-    VASurfaceID         target;
-    RKSurface          *surface;
-    uint64_t            fence;
-    uint64_t            token;
-    bool                h264_field;
-    bool                is_hidden;
-    uint8_t             repeat_slot;
-} RKDecodeJob;
-
-typedef struct RKFrameRoute {
-    struct RKFrameRoute *next;
-    VASurfaceID          target;
-    RKSurface           *surface;
-    uint64_t             fence;
-    uint64_t             token;
-} RKFrameRoute;
-
-typedef struct {
-    RKObjectBase base;
-    MppBufferGroup frame_group;
-    MppBufferGroup backing_group;
-    MppBuffer *buffers;
-    int count;
-} RKDecodePool;
-
-typedef struct {
-    RKObjectBase base;
-    RKDriver     *driver;
-    VAProfile    profile;
-    int          width, height;
-
-    MppCtx       mpp;
-    MppApi      *mpi;
-    MppCodingType coding;
-
-    /* VA render-target hints remain alive for the context lifetime. MPP's
-     * pure-external decode pool is context-owned and works without hints. */
-    RKSurface    **targets;
-    int          n_targets;
-    RKDecodePool *decode_pool;
-
-    /* Picture assembly is caller-side; an owned packet is handed to the
-     * worker, which is the only thread that calls the MPP data/control API. */
-    pthread_mutex_t picture_lock;
-    pthread_mutex_t work_lock;
-    pthread_cond_t  work_cond;
-    pthread_t       worker;
-    bool            sync_initialized;
-    bool            worker_started;
-    bool            worker_stop;
-    RKDecodeJob    *job_head;
-    RKDecodeJob    *job_tail;
-    RKFrameRoute   *h264_routes;
-    RKFrameRoute   *generic_head;
-    RKFrameRoute   *generic_tail;
-    unsigned int    outstanding_frames;
-    uint64_t        next_token;
-
-    /* buffers collected between BeginPicture / EndPicture */
-    VABufferID   pending[64];
-    int          n_pending;
-
-    VASurfaceID  render_target;
-    RKSurface   *render_surface;
-    uint64_t     render_fence;
-
-    /* H.264 state for SPS/PPS reconstruction */
-    VAPictureParameterBufferH264 last_pp;
-    VAIQMatrixBufferH264 last_iq;
-    bool         has_iq;
-    bool         sps_sent;
-} RKContext;
-
-struct RKSurface {
-    RKObjectBase base;
-    int          width, height;
-
-    /* filled after decode */
-    MppFrame     frame;          /* owns the zero-copy MPP output reference */
-    MppBuffer    backing_buf;    /* keeps the borrowed external fd alive */
-    RKDecodePool *decode_pool;   /* keeps both MPP groups alive */
-    int          hstride;
-    int          vstride;
-
-    /* Pre-decode DMA-BUF used by ExportSurfaceHandle capability probes. Once
-     * decoded, export selects frame/backing_buf from the context pool. */
-    MppBufferGroup priv_group;
-    MppBuffer      priv_buf;
-
-    MppFrameFormat fmt;     /* pixel format of last decoded frame (0 = NV12 default) */
-    bool         decoded;
-    bool         decode_failed;
-    bool         h264_field_pending;
-    VAContextID  ctx_id;   /* context currently decoding into this surface */
-    uint64_t     fence;
-    pthread_mutex_t  lock;
-    pthread_cond_t   cond;
-};
-
-typedef struct {
-    RKObjectBase   base;
-    VABufferType   type;
-    unsigned int   size;
-    unsigned int   num_elements;
-    size_t         capacity;
-    void          *data;
-} RKBuffer;
-
-typedef struct {
-    RKObjectBase base;
-    VABufferID buffer_id;
-    RKBuffer *buffer;
-    uint32_t fourcc;
-    unsigned int width;
-    unsigned int height;
-    unsigned int pitch;
-} RKImage;
-
-struct RKDriver {
-    pthread_mutex_t object_lock;
-    RKObjectHeap config_heap;
-    RKObjectHeap context_heap;
-    RKObjectHeap surface_heap;
-    RKObjectHeap buffer_heap;
-    RKObjectHeap image_heap;
-};
-
-/* ── helpers ─────────────────────────────────────────────────── */
-
-static RKDriver *drv_from_ctx(VADriverContextP ctx) {
-    return (RKDriver *)ctx->pDriverData;
-}
-
-static RKConfig *config_acquire(RKDriver *d, VAConfigID id) {
-    pthread_mutex_lock(&d->object_lock);
-    RKConfig *config = (RKConfig *)rk_object_heap_acquire(
-        &d->config_heap, (uint32_t)id);
-    pthread_mutex_unlock(&d->object_lock);
-    return config;
-}
-
-static RKContext *context_acquire(RKDriver *d, VAContextID id) {
-    pthread_mutex_lock(&d->object_lock);
-    RKContext *context = (RKContext *)rk_object_heap_acquire(
-        &d->context_heap, (uint32_t)id);
-    pthread_mutex_unlock(&d->object_lock);
-    return context;
-}
-
-static RKSurface *surface_acquire(RKDriver *d, VASurfaceID id) {
-    pthread_mutex_lock(&d->object_lock);
-    RKSurface *surface = (RKSurface *)rk_object_heap_acquire(
-        &d->surface_heap, (uint32_t)id);
-    pthread_mutex_unlock(&d->object_lock);
-    return surface;
-}
-
-static RKBuffer *buffer_acquire(RKDriver *d, VABufferID id) {
-    pthread_mutex_lock(&d->object_lock);
-    RKBuffer *buffer = (RKBuffer *)rk_object_heap_acquire(
-        &d->buffer_heap, (uint32_t)id);
-    pthread_mutex_unlock(&d->object_lock);
-    return buffer;
-}
-
-static RKImage *image_acquire(RKDriver *d, VAImageID id) {
-    pthread_mutex_lock(&d->object_lock);
-    RKImage *image = (RKImage *)rk_object_heap_acquire(
-        &d->image_heap, (uint32_t)id);
-    pthread_mutex_unlock(&d->object_lock);
-    return image;
-}
 
 static void stop_decode_worker(RKContext *context);
 static void *decode_worker_main(void *opaque);
@@ -254,19 +57,6 @@ static bool dmabuf_cpu_sync(int fd, uint64_t flags)
         ret = ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
     } while (ret < 0 && errno == EINTR);
     return ret == 0;
-}
-
-static void buffer_destroy(void *opaque) {
-    RKBuffer *buffer = opaque;
-    free(buffer->data);
-    free(buffer);
-}
-
-static void image_destroy(void *opaque) {
-    RKImage *image = opaque;
-    if (image->buffer)
-        rk_object_unref(&image->buffer->base);
-    free(image);
 }
 
 static void decode_pool_destroy(void *opaque) {
@@ -804,99 +594,6 @@ static VAStatus rk_DestroyContext(VADriverContextP ctx, VAContextID id) {
     pthread_mutex_unlock(&d->object_lock);
     if (!c) return VA_STATUS_ERROR_INVALID_CONTEXT;
     rk_object_unref(&c->base);
-    return VA_STATUS_SUCCESS;
-}
-
-static VAStatus rk_CreateBuffer(VADriverContextP ctx,
-                                 VAContextID context,
-                                 VABufferType type,
-                                 unsigned int size,
-                                 unsigned int num_elements,
-                                 void *data,
-                                 VABufferID *out_id) {
-    RKDriver *d = drv_from_ctx(ctx);
-    (void)context;
-
-    if (size != 0 && num_elements > SIZE_MAX / size)
-        return VA_STATUS_ERROR_ALLOCATION_FAILED;
-    size_t bytes = (size_t)size * num_elements;
-
-    RKBuffer *b = calloc(1, sizeof(*b));
-    if (!b)
-        return VA_STATUS_ERROR_ALLOCATION_FAILED;
-    rk_object_init(&b->base, buffer_destroy);
-    b->type         = type;
-    b->size         = size;
-    b->num_elements = num_elements;
-    b->capacity     = bytes;
-    b->data         = malloc(bytes ? bytes : 1u);
-    if (!b->data) {
-        rk_object_unref(&b->base);
-        return VA_STATUS_ERROR_ALLOCATION_FAILED;
-    }
-    if (data) memcpy(b->data, data, bytes);
-    else      memset(b->data, 0, bytes);
-
-    uint32_t id;
-    pthread_mutex_lock(&d->object_lock);
-    bool inserted = rk_object_heap_insert(&d->buffer_heap, &b->base, &id);
-    pthread_mutex_unlock(&d->object_lock);
-    if (!inserted) {
-        rk_object_unref(&b->base);
-        return VA_STATUS_ERROR_ALLOCATION_FAILED;
-    }
-    *out_id = (VABufferID)id;
-    return VA_STATUS_SUCCESS;
-}
-
-static VAStatus rk_BufferSetNumElements(VADriverContextP ctx,
-                                         VABufferID id, unsigned int n) {
-    RKDriver *d = drv_from_ctx(ctx);
-    RKBuffer *b = buffer_acquire(d, id);
-    if (!b) return VA_STATUS_ERROR_INVALID_BUFFER;
-
-    if (b->size != 0 && n > SIZE_MAX / b->size) {
-        rk_object_unref(&b->base);
-        return VA_STATUS_ERROR_ALLOCATION_FAILED;
-    }
-    size_t bytes = (size_t)b->size * n;
-    void *resized = realloc(b->data, bytes ? bytes : 1u);
-    if (!resized) {
-        rk_object_unref(&b->base);
-        return VA_STATUS_ERROR_ALLOCATION_FAILED;
-    }
-    if (bytes > b->capacity)
-        memset((uint8_t *)resized + b->capacity, 0, bytes - b->capacity);
-    b->data = resized;
-    b->capacity = bytes;
-    b->num_elements = n;
-    rk_object_unref(&b->base);
-    return VA_STATUS_SUCCESS;
-}
-
-static VAStatus rk_MapBuffer(VADriverContextP ctx,
-                              VABufferID id, void **ptr) {
-    RKDriver *d = drv_from_ctx(ctx);
-    RKBuffer *b = buffer_acquire(d, id);
-    if (!b) return VA_STATUS_ERROR_INVALID_BUFFER;
-    *ptr = b->data;
-    rk_object_unref(&b->base);
-    return VA_STATUS_SUCCESS;
-}
-
-static VAStatus rk_UnmapBuffer(VADriverContextP ctx, VABufferID id) {
-    (void)ctx; (void)id;
-    return VA_STATUS_SUCCESS;
-}
-
-static VAStatus rk_DestroyBuffer(VADriverContextP ctx, VABufferID id) {
-    RKDriver *d = drv_from_ctx(ctx);
-    pthread_mutex_lock(&d->object_lock);
-    RKBuffer *b = (RKBuffer *)rk_object_heap_remove(&d->buffer_heap,
-                                                    (uint32_t)id);
-    pthread_mutex_unlock(&d->object_lock);
-    if (!b) return VA_STATUS_ERROR_INVALID_BUFFER;
-    rk_object_unref(&b->base);
     return VA_STATUS_SUCCESS;
 }
 
@@ -2194,134 +1891,11 @@ static VAStatus rk_ExportSurfaceHandle(VADriverContextP ctx,
     return VA_STATUS_SUCCESS;
 }
 
-static VAStatus rk_QueryImageFormats(VADriverContextP ctx,
-                                      VAImageFormat *list, int *n) {
-    (void)ctx;
-    list[0].fourcc         = VA_FOURCC_NV12;
-    list[0].byte_order     = VA_LSB_FIRST;
-    list[0].bits_per_pixel = 12;
-    list[1].fourcc         = VA_FOURCC_P010;
-    list[1].byte_order     = VA_LSB_FIRST;
-    list[1].bits_per_pixel = 24;
-    *n = 2;
-    return VA_STATUS_SUCCESS;
-}
-
-static VAStatus rk_CreateImage(VADriverContextP ctx,
-                                VAImageFormat *format,
-                                int width, int height,
-                                VAImage *image) {
-    RKDriver *d = drv_from_ctx(ctx);
-    if (!format || !image || width <= 0 || height <= 0 ||
-        width > USHRT_MAX || height > USHRT_MAX)
-        return VA_STATUS_ERROR_INVALID_PARAMETER;
-
-    unsigned int bytes_per_sample;
-    if (format->fourcc == VA_FOURCC_NV12)
-        bytes_per_sample = 1;
-    else if (format->fourcc == VA_FOURCC_P010)
-        bytes_per_sample = 2;
-    else
-        return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
-
-    size_t aligned_width = ((size_t)(unsigned int)width + 15u) & ~15u;
-    if (aligned_width > UINT_MAX / bytes_per_sample)
-        return VA_STATUS_ERROR_ALLOCATION_FAILED;
-    unsigned int pitch = (unsigned int)aligned_width * bytes_per_sample;
-    size_t allocation_size;
-    if (!rk_nv12_layout_size(pitch, (size_t)(unsigned int)height,
-                             &allocation_size) || allocation_size > UINT_MAX)
-        return VA_STATUS_ERROR_ALLOCATION_FAILED;
-
-    VABufferID buf_id;
-    unsigned int size = (unsigned int)allocation_size;
-    VAStatus st = rk_CreateBuffer(ctx, 0, VAImageBufferType, size, 1,
-                                  NULL, &buf_id);
-    if (st != VA_STATUS_SUCCESS) return st;
-
-    RKBuffer *buffer = buffer_acquire(d, buf_id);
-    if (!buffer) {
-        rk_DestroyBuffer(ctx, buf_id);
-        return VA_STATUS_ERROR_ALLOCATION_FAILED;
-    }
-    RKImage *image_object = calloc(1, sizeof(*image_object));
-    if (!image_object) {
-        rk_object_unref(&buffer->base);
-        rk_DestroyBuffer(ctx, buf_id);
-        return VA_STATUS_ERROR_ALLOCATION_FAILED;
-    }
-    rk_object_init(&image_object->base, image_destroy);
-    image_object->buffer_id = buf_id;
-    image_object->buffer = buffer;
-    image_object->fourcc = format->fourcc;
-    image_object->width = (unsigned int)width;
-    image_object->height = (unsigned int)height;
-    image_object->pitch = pitch;
-
-    uint32_t image_id;
-    pthread_mutex_lock(&d->object_lock);
-    bool inserted = rk_object_heap_insert(&d->image_heap,
-                                          &image_object->base, &image_id);
-    pthread_mutex_unlock(&d->object_lock);
-    if (!inserted) {
-        rk_object_unref(&image_object->base);
-        rk_DestroyBuffer(ctx, buf_id);
-        return VA_STATUS_ERROR_ALLOCATION_FAILED;
-    }
-
-    memset(image, 0, sizeof(*image));
-    image->image_id    = (VAImageID)image_id;
-    image->buf         = buf_id;
-    image->format      = *format;
-    image->width       = (unsigned short)width;
-    image->height      = (unsigned short)height;
-    image->num_planes  = 2;
-    image->pitches[0]  = pitch;
-    image->pitches[1]  = pitch;
-    image->offsets[0]  = 0;
-    image->offsets[1]  = pitch * (unsigned int)height;
-    image->data_size   = size;
-    return VA_STATUS_SUCCESS;
-}
-
-static VAStatus rk_DeriveImage(VADriverContextP ctx,
-                                VASurfaceID sid, VAImage *image) {
-    RKDriver  *d = drv_from_ctx(ctx);
-    RKSurface *s = surface_acquire(d, sid);
-    if (!s) return VA_STATUS_ERROR_INVALID_SURFACE;
-
-    /* priv_buf is not CPU-mappable as a shared VAImage; force callers to use
-     * vaGetImage instead (copies pixels, but always works). */
-    (void)image;
-    rk_object_unref(&s->base);
-    return VA_STATUS_ERROR_OPERATION_FAILED;
-}
-
-static VAStatus rk_DestroyImage(VADriverContextP ctx, VAImageID id) {
-    RKDriver *d = drv_from_ctx(ctx);
-    pthread_mutex_lock(&d->object_lock);
-    RKImage *image = (RKImage *)rk_object_heap_remove(&d->image_heap,
-                                                      (uint32_t)id);
-    RKBuffer *buffer = image ? (RKBuffer *)rk_object_heap_remove(
-        &d->buffer_heap, (uint32_t)image->buffer_id) : NULL;
-    pthread_mutex_unlock(&d->object_lock);
-    if (!image)
-        return VA_STATUS_ERROR_INVALID_IMAGE;
-    if (buffer)
-        rk_object_unref(&buffer->base);
-    rk_object_unref(&image->base);
-    return VA_STATUS_SUCCESS;
-}
-
 /* ── stub implementations ────────────────────────────────────── */
 
 /* Suppress -Wunused-parameter for pure stub functions */
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
-
-static VAStatus rk_SetImagePalette(VADriverContextP ctx, VAImageID image,
-                                    unsigned char *palette)
-{ return VA_STATUS_SUCCESS; }
 
 static VAStatus rk_GetImage(VADriverContextP ctx, VASurfaceID surface_id,
                              int x, int y, unsigned int w,
@@ -2415,13 +1989,6 @@ static VAStatus rk_GetImage(VADriverContextP ctx, VASurfaceID surface_id,
     return sync_ok ? VA_STATUS_SUCCESS : VA_STATUS_ERROR_OPERATION_FAILED;
 }
 
-static VAStatus rk_PutImage(VADriverContextP ctx, VASurfaceID surface,
-                             VAImageID image, int src_x, int src_y,
-                             unsigned int src_width, unsigned int src_height,
-                             int dest_x, int dest_y,
-                             unsigned int dest_width, unsigned int dest_height)
-{ return VA_STATUS_SUCCESS; }
-
 static VAStatus rk_QuerySubpicFmts(VADriverContextP ctx,
                                     VAImageFormat *format_list,
                                     unsigned int *flags,
@@ -2479,20 +2046,6 @@ static VAStatus rk_GetDisplayAttrs(VADriverContextP ctx,
 static VAStatus rk_SetDisplayAttrs(VADriverContextP ctx,
                                     VADisplayAttribute *attr_list, int num_attributes)
 { return VA_STATUS_SUCCESS; }
-
-static VAStatus rk_BufferInfo(VADriverContextP ctx, VABufferID buf_id,
-                               VABufferType *type, unsigned int *size,
-                               unsigned int *num_elements)
-{
-    RKDriver *d = drv_from_ctx(ctx);
-    RKBuffer *b = buffer_acquire(d, buf_id);
-    if (!b) return VA_STATUS_ERROR_INVALID_BUFFER;
-    if (type)         *type         = b->type;
-    if (size)         *size         = b->size;
-    if (num_elements) *num_elements = b->num_elements;
-    rk_object_unref(&b->base);
-    return VA_STATUS_SUCCESS;
-}
 
 static VAStatus rk_LockSurface(VADriverContextP ctx, VASurfaceID surface,
                                 unsigned int *fourcc,
@@ -2614,19 +2167,6 @@ static VAStatus rk_QuerySurfaceError(VADriverContextP ctx, VASurfaceID s,
     return VA_STATUS_SUCCESS;
 }
 
-static VAStatus rk_CreateBuffer2(VADriverContextP ctx, VAContextID context,
-                                  VABufferType type,
-                                  unsigned int w, unsigned int h,
-                                  unsigned int *unit_size,
-                                  unsigned int *pitch,
-                                  VABufferID *id) {
-    unsigned int stride = (w + 15) & ~15;
-    unsigned int size   = stride * h;
-    if (unit_size) *unit_size = size;
-    if (pitch)     *pitch     = stride;
-    return rk_CreateBuffer(ctx, context, type, size, 1, NULL, id);
-}
-
 static VAStatus rk_GetSurfaceAttributes(VADriverContextP ctx,
                                          VAConfigID config,
                                          VASurfaceAttrib *list,
@@ -2639,7 +2179,7 @@ static VAStatus rk_GetSurfaceAttributes(VADriverContextP ctx,
 
 VAStatus __vaDriverInit_1_20(VADriverContextP ctx)  /* NOLINT */
 {
-    log_init();
+    rk_log_init();
     LOG("__vaDriverInit_1_20: entry");
     RKDriver *d = calloc(1, sizeof(*d));
     if (!d) return VA_STATUS_ERROR_ALLOCATION_FAILED;
