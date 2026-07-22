@@ -34,8 +34,11 @@ rockchip-vaapi/
 │   ├── driver_internal.h      # Shared private object model and heap access
 │   ├── buffer.c               # VA buffer and image object lifecycle
 │   ├── buffer.h
+│   ├── export.c               # DRM PRIME 2 descriptor construction
+│   ├── export.h
 │   ├── log.c                  # Thread-safe driver logging
 │   ├── log.h
+│   ├── surface.h              # Shared surface synchronization entry points
 │   ├── h264.c                 # H.264 SPS/PPS Annex B reconstruction
 │   ├── h264.h
 │   ├── frame_layout.c         # Checked NV12 sizing and frame copies
@@ -98,7 +101,9 @@ the acquired object remains alive after that short critical section.
 the shared object layouts and short heap-acquire helpers without exposing them
 as public ABI. Buffer/image ownership now lives in `buffer.c`; logging uses a
 `pthread_once`-initialized sink and stdio stream locking so independent decode
-workers cannot interleave log records.
+workers cannot interleave log records. DRM PRIME 2 descriptor construction is
+isolated in `export.c`; it synchronizes pending surfaces through the narrow
+interface in `surface.h` before duplicating and describing the active DMA-BUF.
 
 ---
 

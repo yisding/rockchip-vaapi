@@ -252,9 +252,11 @@ separation and the two-decoder/soak gates.
 
 Module separation is underway: the private shared object model now lives in
 `driver_internal.h`, VA buffer/image lifecycle has moved to `buffer.c`, and
-the former global logger is a thread-safe `log.c` module. The clean build,
-ASan/UBSan, heap TSan, clang-tidy, all three on-board lifecycle variants, and
-the 1,440-frame zero-copy/worker audit remain green at this boundary.
+the former global logger is a thread-safe `log.c` module. DRM PRIME 2
+descriptor construction now lives in `export.c` behind the surface-sync
+interface in `surface.h`. The clean build, ASan/UBSan, heap TSan, clang-tidy,
+on-board lifecycle/export test, and the previously completed 1,440-frame
+zero-copy/worker audit remain green at this boundary.
 
 - Split the monolith into the module layout above; introduce the object heap.
 - Implement the **external-buffer-group zero-copy model** and delete the

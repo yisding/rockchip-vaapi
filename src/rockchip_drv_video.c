@@ -32,7 +32,6 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
-#include <unistd.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <linux/dma-buf.h>
@@ -41,8 +40,10 @@
 
 #include "buffer.h"
 #include "driver_internal.h"
+#include "export.h"
 #include "frame_layout.h"
 #include "h264.h"
+#include "surface.h"
 #include "vp9.h"
 
 static void stop_decode_worker(RKContext *context);
@@ -1705,12 +1706,12 @@ static VAStatus sync_surface_timeout(VADriverContextP ctx, VASurfaceID id,
     }
 }
 
-static VAStatus rk_SyncSurface(VADriverContextP ctx, VASurfaceID id) {
+VAStatus rk_SyncSurface(VADriverContextP ctx, VASurfaceID id) {
     return sync_surface_timeout(ctx, id, VA_TIMEOUT_INFINITE);
 }
 
-static VAStatus rk_SyncSurface2(VADriverContextP ctx,
-                                  VASurfaceID id, uint64_t timeout_ns) {
+VAStatus rk_SyncSurface2(VADriverContextP ctx,
+                         VASurfaceID id, uint64_t timeout_ns) {
     return sync_surface_timeout(ctx, id, timeout_ns);
 }
 
@@ -1725,168 +1726,6 @@ static VAStatus rk_QuerySurfaceStatus(VADriverContextP ctx,
     pthread_mutex_unlock(&s->lock);
     LOG("QuerySurfaceStatus: surface=0x%x status=%s", id,
         (*status == VASurfaceReady) ? "Ready" : "Rendering");
-    rk_object_unref(&s->base);
-    return VA_STATUS_SUCCESS;
-}
-
-static VAStatus rk_ExportSurfaceHandle(VADriverContextP ctx,
-                                        VASurfaceID id,
-                                        uint32_t mem_type,
-                                        uint32_t flags,
-                                        void *descriptor) {
-    RKDriver  *d = drv_from_ctx(ctx);
-    RKSurface *s = surface_acquire(d, id);
-    LOG("ExportSurfaceHandle: surface=0x%x mem_type=0x%x flags=0x%x",
-        id, mem_type, flags);
-    if (!s) return VA_STATUS_ERROR_INVALID_SURFACE;
-    if (mem_type != VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2) {
-        LOG("ExportSurfaceHandle: unsupported mem_type 0x%x", mem_type);
-        rk_object_unref(&s->base);
-        return VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE;
-    }
-    if (!descriptor) {
-        rk_object_unref(&s->base);
-        return VA_STATUS_ERROR_INVALID_PARAMETER;
-    }
-
-    /* If decode is in progress, sync now so the exported DMA-BUF contains the
-     * correct frame. Firefox calls ExportSurfaceHandle before SyncSurface when
-     * EndPicture is async; without this the EGLImage gets stale data. */
-    pthread_mutex_lock(&s->lock);
-    bool needs_sync = !s->decoded && (s->ctx_id != 0);
-    pthread_mutex_unlock(&s->lock);
-    if (needs_sync) {
-        VAStatus sync_status = rk_SyncSurface(ctx, id);
-        if (sync_status != VA_STATUS_SUCCESS) {
-            rk_object_unref(&s->base);
-            return sync_status;
-        }
-    }
-
-    pthread_mutex_lock(&s->lock);
-    MppBuffer active_buffer = s->frame
-                            ? mpp_frame_get_buffer(s->frame)
-                            : s->priv_buf;
-    int fd       = active_buffer ? mpp_buffer_get_fd(active_buffer) : -1;
-    size_t object_size = active_buffer ? mpp_buffer_get_size(active_buffer) : 0;
-    int hs       = s->hstride ? s->hstride : s->width;
-    int vs       = s->vstride ? s->vstride : s->height;
-    int width    = s->width;
-    int height   = s->height;
-    bool decoded = s->decoded;
-    bool is_placeholder = (s->frame == NULL);
-    bool is_10bit = MPP_FRAME_FMT_IS_YUV_10BIT(s->fmt);
-    int export_fd = fd >= 0 ? dup(fd) : -1;
-    int dup_errno = export_fd < 0 ? errno : 0;
-    pthread_mutex_unlock(&s->lock);
-
-    if (fd < 0 || object_size == 0 || object_size > UINT32_MAX) {
-        if (export_fd >= 0)
-            close(export_fd);
-        LOG("ExportSurfaceHandle: buffer not exportable (fd=%d size=%zu decoded=%d)",
-            fd, object_size, decoded);
-        rk_object_unref(&s->base);
-        return VA_STATUS_ERROR_INVALID_SURFACE;
-    }
-
-    if (export_fd < 0) {
-        LOG("ExportSurfaceHandle: dup(%d) failed errno=%d, ERROR_ALLOCATION_FAILED",
-            fd, dup_errno);
-        rk_object_unref(&s->base);
-        return VA_STATUS_ERROR_ALLOCATION_FAILED;
-    }
-
-    LOG("ExportSurfaceHandle: surface=0x%x %dx%d stride=%dx%d export_fd=%d decoded=%d placeholder=%d 10bit=%d",
-        id, width, height, hs, vs, export_fd, decoded, is_placeholder, is_10bit);
-
-    VADRMPRIMESurfaceDescriptor *desc = descriptor;
-    memset(desc, 0, sizeof(*desc));
-    desc->width       = (uint32_t)width;
-    desc->height      = (uint32_t)height;
-    desc->num_objects = 1;
-    desc->objects[0].fd                  = export_fd;
-    desc->objects[0].size                = (uint32_t)object_size;
-    desc->objects[0].drm_format_modifier = 0; /* DRM_FORMAT_MOD_LINEAR */
-
-    bool composed = (flags & VA_EXPORT_SURFACE_COMPOSED_LAYERS) != 0;
-
-    /* COMPOSED_LAYERS: single NV12/P010 layer with 2 planes (mpv, GStreamer).
-     * SEPARATE_LAYERS (default): R8/GR88 split planes (Firefox DMABufSurfaceYUV). */
-    if (!is_10bit && composed) {
-        desc->fourcc     = VA_FOURCC_NV12;
-        desc->num_layers = 1;
-        desc->layers[0].drm_format      = 0x3231564e; /* DRM_FORMAT_NV12 */
-        desc->layers[0].num_planes      = 2;
-        desc->layers[0].object_index[0] = 0;
-        desc->layers[0].offset[0]       = 0;
-        desc->layers[0].pitch[0]        = (uint32_t)hs;
-        desc->layers[0].object_index[1] = 0;
-        desc->layers[0].offset[1]       = (uint32_t)(hs * vs);
-        desc->layers[0].pitch[1]        = (uint32_t)hs;
-        rk_object_unref(&s->base);
-        return VA_STATUS_SUCCESS;
-    }
-    if (is_10bit && composed) {
-        desc->fourcc     = VA_FOURCC_P010;
-        desc->num_layers = 1;
-        desc->layers[0].drm_format      = 0x30313050; /* DRM_FORMAT_P010 */
-        desc->layers[0].num_planes      = 2;
-        desc->layers[0].object_index[0] = 0;
-        desc->layers[0].offset[0]       = 0;
-        desc->layers[0].pitch[0]        = (uint32_t)(hs * 2);
-        desc->layers[0].object_index[1] = 0;
-        desc->layers[0].offset[1]       = (uint32_t)(hs * vs * 2);
-        desc->layers[0].pitch[1]        = (uint32_t)(hs * 2);
-        rk_object_unref(&s->base);
-        return VA_STATUS_SUCCESS;
-    }
-
-    desc->num_layers = 2;
-
-    if (is_10bit) {
-        /*
-         * P010: 10-bit NV12 semi-planar.  Each luma/chroma sample is uint16.
-         * Two-layer layout matching Firefox DMABufSurfaceYUV P010 import:
-         *   layer 0 → DRM_FORMAT_R16    (Y,  16-bit luma, 10 significant bits)
-         *   layer 1 → DRM_FORMAT_GR1616 (UV, 2×16-bit interleaved chroma)
-         * Both layers share pitch = hs*2 (bytes per luma row).
-         * UV offset = hs*vs*2 (Y plane size in bytes).
-         */
-        desc->fourcc                         = VA_FOURCC_P010;
-        /* Y plane */
-        desc->layers[0].drm_format           = 0x20363152; /* DRM_FORMAT_R16    */
-        desc->layers[0].num_planes           = 1;
-        desc->layers[0].object_index[0]      = 0;
-        desc->layers[0].offset[0]            = 0;
-        desc->layers[0].pitch[0]             = (uint32_t)(hs * 2);
-        /* UV plane */
-        desc->layers[1].drm_format           = 0x36315247; /* DRM_FORMAT_GR1616 */
-        desc->layers[1].num_planes           = 1;
-        desc->layers[1].object_index[0]      = 0;
-        desc->layers[1].offset[0]            = (uint32_t)(hs * vs * 2);
-        desc->layers[1].pitch[0]             = (uint32_t)(hs * 2);
-    } else {
-        /*
-         * NV12: 8-bit YUV 4:2:0 semi-planar.
-         * Firefox (DMABufSurfaceYUV) expects num_layers == plane count, each
-         * layer being a single-plane view of the buffer:
-         *   layer 0 → DRM_FORMAT_R8   (Y,  8-bit luma)
-         *   layer 1 → DRM_FORMAT_GR88 (UV, interleaved chroma, 2 bytes/px)
-         */
-        desc->fourcc                         = VA_FOURCC_NV12;
-        /* Y plane */
-        desc->layers[0].drm_format           = 0x20203852; /* DRM_FORMAT_R8   */
-        desc->layers[0].num_planes           = 1;
-        desc->layers[0].object_index[0]      = 0;
-        desc->layers[0].offset[0]            = 0;
-        desc->layers[0].pitch[0]             = (uint32_t)hs;
-        /* UV plane */
-        desc->layers[1].drm_format           = 0x38385247; /* DRM_FORMAT_GR88 */
-        desc->layers[1].num_planes           = 1;
-        desc->layers[1].object_index[0]      = 0;
-        desc->layers[1].offset[0]            = (uint32_t)(hs * vs);
-        desc->layers[1].pitch[0]             = (uint32_t)hs;
-    }
     rk_object_unref(&s->base);
     return VA_STATUS_SUCCESS;
 }

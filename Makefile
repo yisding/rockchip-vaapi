@@ -16,8 +16,8 @@ MPP_LIBS   ?= -lrockchip_mpp
 LDLIBS     ?= $(VA_LIBS) $(MPP_LIBS) -lpthread
 
 TARGET := rockchip_drv_video.so
-SRCS   := src/rockchip_drv_video.c src/buffer.c src/log.c src/object_heap.c \
-	src/h264.c src/frame_layout.c src/vp9.c
+SRCS   := src/rockchip_drv_video.c src/buffer.c src/export.c src/log.c \
+	src/object_heap.c src/h264.c src/frame_layout.c src/vp9.c
 OBJS   := $(SRCS:.c=.o)
 
 UNIT_TESTS := tests/object_heap_test tests/frame_layout_test tests/h264_test \
@@ -56,10 +56,13 @@ $(TARGET): $(OBJS)
 src/%.o: src/%.c
 	$(DRIVER_COMPILE) -c $< -o $@
 
-src/rockchip_drv_video.o: src/buffer.h src/driver_internal.h \
-	src/frame_layout.h src/h264.h src/log.h src/object_heap.h src/vp9.h
+src/rockchip_drv_video.o: src/buffer.h src/driver_internal.h src/export.h \
+	src/frame_layout.h src/h264.h src/log.h src/object_heap.h src/surface.h \
+	src/vp9.h
 src/buffer.o: src/buffer.h src/driver_internal.h src/frame_layout.h \
 	src/log.h src/object_heap.h
+src/export.o: src/driver_internal.h src/export.h src/log.h src/object_heap.h \
+	src/surface.h
 src/log.o: src/log.h
 src/object_heap.o: src/object_heap.h
 src/frame_layout.o: src/frame_layout.h
@@ -98,8 +101,8 @@ check-safe: $(TARGET) test
 	TEST_SET=conformance ALLOW_QUARANTINE=1 tests/validate.sh
 
 tests/driver_objects_test: tests/driver_objects_test.c $(SRCS) \
-		src/buffer.h src/driver_internal.h src/object_heap.h src/frame_layout.h \
-		src/h264.h src/log.h src/vp9.h
+		src/buffer.h src/driver_internal.h src/export.h src/object_heap.h \
+		src/frame_layout.h src/h264.h src/log.h src/surface.h src/vp9.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(VA_CFLAGS) $(MPP_CFLAGS) \
 		-Isrc tests/driver_objects_test.c $(SRCS) $(LDLIBS) -o $@
 
@@ -107,8 +110,8 @@ check-driver-objects: $(HARDWARE_TESTS)
 	@set -e; for test_binary in $(HARDWARE_TESTS); do ./$$test_binary; done
 
 tests/driver_objects_test.san: tests/driver_objects_test.c $(SRCS) \
-		src/buffer.h src/driver_internal.h src/object_heap.h src/frame_layout.h \
-		src/h264.h src/log.h src/vp9.h
+		src/buffer.h src/driver_internal.h src/export.h src/object_heap.h \
+		src/frame_layout.h src/h264.h src/log.h src/surface.h src/vp9.h
 	$(CC) $(CPPFLAGS) $(SAN_CFLAGS) $(WARNINGS) $(VA_CFLAGS) $(MPP_CFLAGS) \
 		-Isrc tests/driver_objects_test.c $(SRCS) $(SAN_LDFLAGS) \
 		$(LDLIBS) -o $@
@@ -118,8 +121,8 @@ check-driver-objects-sanitize: tests/driver_objects_test.san
 	UBSAN_OPTIONS=halt_on_error=1 ./tests/driver_objects_test.san
 
 tests/driver_objects_test.tsan: tests/driver_objects_test.c $(SRCS) \
-		src/buffer.h src/driver_internal.h src/object_heap.h src/frame_layout.h \
-		src/h264.h src/log.h src/vp9.h
+		src/buffer.h src/driver_internal.h src/export.h src/object_heap.h \
+		src/frame_layout.h src/h264.h src/log.h src/surface.h src/vp9.h
 	$(CC) $(CPPFLAGS) $(TSAN_CFLAGS) $(WARNINGS) $(VA_CFLAGS) $(MPP_CFLAGS) \
 		-Isrc tests/driver_objects_test.c $(SRCS) $(TSAN_LDFLAGS) \
 		$(LDLIBS) -o $@
@@ -157,10 +160,13 @@ $(SAN_TARGET): $(SAN_OBJS)
 src/%.san.o: src/%.c
 	$(SAN_DRIVER_COMPILE) -c $< -o $@
 
-src/rockchip_drv_video.san.o: src/buffer.h src/driver_internal.h \
-	src/frame_layout.h src/h264.h src/log.h src/object_heap.h src/vp9.h
+src/rockchip_drv_video.san.o: src/buffer.h src/driver_internal.h src/export.h \
+	src/frame_layout.h src/h264.h src/log.h src/object_heap.h src/surface.h \
+	src/vp9.h
 src/buffer.san.o: src/buffer.h src/driver_internal.h src/frame_layout.h \
 	src/log.h src/object_heap.h
+src/export.san.o: src/driver_internal.h src/export.h src/log.h \
+	src/object_heap.h src/surface.h
 src/log.san.o: src/log.h
 src/object_heap.san.o: src/object_heap.h
 src/frame_layout.san.o: src/frame_layout.h
