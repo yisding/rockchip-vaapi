@@ -256,8 +256,9 @@ the former global logger is a thread-safe `log.c` module. DRM PRIME 2
 descriptor construction now lives in `export.c` behind the surface-sync
 interface in `surface.h`; surface lifecycle, fence waits, status, and image
 readback now live in `surface.c`. Context lifecycle, picture submission,
-external-pool management, frame routing, and MPP worker ownership now live in
-`context.c`, leaving the main translation unit as the vtable/capability shell.
+and render-target ownership now live in `context.c`; external-pool management,
+packet construction, frame routing, and MPP worker ownership live in
+`mpp_dec.c`, leaving the main translation unit as the vtable/capability shell.
 The clean build, ASan/UBSan, heap TSan, clang-tidy, all three on-board
 lifecycle/export variants, and both normal and sanitized 1,440-frame
 zero-copy/worker audits remain green at this boundary.

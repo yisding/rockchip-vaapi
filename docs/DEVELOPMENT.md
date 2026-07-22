@@ -40,6 +40,8 @@ rockchip-vaapi/
 │   ├── export.h
 │   ├── log.c                  # Thread-safe driver logging
 │   ├── log.h
+│   ├── mpp_dec.c              # MPP pool, packet, routing, and worker backend
+│   ├── mpp_dec.h
 │   ├── surface.c              # Surface lifecycle, fence waits, and readback
 │   ├── surface.h
 │   ├── h264.c                 # H.264 SPS/PPS Annex B reconstruction
@@ -109,9 +111,10 @@ isolated in `export.c`; it synchronizes pending surfaces through the narrow
 interface in `surface.h` before duplicating and describing the active DMA-BUF.
 Surface allocation, teardown, status/fence waits, and DMA-BUF-synchronized
 image readback now live together in `surface.c`. Context creation/destruction,
-picture submission, external-pool management, frame routing, and the dedicated
-MPP worker are isolated in `context.c`; the main translation unit now owns
-capability/configuration policy, stubs, initialization, and vtable wiring.
+picture lifecycle, and render-target ownership are isolated in `context.c`.
+`mpp_dec.c` owns packet construction, external-pool management, frame routing,
+submission/draining, and the dedicated worker. The main translation unit now
+owns capability/configuration policy, stubs, initialization, and vtable wiring.
 
 ---
 
