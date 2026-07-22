@@ -58,7 +58,7 @@ export LIBVA_DRIVER_NAME=rockchip
 export LIBVA_DRIVERS_PATH="$DRIVER_DIR"
 
 WORK=$(mktemp -d "$REPO_ROOT/.test-work.validate.XXXXXX") || exit 1
-# shellcheck disable=SC2329 # Invoked by the EXIT trap.
+# shellcheck disable=SC2317,SC2329 # Invoked by the EXIT trap.
 cleanup()
 {
     if [ "$KEEP_WORK" = 1 ]; then
