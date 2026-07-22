@@ -38,7 +38,8 @@ rockchip-vaapi/
 │   ├── export.h
 │   ├── log.c                  # Thread-safe driver logging
 │   ├── log.h
-│   ├── surface.h              # Shared surface synchronization entry points
+│   ├── surface.c              # Surface lifecycle, fence waits, and readback
+│   ├── surface.h
 │   ├── h264.c                 # H.264 SPS/PPS Annex B reconstruction
 │   ├── h264.h
 │   ├── frame_layout.c         # Checked NV12 sizing and frame copies
@@ -104,6 +105,8 @@ as public ABI. Buffer/image ownership now lives in `buffer.c`; logging uses a
 workers cannot interleave log records. DRM PRIME 2 descriptor construction is
 isolated in `export.c`; it synchronizes pending surfaces through the narrow
 interface in `surface.h` before duplicating and describing the active DMA-BUF.
+Surface allocation, teardown, status/fence waits, and DMA-BUF-synchronized
+image readback now live together in `surface.c`.
 
 ---
 
