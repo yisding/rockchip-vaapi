@@ -200,6 +200,16 @@ kernel-notes guards were also verified to reject mismatches before device
 access. A skipped required vector remains deliberately reported as blocked,
 never green.
 
+The full Phase 0 normal and ASan/UBSan gates were rerun after the first Phase 2
+slice on 2026-07-22 against the exact audited `Pd222-C4ad2` kernel build `#4`.
+Every pinned H.264/VP9 hardware vector, all eight unadvertised HEVC software-
+fallback vectors, the H.264 reference/B-frame and 4K matrix, five VP9
+determinism passes, and the unsupported-codec fallback check were green. The
+risky hidden-reference vector was bit-exact in both runs. The running kernel
+notes hash is
+`db292410e58bd9c658a0b32b6fc7c7895f3ac4a349ae3c292c441e92e340690e`,
+and its boot-image MD5 exactly matches the archived fixed `Pd222` deb.
+
 **Gate:** ✅ conformance-vector decode bit-exact for the shipping profiles;
 gate green under ASan; CI builds and lints on push.
 
@@ -316,8 +326,9 @@ ASan/UBSan, Valgrind, and clang-tidy checks pass, and FFmpeg's independent
 scaling data). Eight checksum-pinned FFmpeg FATE HEVC Main conformance streams
 are in the manifest but deliberately remain `software-fallback`: no HEVC
 profile is advertised until the full on-device bit-exact gate passes. The
-current session has no MPP/DRM/RGA device nodes, so that hardware result is
-still pending rather than inferred from host checks.
+post-slice Phase 0 hardware regression is green normally and under ASan/UBSan,
+but that proves only the already-shipping profiles and HEVC fallback contract;
+HEVC Main hardware output remains pending rather than inferred from it.
 
 **Gate:** HEVC Main bit-exact vs software on conformance vectors; HEVC Main10 /
 VP9 P2 validated (PSNR-bounded, since RGA P010 conversion is not
@@ -418,7 +429,7 @@ concurrent with decode contexts are race-free.
 ## Status
 
 - Phase 0: complete on `main`; the normal and sanitized full hardware gates are
-  green on the audited fixed kernel build `#3`.
+  green after the Phase 2 slice on audited fixed kernel build `#4`.
 - Phase 1: complete on `main`; object heap/object migrations, external-buffer
   zero-copy, worker/fence synchronization, module separation, two active
   decoders, sanitizer gates, and the multi-hour 4K resource soak are green.

@@ -147,8 +147,8 @@ fix is installed and the board has booted that kernel. The
 `vp90-2-10-show-existing-frame2.webm` stream can otherwise panic the RK3588 VPU
 driver. The harness additionally requires both the exact running release and
 the SHA-256 of `/sys/kernel/notes` to match `RISKY_KERNEL_RELEASE` and
-`RISKY_KERNEL_NOTES_SHA256`. This distinguishes the audited fixed build `#3`
-from vulnerable build `#1`, which both report
+`RISKY_KERNEL_NOTES_SHA256`. This distinguishes the current audited fixed
+build `#4` from vulnerable build `#1`, which both report
 `6.18.38-current-rockchip64`; a stale checkbox or environment variable cannot
 enable the vector on the older build. A future kernel must be audited before
 passing both its release and notes fingerprint through those variables.

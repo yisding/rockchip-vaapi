@@ -33,8 +33,8 @@ esac
 # A typo or stale CI checkbox must not turn a conformance run into a kernel
 # panic. Kernel-crash vectors are enabled only on the exact release and GNU
 # notes fingerprint of the build whose RK3588 VP9 probability-table bounds fix
-# was audited. The fingerprint distinguishes fixed build #3 from vulnerable
-# build #1, which deliberately share the same release string. Future kernel
+# was audited. The fingerprint distinguishes audited build #4 from vulnerable
+# build #1, which deliberately shares the same release string. Future kernel
 # builds must be reviewed and then named explicitly through both variables.
 if [ "$RISKY_VECTORS" = run ] && [ "$TEST_SET" != synthetic ]; then
     running_kernel=$(uname -r) || exit 2
