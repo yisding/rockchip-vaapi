@@ -363,7 +363,14 @@ available only under `RK_VAAPI_EXPERIMENTAL_PROFILES=vp9-profile2`, reports
 HEVC Main10. A generated lossless 48-frame 320x240 gate is byte-identical to
 software and audits 48 AFBC conversions. A direct RKMPP AFBC plus RGA
 discriminator is also byte-identical; direct linear NV15 misread as P010 is
-not. Profile 2 remains hidden pending pinned conformance and HDR playback.
+not.
+
+The checksum-pinned official WebM/libvpx
+`vp92-2-20-10bit-yuv420.webm` Profile 2 vector is also P010 bit-exact for all
+10 displayed frames. Its driver audit requires 11 AFBC conversions, retaining
+coverage of the additional hidden/reference decode output instead of equating
+decoder outputs with display count. The default conformance gate keeps this
+profile on software fallback; Profile 2 remains hidden pending app validation.
 
 **Progress (2026-07-26, HEVC hardware gate):** Added a gated HEVC Main
 validation path without advertising HEVC by default:
@@ -508,10 +515,11 @@ concurrent with decode contexts are race-free.
   pinned MPP/ROCK 5B stack. HEVC must repeat the parity gate when its decode
   path lands; the internal-group ref-holding fallback remains zero-copy.
 - **10-bit exactness:** resolved for the generated HEVC Main10 and VP9 Profile
-  2 AFBC paths, the pinned 256-frame Main10 weighted-prediction vector, and the
-  24-frame HDR10 vector. RGA performs a pure NV15-to-P010 repack and all four
-  gates are byte-exact. Static BT.2020/PQ HDR metadata survives the hardware
-  frame path; broader conformance and app/display HDR presentation remain open.
+  2 AFBC paths, pinned Main10 weighted-prediction and official VP9 Profile 2
+  vectors, and the 24-frame HDR10 vector. RGA performs a pure NV15-to-P010
+  repack and every gate is byte-exact. Static BT.2020/PQ HDR metadata survives
+  the hardware frame path; broader HEVC conformance and app/display HDR
+  presentation remain open.
 - **Encode conformance:** encoders aren't spec-exact; the gate must be
   round-trip PSNR + interop, and depends on the kernel RKVENC2 hardening.
 - **Sandbox upstreamability:** the Firefox RDD policy patch is small but must be
@@ -532,11 +540,11 @@ concurrent with decode contexts are race-free.
   decoders, sanitizer gates, and the multi-hour 4K resource soak are green.
 - Phase 2: in progress; the first host reconstruction/routing slice is green,
   the fail-fast experimental HEVC Main hardware gate is 7/8 bit-exact, and the
-  generated 48-frame Main10/Profile 2, pinned 256-frame Main10, and 24-frame
-  Main10 HDR10 AFBC-to-P010 gates are bit-exact. Static BT.2020/PQ HDR metadata
-  is preserved. HEVC Main remains hidden on the direct-MPP TILES failure; both
-  10-bit profiles remain hidden while broader conformance and app/display HDR
-  presentation are open.
+  generated 48-frame Main10/Profile 2, pinned 256-frame Main10, official
+  10-frame Profile 2, and 24-frame Main10 HDR10 AFBC-to-P010 gates are
+  bit-exact. Static BT.2020/PQ HDR metadata is preserved. HEVC Main remains
+  hidden on the direct-MPP TILES failure; both 10-bit profiles remain hidden
+  while broader HEVC conformance and app/display validation are open.
 - Phases 3–5: planned.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement

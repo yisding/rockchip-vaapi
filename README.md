@@ -62,9 +62,9 @@ decoder gates, and two-hour 4K resource soak are also complete; see
   or has a documented fallback contract. HEVC Main10 has a separate opt-in
   gate whose generated 48-frame and pinned 256-frame MPP AFBC-to-RGA P010
   paths are bit-exact, but it remains hidden pending broader conformance and
-  app/display HDR presentation. VP9 Profile 2 has its
-  own opt-in 48-frame P010-exact AFBC/RGA gate and remains hidden pending
-  conformance validation. HEVC Main10 additionally has a 24-frame HDR10 gate
+  app/display HDR presentation. VP9 Profile 2 has generated and official
+  libvpx P010-exact AFBC/RGA gates and remains hidden pending app validation.
+  HEVC Main10 additionally has a 24-frame HDR10 gate
   proving byte-exact P010 output and preservation of BT.2020/PQ, mastering
   display, and content-light metadata. VP8 and the other unvalidated profiles
   are also not advertised, so
@@ -104,7 +104,7 @@ Key features:
 | H.264 | Main, High | full normal + ASan/UBSan gates bit-exact | scaling-list reconstruction included |
 | H.264 | Constrained Baseline | not offered | pinned SVA vector is corrupt in MPP; software fallback |
 | VP9 | Profile 0 | full normal + ASan/UBSan gates bit-exact | hidden-reference vector included on audited kernel |
-| VP9 | Profile 2 (under development) | not offered | opt-in 48-frame gate is P010 bit-exact through MPP AFBC + RGA; conformance/HDR matrix pending |
+| VP9 | Profile 2 (under development) | not offered | generated 48-frame and official libvpx 10-frame gates are P010 bit-exact through MPP AFBC + RGA |
 | HEVC | Main (under development) | not offered | gated hardware path has 7/8 pinned Main vectors bit-exact; MPP rejects the remaining TILES vector |
 | HEVC | Main10 (under development) | not offered | generated, pinned weighted-prediction, and HDR10 gates are P010 bit-exact through MPP AFBC + RGA; BT.2020/PQ and static HDR metadata survive hardware decode |
 | VP8 | — | not offered | crashes in the generic path; needs debugging |

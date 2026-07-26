@@ -10,6 +10,13 @@ if [ -z "${FFMPEG:-}" ]; then
         FFMPEG=ffmpeg
     fi
 fi
+if [ -z "${FFPROBE:-}" ]; then
+    if [ -x /usr/bin/ffprobe ]; then
+        FFPROBE=/usr/bin/ffprobe
+    else
+        FFPROBE=ffprobe
+    fi
+fi
 FFMPEG_TIMEOUT=${FFMPEG_TIMEOUT:-120}
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)
@@ -20,6 +27,9 @@ WIDTH=${VP9_PROFILE2_WIDTH:-320}
 HEIGHT=${VP9_PROFILE2_HEIGHT:-240}
 FRAMES=${VP9_PROFILE2_FRAMES:-48}
 FPS=${VP9_PROFILE2_FPS:-24}
+PINNED_VECTOR=${VP9_PROFILE2_PINNED_VECTOR:-$SCRIPT_DIR/vectors/vp92-2-20-10bit-yuv420.webm}
+PINNED_SHA256=c4b56b148d5039aa824fde3d4877dbd2604d0de7f77af96f4ba1ade537396a38
+PINNED_CONVERSIONS=11
 
 case $FFMPEG_TIMEOUT in
     ''|*[!0-9]*) echo "error: FFMPEG_TIMEOUT must be an integer" >&2; exit 2 ;;
@@ -106,3 +116,70 @@ if [ "$conversions" -ne "$FRAMES" ] ||
 fi
 
 echo "ok    VP9 Profile 2 ${WIDTH}x${HEIGHT} $FRAMES frames bit-exact (MPP AFBC -> RGA P010)"
+
+if [ ! -f "$PINNED_VECTOR" ]; then
+    echo "FAIL  pinned VP9 Profile 2 vector missing; run 'make fetch-vectors'" >&2
+    exit 1
+fi
+actual_sha=$(sha256sum "$PINNED_VECTOR" | awk '{print $1}')
+if [ "$actual_sha" != "$PINNED_SHA256" ]; then
+    echo "FAIL  pinned VP9 Profile 2 vector checksum mismatch" >&2
+    exit 1
+fi
+
+pinned_software=$WORK/pinned-software.p010
+pinned_hardware=$WORK/pinned-hardware.p010
+pinned_log=$WORK/pinned-driver.log
+run_ffmpeg -nostdin -y -v error -i "$PINNED_VECTOR" -an \
+    -pix_fmt p010le -fps_mode passthrough -f rawvideo "$pinned_software"
+RK_VAAPI_EXPERIMENTAL_PROFILES=vp9-profile2 \
+LIBVA_DRIVER_NAME=rockchip \
+LIBVA_DRIVERS_PATH=$DRIVER_DIR \
+RK_VAAPI_LOG=$pinned_log \
+run_ffmpeg -nostdin -y -v error \
+    -hwaccel vaapi -hwaccel_output_format vaapi \
+    -vaapi_device "$RENDER_NODE" -i "$PINNED_VECTOR" -an \
+    -vf 'hwdownload,format=p010le' -pix_fmt p010le \
+    -fps_mode passthrough -f rawvideo "$pinned_hardware"
+
+dimensions=$("$FFPROBE" -v error -select_streams v:0 \
+    -show_entries stream=width,height -of csv=s=x:p=0 "$PINNED_VECTOR")
+case $dimensions in
+    *x*) ;;
+    *) echo "FAIL  could not determine pinned Profile 2 dimensions" >&2; exit 1 ;;
+esac
+pinned_width=${dimensions%x*}
+pinned_height=${dimensions#*x}
+for value in "$pinned_width" "$pinned_height"; do
+    case $value in
+        ''|*[!0-9]*|0)
+            echo "FAIL  pinned Profile 2 dimensions are invalid: $dimensions" >&2
+            exit 1
+            ;;
+    esac
+done
+pinned_frame_size=$((pinned_width * pinned_height * 3))
+pinned_software_size=$(wc -c <"$pinned_software")
+pinned_hardware_size=$(wc -c <"$pinned_hardware")
+if [ "$pinned_frame_size" -eq 0 ] ||
+   [ $((pinned_software_size % pinned_frame_size)) -ne 0 ]; then
+    echo "FAIL  pinned Profile 2 software output has an invalid size" >&2
+    exit 1
+fi
+pinned_frames=$((pinned_software_size / pinned_frame_size))
+if [ "$pinned_frames" -eq 0 ] ||
+   [ "$pinned_hardware_size" -ne "$pinned_software_size" ] ||
+   ! cmp -s "$pinned_software" "$pinned_hardware"; then
+    echo "FAIL  pinned Profile 2 P010 output differs from software reference" >&2
+    exit 1
+fi
+
+pinned_conversions=$(grep -c 'convert: NV15->P010.*afbc=1' "$pinned_log" || true)
+if [ "$pinned_conversions" -ne "$PINNED_CONVERSIONS" ] ||
+   ! grep -q 'CreateContext: 10-bit output mode=AFBC_V2 profile=21' "$pinned_log" ||
+   grep -q 'external buffer mismatch\|decode failed\|afbc=0' "$pinned_log"; then
+    echo "FAIL  pinned Profile 2 AFBC/RGA audit failed (conversions=$pinned_conversions expected=$PINNED_CONVERSIONS)" >&2
+    exit 1
+fi
+
+echo "ok    VP9 Profile 2 vp92-2-20-10bit-yuv420.webm ${pinned_width}x${pinned_height} $pinned_frames displayed frames bit-exact ($pinned_conversions decoded frames)"

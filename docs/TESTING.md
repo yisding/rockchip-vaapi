@@ -45,7 +45,8 @@ The manifest at `tests/conformance-vectors.tsv` pins both the downloaded file
 and extracted payload SHA-256. It currently covers three ITU-T H.264 streams
 (Constrained Baseline fallback, Main field-coded VA-API, and High VA-API with
 scaling lists), eight FFmpeg FATE HEVC Main streams, one FATE HEVC Main10
-weighted-prediction stream, and four official WebM/libvpx VP9 VA-API streams.
+weighted-prediction stream, one official WebM/libvpx VP9 Profile 2 10-bit
+stream, and four official WebM/libvpx VP9 Profile 0 VA-API streams.
 The HEVC cases exercise long-term references, PPS syntax, RPS, scaling lists,
 tiles, VPS IDs, WPP, and weighted prediction; they remain
 `software-fallback` by default until the Phase 2 hardware gates close. The
@@ -141,13 +142,15 @@ though the private SPS reconstructed for MPP has no VUI. It does not replace
 the Firefox/mpv display-presentation gate.
 
 `check-vp9-profile2-experimental` generates a lossless 48-frame VP9 Profile 2
-stream at 320x240, forces the hidden `vp9-profile2` profile, downloads P010,
-and requires byte-for-byte equality with software decode. Like Main10, it
-requires one AFBC NV15-to-P010 conversion per frame and rejects linear
-fallback, buffer mismatch, or decode failure. This independently validates
-the VP9 uncompressed-header parser and profile-matched hidden-reference repeat
-packet in addition to the shared 10-bit conversion/export path. The profile
-remains hidden pending pinned Profile 2 conformance and HDR playback gates.
+stream at 320x240 and runs the checksum-pinned official WebM/libvpx
+`vp92-2-20-10bit-yuv420.webm` vector (160x90, 10 displayed frames). It forces
+the hidden `vp9-profile2` profile, downloads P010, and requires byte-for-byte
+equality with software decode. Like Main10, it requires AFBC NV15-to-P010
+conversion and rejects linear fallback, buffer mismatch, or decode failure.
+The official vector additionally audits its 11 decoded frames, including one
+hidden/reference output. This validates the VP9 uncompressed-header parser and
+profile-matched hidden-reference handling in addition to the shared 10-bit
+conversion/export path. The profile remains hidden pending app validation.
 
 The object-lifecycle gate crosses every former fixed-array ceiling, validates
 all five typed handle namespaces and stale-handle rejection, and creates nine
