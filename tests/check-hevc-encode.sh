@@ -73,6 +73,8 @@ fi
 run_mode()
 {
     mode=$1
+    upload_format=$2
+    shift
     shift
     output=$WORK/$mode.hevc
     decoded=$WORK/$mode.yuv
@@ -88,7 +90,7 @@ run_mode()
         run_ffmpeg -nostdin -y -v error \
         -vaapi_device "$RENDER_NODE" \
         -f lavfi -i "testsrc2=size=${WIDTH}x${HEIGHT}:rate=${FPS}" \
-        -frames:v "$FRAMES" -vf 'format=nv12,hwupload' \
+        -frames:v "$FRAMES" -vf "format=$upload_format,hwupload" \
         -c:v hevc_vaapi -profile:v main "$@" "$output" \
         >"$ffmpeg_log" 2>&1
 
@@ -129,7 +131,10 @@ run_mode()
     fi
 
     packets=$(grep -c 'encoder produced .* bytes' "$driver_log" || true)
+    conversions=$(grep -c 'PutImage: I420->NV12' "$driver_log" || true)
     if [ "$packets" -ne "$FRAMES" ] ||
+       { [ "$upload_format" = yuv420p ] &&
+         [ "$conversions" -lt "$FRAMES" ]; } ||
        ! grep -q 'HEVC encoder sequence .*va_ctu=64' "$driver_log" ||
        grep -q 'encoder .*failed\|rejected' "$driver_log"; then
         echo "FAIL  HEVC $mode driver audit packets=$packets expected=$FRAMES" >&2
@@ -139,9 +144,10 @@ run_mode()
     echo "ok    HEVC encode $mode $FRAMES frames profile=Main PSNR=$average bytes=$bytes"
 }
 
-run_mode cqp -rc_mode CQP -qp 24
-run_mode cbr -rc_mode CBR -b:v 1M -maxrate 1M
-run_mode vbr -rc_mode VBR -b:v 1M -maxrate 2M
+run_mode cqp nv12 -rc_mode CQP -qp 24
+run_mode cbr nv12 -rc_mode CBR -b:v 1M -maxrate 1M
+run_mode vbr nv12 -rc_mode VBR -b:v 1M -maxrate 2M
+run_mode i420 yuv420p -rc_mode CQP -qp 24
 
 gst_output=$WORK/gstreamer.hevc
 gst_decoded=$WORK/gstreamer.yuv
@@ -163,7 +169,7 @@ RK_VAAPI_LOG=$gst_driver_log \
     filesrc location="$reference" \
     ! rawvideoparse format=i420 width="$WIDTH" height="$HEIGHT" \
         framerate="$FPS/1" \
-    ! videoconvert ! video/x-raw,format=NV12 \
+    ! video/x-raw,format=I420 \
     ! vah265enc rate-control=cqp qpi=24 qpp=24 key-int-max="$FPS" \
     ! filesink location="$gst_output"
 
@@ -196,7 +202,9 @@ reject_parser_errors "$gst_psnr_log"
 gst_average=$(sed -n 's/.* average:\([^ ]*\).*/\1/p' \
                       "$gst_psnr_log" | tail -1)
 gst_packets=$(grep -c 'encoder produced .* bytes' "$gst_driver_log" || true)
+gst_conversions=$(grep -c 'PutImage: I420->NV12' "$gst_driver_log" || true)
 if [ -z "$gst_average" ] || [ "$gst_packets" -ne "$FRAMES" ] ||
+   [ "$gst_conversions" -lt "$FRAMES" ] ||
    ! grep -q 'HEVC encoder sequence .*va_ctu=64' "$gst_driver_log" ||
    ! awk -v actual="$gst_average" -v minimum="$MIN_PSNR" \
          'BEGIN { exit !(actual + 0 >= minimum + 0) }' ||

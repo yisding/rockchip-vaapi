@@ -507,8 +507,19 @@ produces parser-clean 48/48 Main-profile streams at 45.19, 44.46, and 40.91 dB;
 `vah265enc` passes at 45.31 dB. Normal and ASan/UBSan app gates pass for both
 codecs. Concurrent 96-frame H.264 and HEVC encoder runs also pass while the
 complete shipping synthetic decode matrix runs in parallel. The implementation
-intentionally exposes one full-frame slice only; additional input formats,
-WebRTC, multi-slice, and long encode soak remain open.
+intentionally exposes one full-frame slice only; planar upload support is
+recorded below, while imported RGB/DMABUF input, WebRTC, multi-slice, and long
+encode soak remain open.
+
+**Progress (2026-07-26, planar encoder input):** Encode configs now advertise
+NV12 plus I420/YV12 system-memory upload formats. Explicit three-plane
+pitches/offsets are capacity-checked, planar chroma is interleaved into the
+native NV12 DMA-BUF under CPU synchronization, and `vaGetImage` reverses the
+mapping byte-exactly. Stock FFmpeg direct `yuv420p` upload produces the same
+CQP stream/PSNR as NV12 for both H.264 and HEVC. GStreamer now feeds I420
+directly to `vah264enc`/`vah265enc` without `videoconvert`; normal,
+ASan/UBSan, and expanded 96-frame concurrent encode/decode gates pass.
+Imported RGB/DMABUF surfaces still require a separate RGA conversion path.
 
 **Gate:** encode → standard-decoder round-trip within a PSNR bound;
 interoperable bitstreams (ffmpeg/browsers decode them); GStreamer `vah264enc` /
@@ -588,8 +599,9 @@ concurrent with decode contexts are race-free.
 - Phase 4: in progress; experimental one-slice H.264 Main/High and HEVC Main
   encode pass FFmpeg and GStreamer CQP/CBR/VBR interoperability, parser, and
   PSNR gates normally and under ASan/UBSan. Both 96-frame encoder gates pass
-  together with the shipping decode matrix. Broader inputs, WebRTC,
-  multi-slice, and long encode soak remain open.
+  together with the shipping decode matrix. Checked I420/YV12 uploads are
+  normalized to native NV12 and pass direct FFmpeg/GStreamer gates. Imported
+  RGB/DMABUF conversion, WebRTC, multi-slice, and long encode soak remain open.
 - Phase 5: planned.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement

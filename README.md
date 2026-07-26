@@ -120,11 +120,12 @@ not offered.
 
 Experimental encode is hidden by default. Setting
 `RK_VAAPI_EXPERIMENTAL_ENCODE=h264`, `hevc`, or `h264,hevc` exposes
-frame-level `VAEntrypointEncSlice` for H.264 Main/High and HEVC Main with NV12
-input. Both paths cover one complete frame slice, MPP-generated headers,
-CQP/CBR/VBR, FFmpeg interoperability, GStreamer `vah264enc`/`vah265enc`,
-ASan/UBSan, and concurrent encode/decode. Broader input formats, WebRTC,
-multi-slice, and long encode soak remain open.
+frame-level `VAEntrypointEncSlice` for H.264 Main/High and HEVC Main. NV12 is
+the native MPP input; checked I420 and YV12 image uploads are converted into
+that storage. Both paths cover one complete frame slice, MPP-generated headers,
+CQP/CBR/VBR, FFmpeg interoperability, direct-I420 GStreamer
+`vah264enc`/`vah265enc`, ASan/UBSan, and concurrent encode/decode. Imported
+RGB/DMABUF conversion, WebRTC, multi-slice, and long encode soak remain open.
 
 ## Dependencies
 

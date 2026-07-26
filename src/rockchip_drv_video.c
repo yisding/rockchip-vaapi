@@ -484,8 +484,12 @@ static VAStatus rk_QuerySurfaceAttrs(VADriverContextP ctx, VAConfigID config,
     if (!cfg)
         return VA_STATUS_ERROR_INVALID_CONFIG;
 
+    bool is_10bit = cfg->rt_format == VA_RT_FORMAT_YUV420_10;
+    bool planar_uploads = cfg->entrypoint == VAEntrypointEncSlice &&
+                          !is_10bit;
     /* Firefox calls this twice: first with NULL to get count, then with buffer */
-    const unsigned int n = 4;
+    const unsigned int pixel_formats = planar_uploads ? 3 : 1;
+    const unsigned int n = pixel_formats + 3;
     if (!attrib_list) {
         *num_attribs = n;
         rk_object_unref(&cfg->base);
@@ -497,7 +501,6 @@ static VAStatus rk_QuerySurfaceAttrs(VADriverContextP ctx, VAConfigID config,
         return VA_STATUS_ERROR_MAX_NUM_EXCEEDED;
     }
 
-    bool is_10bit = cfg->rt_format == VA_RT_FORMAT_YUV420_10;
     rk_object_unref(&cfg->base);
 
     /* A config has one RT format; do not expose P010 to 8-bit encoders. */
@@ -507,28 +510,39 @@ static VAStatus rk_QuerySurfaceAttrs(VADriverContextP ctx, VAConfigID config,
     attrib_list[0].value.type        = VAGenericValueTypeInteger;
     attrib_list[0].value.value.i     = is_10bit ? VA_FOURCC_P010
                                                 : VA_FOURCC_NV12;
+    if (planar_uploads) {
+        attrib_list[1] = attrib_list[0];
+        attrib_list[1].value.value.i = VA_FOURCC_I420;
+        attrib_list[2] = attrib_list[0];
+        attrib_list[2].value.value.i = VA_FOURCC_YV12;
+    }
 
     /* Memory type: VA-managed + DRM PRIME 2 */
-    attrib_list[1].type              = VASurfaceAttribMemoryType;
-    attrib_list[1].flags             = VA_SURFACE_ATTRIB_GETTABLE |
-                                       VA_SURFACE_ATTRIB_SETTABLE;
-    attrib_list[1].value.type        = VAGenericValueTypeInteger;
-    attrib_list[1].value.value.i     = (int)(VA_SURFACE_ATTRIB_MEM_TYPE_VA |
-                                       VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2);
+    unsigned int memory_index = pixel_formats;
+    attrib_list[memory_index].type          = VASurfaceAttribMemoryType;
+    attrib_list[memory_index].flags         = VA_SURFACE_ATTRIB_GETTABLE |
+                                              VA_SURFACE_ATTRIB_SETTABLE;
+    attrib_list[memory_index].value.type    = VAGenericValueTypeInteger;
+    attrib_list[memory_index].value.value.i =
+        (int)(VA_SURFACE_ATTRIB_MEM_TYPE_VA |
+              VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2);
 
     /* Max resolution */
-    attrib_list[2].type              = VASurfaceAttribMaxWidth;
-    attrib_list[2].flags             = VA_SURFACE_ATTRIB_GETTABLE;
-    attrib_list[2].value.type        = VAGenericValueTypeInteger;
-    attrib_list[2].value.value.i     = RK_MAX_WIDTH;
-    attrib_list[3].type              = VASurfaceAttribMaxHeight;
-    attrib_list[3].flags             = VA_SURFACE_ATTRIB_GETTABLE;
-    attrib_list[3].value.type        = VAGenericValueTypeInteger;
-    attrib_list[3].value.value.i     = RK_MAX_HEIGHT;
+    attrib_list[memory_index + 1].type       = VASurfaceAttribMaxWidth;
+    attrib_list[memory_index + 1].flags      = VA_SURFACE_ATTRIB_GETTABLE;
+    attrib_list[memory_index + 1].value.type =
+        VAGenericValueTypeInteger;
+    attrib_list[memory_index + 1].value.value.i = RK_MAX_WIDTH;
+    attrib_list[memory_index + 2].type       = VASurfaceAttribMaxHeight;
+    attrib_list[memory_index + 2].flags      = VA_SURFACE_ATTRIB_GETTABLE;
+    attrib_list[memory_index + 2].value.type =
+        VAGenericValueTypeInteger;
+    attrib_list[memory_index + 2].value.value.i = RK_MAX_HEIGHT;
 
     *num_attribs = n;
-    LOG("QuerySurfaceAttributes: returned %u attribs (%s, DRM_PRIME_2)",
-        n, is_10bit ? "P010" : "NV12");
+    LOG("QuerySurfaceAttributes: returned %u attribs (%s%s, DRM_PRIME_2)",
+        n, is_10bit ? "P010" : "NV12",
+        planar_uploads ? "/I420/YV12" : "");
     return VA_STATUS_SUCCESS;
 }
 

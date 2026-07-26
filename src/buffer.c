@@ -209,13 +209,20 @@ VAStatus rk_QueryImageFormats(VADriverContextP context,
                               VAImageFormat *formats, int *num_formats)
 {
     (void)context;
+    memset(formats, 0, 4 * sizeof(*formats));
     formats[0].fourcc = VA_FOURCC_NV12;
     formats[0].byte_order = VA_LSB_FIRST;
     formats[0].bits_per_pixel = 12;
     formats[1].fourcc = VA_FOURCC_P010;
     formats[1].byte_order = VA_LSB_FIRST;
     formats[1].bits_per_pixel = 24;
-    *num_formats = 2;
+    formats[2].fourcc = VA_FOURCC_I420;
+    formats[2].byte_order = VA_LSB_FIRST;
+    formats[2].bits_per_pixel = 12;
+    formats[3].fourcc = VA_FOURCC_YV12;
+    formats[3].byte_order = VA_LSB_FIRST;
+    formats[3].bits_per_pixel = 12;
+    *num_formats = 4;
     return VA_STATUS_SUCCESS;
 }
 
@@ -228,22 +235,40 @@ VAStatus rk_CreateImage(VADriverContextP context, VAImageFormat *format,
         return VA_STATUS_ERROR_INVALID_PARAMETER;
 
     unsigned int bytes_per_sample;
+    bool planar = format->fourcc == VA_FOURCC_I420 ||
+                  format->fourcc == VA_FOURCC_YV12;
     if (format->fourcc == VA_FOURCC_NV12)
         bytes_per_sample = 1;
     else if (format->fourcc == VA_FOURCC_P010)
         bytes_per_sample = 2;
+    else if (planar && ((width & 1) || (height & 1)))
+        return VA_STATUS_ERROR_INVALID_PARAMETER;
+    else if (planar)
+        bytes_per_sample = 1;
     else
         return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
 
     size_t aligned_width = ((size_t)(unsigned int)width + 15u) & ~15u;
     if (aligned_width > UINT_MAX / bytes_per_sample)
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
-    unsigned int image_pitch =
-        (unsigned int)aligned_width * bytes_per_sample;
+    unsigned int image_pitch = (unsigned int)aligned_width *
+                               bytes_per_sample;
+    unsigned int chroma_pitch = planar ? (unsigned int)aligned_width / 2
+                                       : image_pitch;
     size_t allocation_size;
-    if (!rk_nv12_layout_size(image_pitch, (size_t)(unsigned int)height,
-                             &allocation_size) ||
-        allocation_size > UINT_MAX)
+    if (planar) {
+        size_t luma_size = (size_t)image_pitch * (unsigned int)height;
+        size_t chroma_size = (size_t)chroma_pitch *
+                             ((unsigned int)height / 2);
+        if (chroma_size > (SIZE_MAX - luma_size) / 2)
+            return VA_STATUS_ERROR_ALLOCATION_FAILED;
+        allocation_size = luma_size + 2 * chroma_size;
+    } else if (!rk_nv12_layout_size(
+                   image_pitch, (size_t)(unsigned int)height,
+                   &allocation_size)) {
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
+    if (allocation_size > UINT_MAX)
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
 
     VABufferID buffer_id;
@@ -270,7 +295,16 @@ VAStatus rk_CreateImage(VADriverContextP context, VAImageFormat *format,
     image_object->fourcc = format->fourcc;
     image_object->width = (unsigned int)width;
     image_object->height = (unsigned int)height;
-    image_object->pitch = image_pitch;
+    image_object->num_planes = planar ? 3 : 2;
+    image_object->pitches[0] = image_pitch;
+    image_object->pitches[1] = chroma_pitch;
+    image_object->pitches[2] = planar ? chroma_pitch : 0;
+    image_object->offsets[0] = 0;
+    image_object->offsets[1] = image_pitch * (unsigned int)height;
+    image_object->offsets[2] = planar
+        ? image_object->offsets[1] +
+          chroma_pitch * ((unsigned int)height / 2)
+        : 0;
 
     uint32_t image_id;
     pthread_mutex_lock(&driver->object_lock);
@@ -289,11 +323,11 @@ VAStatus rk_CreateImage(VADriverContextP context, VAImageFormat *format,
     image->format = *format;
     image->width = (unsigned short)width;
     image->height = (unsigned short)height;
-    image->num_planes = 2;
-    image->pitches[0] = image_pitch;
-    image->pitches[1] = image_pitch;
-    image->offsets[0] = 0;
-    image->offsets[1] = image_pitch * (unsigned int)height;
+    image->num_planes = image_object->num_planes;
+    for (unsigned int plane = 0; plane < image_object->num_planes; plane++) {
+        image->pitches[plane] = image_object->pitches[plane];
+        image->offsets[plane] = image_object->offsets[plane];
+    }
     image->data_size = size;
     return VA_STATUS_SUCCESS;
 }
@@ -336,6 +370,20 @@ VAStatus rk_SetImagePalette(VADriverContextP context, VAImageID image,
     return VA_STATUS_SUCCESS;
 }
 
+static bool image_plane_fits(const RKImage *image, unsigned int plane,
+                             size_t row_bytes, unsigned int rows,
+                             size_t capacity)
+{
+    if (plane >= image->num_planes || image->pitches[plane] < row_bytes ||
+        image->offsets[plane] > capacity)
+        return false;
+    if (!rows)
+        return true;
+    size_t last_row = (size_t)(rows - 1) * image->pitches[plane];
+    return last_row <= capacity - image->offsets[plane] &&
+           row_bytes <= capacity - image->offsets[plane] - last_row;
+}
+
 VAStatus rk_PutImage(VADriverContextP context, VASurfaceID surface,
                      VAImageID image, int src_x, int src_y,
                      unsigned int src_width, unsigned int src_height,
@@ -365,9 +413,24 @@ VAStatus rk_PutImage(VADriverContextP context, VASurfaceID surface,
                       dest_height == (unsigned int)target->height &&
                       src_width == dest_width && src_height == dest_height;
     bool is_10bit = MPP_FRAME_FMT_IS_YUV_10BIT(target->fmt);
-    uint32_t expected_fourcc = is_10bit ? VA_FOURCC_P010 : VA_FOURCC_NV12;
+    bool planar = source->fourcc == VA_FOURCC_I420 ||
+                  source->fourcc == VA_FOURCC_YV12;
     unsigned int bytes_per_sample = is_10bit ? 2u : 1u;
-    if (!full_frame || source->fourcc != expected_fourcc) {
+    size_t row_bytes = (size_t)target->width * bytes_per_sample;
+    size_t chroma_bytes = (size_t)target->width / 2;
+    bool source_layout_valid =
+        image_plane_fits(source, 0, planar ? (size_t)target->width : row_bytes,
+                         (unsigned int)target->height,
+                         source_buffer->capacity) &&
+        image_plane_fits(source, 1, planar ? chroma_bytes : row_bytes,
+                         (unsigned int)target->height / 2,
+                         source_buffer->capacity) &&
+        (!planar ||
+         image_plane_fits(source, 2, chroma_bytes,
+                          (unsigned int)target->height / 2,
+                          source_buffer->capacity));
+    if (!full_frame || source->fourcc != target->fourcc ||
+        (planar && is_10bit) || !source_layout_valid) {
         rk_object_unref(&source->base);
         rk_object_unref(&target->base);
         return VA_STATUS_ERROR_OPERATION_FAILED;
@@ -377,13 +440,11 @@ VAStatus rk_PutImage(VADriverContextP context, VASurfaceID surface,
     MppBuffer destination = target->priv_buf;
     size_t destination_pitch = (size_t)target->hstride * bytes_per_sample;
     size_t destination_size;
-    size_t source_size;
-    if (!destination || destination_pitch < source->pitch ||
+    if (!destination || destination_pitch < row_bytes ||
         !rk_nv12_layout_size(destination_pitch, (size_t)target->vstride,
                              &destination_size) ||
-        !rk_nv12_layout_size(source->pitch, source->height, &source_size) ||
         destination_size > mpp_buffer_get_size(destination) ||
-        source_size > source_buffer->capacity) {
+        source->offsets[0] > source_buffer->capacity) {
         pthread_mutex_unlock(&target->lock);
         rk_object_unref(&source->base);
         rk_object_unref(&target->base);
@@ -402,17 +463,40 @@ VAStatus rk_PutImage(VADriverContextP context, VASurfaceID surface,
     }
 
     memset(dst, 0, destination_size);
-    size_t row_bytes = (size_t)target->width * bytes_per_sample;
     for (int row = 0; row < target->height; row++)
         memcpy(dst + (size_t)row * destination_pitch,
-               src + (size_t)row * source->pitch, row_bytes);
+               src + source->offsets[0] +
+                   (size_t)row * source->pitches[0],
+               planar ? (size_t)target->width : row_bytes);
     uint8_t *dst_uv = dst + destination_pitch * (size_t)target->vstride;
-    const uint8_t *src_uv = src + (size_t)source->pitch * source->height;
-    for (int row = 0; row < target->height / 2; row++)
-        memcpy(dst_uv + (size_t)row * destination_pitch,
-               src_uv + (size_t)row * source->pitch, row_bytes);
+    if (planar) {
+        unsigned int u_plane = source->fourcc == VA_FOURCC_I420 ? 1 : 2;
+        unsigned int v_plane = source->fourcc == VA_FOURCC_I420 ? 2 : 1;
+        for (int row = 0; row < target->height / 2; row++) {
+            const uint8_t *src_u = src + source->offsets[u_plane] +
+                                   (size_t)row *
+                                       source->pitches[u_plane];
+            const uint8_t *src_v = src + source->offsets[v_plane] +
+                                   (size_t)row *
+                                       source->pitches[v_plane];
+            uint8_t *row_uv = dst_uv + (size_t)row * destination_pitch;
+            for (size_t column = 0; column < chroma_bytes; column++) {
+                row_uv[2 * column] = src_u[column];
+                row_uv[2 * column + 1] = src_v[column];
+            }
+        }
+    } else {
+        const uint8_t *src_uv = src + source->offsets[1];
+        for (int row = 0; row < target->height / 2; row++)
+            memcpy(dst_uv + (size_t)row * destination_pitch,
+                   src_uv + (size_t)row * source->pitches[1], row_bytes);
+    }
 
     bool sync_ok = dmabuf_cpu_sync(fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE);
+    if (sync_ok && planar)
+        LOG("PutImage: %s->NV12 %dx%d",
+            source->fourcc == VA_FOURCC_I420 ? "I420" : "YV12",
+            target->width, target->height);
     pthread_mutex_unlock(&target->lock);
     rk_object_unref(&source->base);
     rk_object_unref(&target->base);

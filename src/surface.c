@@ -42,14 +42,18 @@ static void surface_destroy(void *opaque) {
 }
 
 static VAStatus create_surfaces(VADriverContextP ctx, int width, int height,
-                                int n, VASurfaceID *ids, bool is_10bit)
+                                int n, VASurfaceID *ids, uint32_t fourcc)
 {
     RKDriver *d = drv_from_ctx(ctx);
+    bool is_10bit = fourcc == VA_FOURCC_P010;
 
     if (width <= 0 || height <= 0 || n < 0 || (n > 0 && !ids))
         return VA_STATUS_ERROR_INVALID_PARAMETER;
     if (width > RK_MAX_WIDTH || height > RK_MAX_HEIGHT)
         return VA_STATUS_ERROR_RESOLUTION_NOT_SUPPORTED;
+    if ((fourcc == VA_FOURCC_I420 || fourcc == VA_FOURCC_YV12) &&
+        ((width & 1) || (height & 1)))
+        return VA_STATUS_ERROR_INVALID_PARAMETER;
 
     int allocated = 0;
     for (int s = 0; s < n; s++) {
@@ -61,6 +65,7 @@ static VAStatus create_surfaces(VADriverContextP ctx, int width, int height,
         surf->height   = height;
         surf->fmt      = is_10bit ? MPP_FMT_YUV420SP_10BIT
                                   : MPP_FMT_YUV420SP;
+        surf->fourcc   = fourcc;
 
         if (pthread_mutex_init(&surf->lock, NULL) != 0) {
             free(surf);
@@ -144,7 +149,8 @@ VAStatus rk_CreateSurfaces(VADriverContextP ctx,
         format != VA_RT_FORMAT_YUV420_10)
         return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
     return create_surfaces(ctx, width, height, n, ids,
-                           format == VA_RT_FORMAT_YUV420_10);
+                           format == VA_RT_FORMAT_YUV420_10
+                               ? VA_FOURCC_P010 : VA_FOURCC_NV12);
 }
 
 VAStatus rk_DestroySurfaces(VADriverContextP ctx,
@@ -184,6 +190,7 @@ VAStatus rk_CreateSurfaces2(VADriverContextP ctx,
     else
         return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
 
+    bool pixel_format_seen = false;
     for (unsigned i = 0; i < n_attribs; i++) {
         LOG("  attrib[%u] type=%d flags=%d value=0x%x",
             i, attribs[i].type, attribs[i].flags,
@@ -194,14 +201,24 @@ VAStatus rk_CreateSurfaces2(VADriverContextP ctx,
         if (attribs[i].value.type != VAGenericValueTypeInteger)
             return VA_STATUS_ERROR_INVALID_PARAMETER;
         uint32_t requested = (uint32_t)attribs[i].value.value.i;
-        if (requested != VA_FOURCC_NV12 && requested != VA_FOURCC_P010)
+        if (pixel_format_seen && requested != fourcc)
+            return VA_STATUS_ERROR_INVALID_PARAMETER;
+        if (requested != VA_FOURCC_NV12 && requested != VA_FOURCC_P010 &&
+            requested != VA_FOURCC_I420 && requested != VA_FOURCC_YV12)
             return VA_STATUS_ERROR_ATTR_NOT_SUPPORTED;
-        if (requested != fourcc)
+        if ((format == VA_RT_FORMAT_YUV420_10 &&
+             requested != VA_FOURCC_P010) ||
+            (format == VA_RT_FORMAT_YUV420 &&
+             requested != VA_FOURCC_NV12 &&
+             requested != VA_FOURCC_I420 &&
+             requested != VA_FOURCC_YV12))
             return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
+        fourcc = requested;
+        pixel_format_seen = true;
     }
 
     return create_surfaces(ctx, (int)width, (int)height, (int)n, ids,
-                           fourcc == VA_FOURCC_P010);
+                           fourcc);
 }
 
 static VAStatus sync_surface_timeout(VADriverContextP ctx, VASurfaceID id,
@@ -287,11 +304,24 @@ VAStatus rk_QuerySurfaceStatus(VADriverContextP ctx,
     return VA_STATUS_SUCCESS;
 }
 
+static bool image_plane_fits(const RKImage *image, unsigned int plane,
+                             size_t row_bytes, unsigned int rows,
+                             size_t capacity)
+{
+    if (plane >= image->num_planes || image->pitches[plane] < row_bytes ||
+        image->offsets[plane] > capacity)
+        return false;
+    if (!rows)
+        return true;
+    size_t last_row = (size_t)(rows - 1) * image->pitches[plane];
+    return last_row <= capacity - image->offsets[plane] &&
+           row_bytes <= capacity - image->offsets[plane] - last_row;
+}
+
 VAStatus rk_GetImage(VADriverContextP ctx, VASurfaceID surface_id,
                              int x, int y, unsigned int w,
                              unsigned int h, VAImageID image_id)
 {
-    (void)x; (void)y; (void)w; (void)h;
     RKDriver  *d  = drv_from_ctx(ctx);
     RKSurface *s = surface_acquire(d, surface_id);
     RKImage *image = image_acquire(d, image_id);
@@ -312,8 +342,10 @@ VAStatus rk_GetImage(VADriverContextP ctx, VASurfaceID surface_id,
     MppBuffer source_buffer = s->backing_buf ? s->backing_buf
                             : s->frame ? mpp_frame_get_buffer(s->frame)
                             : s->priv_buf;
-    if (!source_buffer || image->width < (unsigned int)s->width ||
-        image->height < (unsigned int)s->height) {
+    bool full_frame = x == 0 && y == 0 && w == (unsigned int)s->width &&
+                      h == (unsigned int)s->height &&
+                      image->width >= w && image->height >= h;
+    if (!source_buffer || !full_frame) {
         pthread_mutex_unlock(&s->lock);
         rk_object_unref(&image->base);
         rk_object_unref(&s->base);
@@ -323,18 +355,26 @@ VAStatus rk_GetImage(VADriverContextP ctx, VASurfaceID surface_id,
     int vs  = s->vstride ? s->vstride : s->height;
     bool i10 = MPP_FRAME_FMT_IS_YUV_10BIT(s->fmt);
     int bpp  = i10 ? 2 : 1;
-    uint32_t expected_fourcc = i10 ? VA_FOURCC_P010 : VA_FOURCC_NV12;
+    bool planar = image->fourcc == VA_FOURCC_I420 ||
+                  image->fourcc == VA_FOURCC_YV12;
     size_t source_size;
-    size_t destination_size;
     size_t source_buffer_size = mpp_buffer_get_size(source_buffer);
     size_t source_pitch = (size_t)hs * (size_t)bpp;
-    size_t copy_bytes = (((size_t)(unsigned int)s->width + 15u) & ~15u) *
-                        (size_t)bpp;
-    if (image->fourcc != expected_fourcc || source_pitch < copy_bytes ||
+    size_t row_bytes = (size_t)(unsigned int)s->width * (size_t)bpp;
+    size_t chroma_bytes = (size_t)(unsigned int)s->width / 2;
+    bool destination_layout_valid =
+        image_plane_fits(image, 0, planar ? (size_t)(unsigned int)s->width
+                                         : row_bytes,
+                         (unsigned int)s->height, ib->capacity) &&
+        image_plane_fits(image, 1, planar ? chroma_bytes : row_bytes,
+                         (unsigned int)s->height / 2, ib->capacity) &&
+        (!planar ||
+         image_plane_fits(image, 2, chroma_bytes,
+                          (unsigned int)s->height / 2, ib->capacity));
+    if (image->fourcc != s->fourcc || (planar && i10) ||
+        source_pitch < row_bytes ||
         !rk_nv12_layout_size(source_pitch, (size_t)vs, &source_size) ||
-        !rk_nv12_layout_size(image->pitch, image->height,
-                             &destination_size) ||
-        source_size > source_buffer_size || destination_size > ib->capacity) {
+        source_size > source_buffer_size || !destination_layout_valid) {
         pthread_mutex_unlock(&s->lock);
         rk_object_unref(&image->base);
         rk_object_unref(&s->base);
@@ -361,16 +401,33 @@ VAStatus rk_GetImage(VADriverContextP ctx, VASurfaceID surface_id,
         return VA_STATUS_ERROR_OPERATION_FAILED;
     }
     uint8_t       *dp = (uint8_t *)ib->data;
-    /* Y plane */
+    memset(dp, 0, ib->capacity);
     for (int r = 0; r < s->height; r++)
-        memcpy(dp + (size_t)r * image->pitch,
-               sp + (size_t)r * source_pitch, copy_bytes);
-    /* UV plane: src at source_pitch*vs, dst at pitch*image height. */
+        memcpy(dp + image->offsets[0] +
+                   (size_t)r * image->pitches[0],
+               sp + (size_t)r * source_pitch,
+               planar ? (size_t)(unsigned int)s->width : row_bytes);
     const uint8_t *su = sp + source_pitch * (size_t)vs;
-    uint8_t *du = dp + (size_t)image->pitch * image->height;
-    for (int r = 0; r < s->height / 2; r++)
-        memcpy(du + (size_t)r * image->pitch,
-               su + (size_t)r * source_pitch, copy_bytes);
+    if (planar) {
+        unsigned int u_plane = image->fourcc == VA_FOURCC_I420 ? 1 : 2;
+        unsigned int v_plane = image->fourcc == VA_FOURCC_I420 ? 2 : 1;
+        for (int r = 0; r < s->height / 2; r++) {
+            uint8_t *du = dp + image->offsets[u_plane] +
+                          (size_t)r * image->pitches[u_plane];
+            uint8_t *dv = dp + image->offsets[v_plane] +
+                          (size_t)r * image->pitches[v_plane];
+            const uint8_t *row_uv = su + (size_t)r * source_pitch;
+            for (size_t column = 0; column < chroma_bytes; column++) {
+                du[column] = row_uv[2 * column];
+                dv[column] = row_uv[2 * column + 1];
+            }
+        }
+    } else {
+        uint8_t *du = dp + image->offsets[1];
+        for (int r = 0; r < s->height / 2; r++)
+            memcpy(du + (size_t)r * image->pitches[1],
+                   su + (size_t)r * source_pitch, row_bytes);
+    }
     bool sync_ok = dmabuf_cpu_sync(source_fd, DMA_BUF_SYNC_END |
                                               DMA_BUF_SYNC_READ);
     pthread_mutex_unlock(&s->lock);

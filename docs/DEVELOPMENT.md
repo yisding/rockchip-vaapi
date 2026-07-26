@@ -447,18 +447,22 @@ supported misc parameters before applications can destroy those VA buffers;
 HEVC advertises RK3588 MPP's native 64x64 CTU, 8x8 minimum coding-block, and
 4x4-to-32x32 transform contract so applications do not guess 32x32 CTUs.
 
-System-memory upload uses `vaCreateImage` plus `vaPutImage`. The latter now
-performs a checked NV12 copy into the surface DMA-BUF with explicit CPU
-synchronization. `vaEndPicture` submits that buffer to rkvenc2, waits for one
-MPP packet, and publishes it through a `VACodedBufferSegment`. MPP emits
+System-memory upload uses `vaCreateImage` plus `vaPutImage`. The latter performs
+a checked NV12/P010 copy, or interleaves I420/YV12 chroma into native NV12,
+with explicit DMA-BUF CPU synchronization. Per-plane pitches, offsets, and
+capacities are validated before every row access; `vaGetImage` performs the
+inverse planar conversion. Planar formats are advertised only on 8-bit encode
+configs. `vaEndPicture` submits the normalized NV12 buffer to rkvenc2, waits for
+one MPP packet, and publishes it through a `VACodedBufferSegment`. MPP emits
 H.264 SPS/PPS or HEVC VPS/SPS/PPS on each IDR. Coded-buffer overflow fails
 closed.
 
 The current boundary is deliberately narrow: progressive NV12, one complete
 frame-level macroblock/CTU slice, MPP-managed references, and synchronous
-completion. P010, RGA input conversion, packed application headers, B-frames,
-multi-slice, and WebRTC integration are not advertised. This also avoids
-exercising the kernel's historically vulnerable multi-slice FIFO path.
+completion. P010 encode, imported RGB/DMABUF RGA conversion, packed application
+headers, B-frames, multi-slice, and WebRTC integration are not advertised.
+This also avoids exercising the kernel's historically vulnerable multi-slice
+FIFO path.
 
 ---
 
@@ -490,8 +494,9 @@ config package deliberately do not weaken that sandbox.
   VP9 Profile 2 has a separate bit-exact 48-frame gate through the same
   conversion path. Both remain unadvertised until broader conformance and HDR
   gates pass. VP8 and AV1 are also unadvertised.
-- H.264 and HEVC encode are experimental and restricted to full-frame NV12
-  with one slice. They are exposed only through
+- H.264 and HEVC encode are experimental and restricted to full-frame
+  NV12/I420/YV12 uploads normalized to NV12 with one slice. They are exposed
+  only through
   `RK_VAAPI_EXPERIMENTAL_ENCODE`.
 
 ---

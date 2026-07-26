@@ -175,12 +175,20 @@ GStreamer 1.28 `vah264enc` after a fresh plugin scan with
 `GST_VA_ALL_DRIVERS=1`, with the same frame/profile/PSNR checks. The sanitizer
 target loads the complete ASan/UBSan driver for all four app paths.
 
-`check-hevc-encode-experimental` applies the same four-path gate to HEVC Main
+`check-hevc-encode-experimental` applies the same five-path gate to HEVC Main
 with `hevc_vaapi` and `vah265enc`. It additionally rejects decoder/parser
 warnings, verifies the advertised 64x64 CTU contract, and requires parser-clean
 standard HEVC decode. The measured CQP/CBR/VBR PSNR values are 45.19, 44.46,
 and 40.91 dB; GStreamer CQP measures 45.31 dB. Its sanitizer target loads the
-complete ASan/UBSan driver for all four paths.
+complete ASan/UBSan driver for all five paths.
+
+Both encode gates also run a direct FFmpeg I420 upload at CQP and feed
+GStreamer I420 directly into the VA encoder without `videoconvert`. Driver-log
+audits require at least one checked `I420->NV12` upload per encoded frame. The
+planar stream matches the native-NV12 CQP PSNR exactly: 48.495713 dB for H.264
+and 45.191850 dB for HEVC. The object gate separately verifies byte-exact I420
+and YV12 `vaPutImage`/`vaGetImage` round trips, plane layouts, odd-size
+rejection, and conflicting-format rejection.
 
 `check-encode-decode-concurrent` runs 96-frame versions of both encoder gates
 in parallel with the shipping synthetic decode matrix. It requires all three

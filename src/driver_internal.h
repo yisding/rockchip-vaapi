@@ -145,6 +145,7 @@ struct RKSurface {
     MppBuffer priv_buf;
 
     MppFrameFormat fmt;
+    uint32_t fourcc;
     bool decoded;
     bool decode_failed;
     bool h264_field_pending;
@@ -173,7 +174,9 @@ typedef struct {
     uint32_t fourcc;
     unsigned int width;
     unsigned int height;
-    unsigned int pitch;
+    unsigned int num_planes;
+    unsigned int pitches[3];
+    unsigned int offsets[3];
 } RKImage;
 
 struct RKDriver {

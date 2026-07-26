@@ -54,7 +54,7 @@ reference=$WORK/reference.yuv
 run_ffmpeg -nostdin -y -v error \
     -f lavfi -i "testsrc2=size=${WIDTH}x${HEIGHT}:rate=${FPS}" \
     -frames:v "$FRAMES" -pix_fmt yuv420p -f rawvideo "$reference"
-expected_size=$((WIDTH * HEIGHT * 3 / 2 * FRAMES))
+expected_size=$((WIDTH * HEIGHT * 3 * FRAMES / 2))
 if [ "$(wc -c <"$reference")" -ne "$expected_size" ]; then
     echo "FAIL  H.264 encode reference size is invalid" >&2
     exit 1
@@ -63,6 +63,8 @@ fi
 run_mode()
 {
     mode=$1
+    upload_format=$2
+    shift
     shift
     output=$WORK/$mode.h264
     decoded=$WORK/$mode.yuv
@@ -76,7 +78,7 @@ run_mode()
         run_ffmpeg -nostdin -y -v error \
         -vaapi_device "$RENDER_NODE" \
         -f lavfi -i "testsrc2=size=${WIDTH}x${HEIGHT}:rate=${FPS}" \
-        -frames:v "$FRAMES" -vf 'format=nv12,hwupload' \
+        -frames:v "$FRAMES" -vf "format=$upload_format,hwupload" \
         -c:v h264_vaapi -profile:v high "$@" "$output" \
         >"$ffmpeg_log" 2>&1
 
@@ -111,26 +113,30 @@ run_mode()
     fi
 
     packets=$(grep -c 'encoder produced .* bytes' "$driver_log" || true)
+    conversions=$(grep -c 'PutImage: I420->NV12' "$driver_log" || true)
     if [ "$packets" -ne "$FRAMES" ] ||
+       { [ "$upload_format" = yuv420p ] &&
+         [ "$conversions" -lt "$FRAMES" ]; } ||
        grep -q 'encoder .*failed\|rejected' "$driver_log"; then
-        echo "FAIL  H.264 $mode driver audit packets=$packets expected=$FRAMES" >&2
+        echo "FAIL  H.264 $mode driver audit packets=$packets conversions=$conversions expected=$FRAMES" >&2
         exit 1
     fi
     bytes=$(wc -c <"$output")
     echo "ok    H.264 encode $mode $FRAMES frames profile=High PSNR=$average bytes=$bytes"
 }
 
-run_mode cqp -rc_mode CQP -qp 24
-run_mode cbr -rc_mode CBR -b:v 1M -maxrate 1M
-run_mode vbr -rc_mode VBR -b:v 1M -maxrate 2M
+run_mode cqp nv12 -rc_mode CQP -qp 24
+run_mode cbr nv12 -rc_mode CBR -b:v 1M -maxrate 1M
+run_mode vbr nv12 -rc_mode VBR -b:v 1M -maxrate 2M
+run_mode i420 yuv420p -rc_mode CQP -qp 24
 
 gst_output=$WORK/gstreamer.h264
 gst_decoded=$WORK/gstreamer.yuv
 gst_driver_log=$WORK/gstreamer.driver.log
 export GST_VA_ALL_DRIVERS=1
-export GST_REGISTRY=$WORK/gstreamer-registry.bin
+export GST_REGISTRY="$WORK/gstreamer-registry.bin"
 export LIBVA_DRIVER_NAME=rockchip
-export LIBVA_DRIVERS_PATH=$DRIVER_DIR
+export LIBVA_DRIVERS_PATH="$DRIVER_DIR"
 export RK_VAAPI_EXPERIMENTAL_ENCODE=h264
 if ! timeout --kill-after=5s "$FFMPEG_TIMEOUT" gst-inspect-1.0 va |
      grep -q '^  vah264enc:'; then
@@ -142,7 +148,7 @@ RK_VAAPI_LOG=$gst_driver_log \
     filesrc location="$reference" \
     ! rawvideoparse format=i420 width="$WIDTH" height="$HEIGHT" \
         framerate="$FPS/1" \
-    ! videoconvert ! video/x-raw,format=NV12 \
+    ! video/x-raw,format=I420 \
     ! vah264enc rate-control=cqp qpi=24 qpp=24 key-int-max="$FPS" \
     ! filesink location="$gst_output"
 
@@ -169,11 +175,13 @@ run_ffmpeg -nostdin -v info \
 gst_average=$(sed -n 's/.* average:\([^ ]*\).*/\1/p' \
                       "$gst_psnr_log" | tail -1)
 gst_packets=$(grep -c 'encoder produced .* bytes' "$gst_driver_log" || true)
+gst_conversions=$(grep -c 'PutImage: I420->NV12' "$gst_driver_log" || true)
 if [ -z "$gst_average" ] || [ "$gst_packets" -ne "$FRAMES" ] ||
+   [ "$gst_conversions" -lt "$FRAMES" ] ||
    ! awk -v actual="$gst_average" -v minimum="$MIN_PSNR" \
          'BEGIN { exit !(actual + 0 >= minimum + 0) }' ||
    grep -q 'encoder .*failed\|rejected' "$gst_driver_log"; then
-    echo "FAIL  GStreamer H.264 audit packets=$gst_packets PSNR=$gst_average" >&2
+    echo "FAIL  GStreamer H.264 audit packets=$gst_packets conversions=$gst_conversions PSNR=$gst_average" >&2
     exit 1
 fi
 echo "ok    GStreamer vah264enc $FRAMES frames profile=High PSNR=$gst_average"

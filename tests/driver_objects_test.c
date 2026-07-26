@@ -105,18 +105,22 @@ static void test_experimental_h264_encode(struct VADriverVTable *v,
     CHECK_STATUS(v->vaQuerySurfaceAttributes(
                      ctx, config, NULL, &surface_attr_count),
                  VA_STATUS_SUCCESS);
-    if (surface_attr_count != 4) {
+    if (surface_attr_count != 6) {
         fputs("experimental encode surface attribute count is invalid\n",
               stderr);
         exit(1);
     }
-    VASurfaceAttrib surface_attrs[4];
+    VASurfaceAttrib surface_attrs[6];
     CHECK_STATUS(v->vaQuerySurfaceAttributes(
                      ctx, config, surface_attrs, &surface_attr_count),
                  VA_STATUS_SUCCESS);
     if (surface_attrs[0].type != VASurfaceAttribPixelFormat ||
-        surface_attrs[0].value.value.i != VA_FOURCC_NV12) {
-        fputs("H.264 encode must expose only NV12 surfaces\n", stderr);
+        surface_attrs[0].value.value.i != VA_FOURCC_NV12 ||
+        surface_attrs[1].type != VASurfaceAttribPixelFormat ||
+        surface_attrs[1].value.value.i != VA_FOURCC_I420 ||
+        surface_attrs[2].type != VASurfaceAttribPixelFormat ||
+        surface_attrs[2].value.value.i != VA_FOURCC_YV12) {
+        fputs("H.264 encode upload surface formats are invalid\n", stderr);
         exit(1);
     }
     VAProfile profile;
@@ -340,6 +344,24 @@ static void test_buffers(struct VADriverVTable *v, VADriverContextP ctx,
 static void test_images(struct VADriverVTable *v, VADriverContextP ctx,
                         VAImage images[IMAGE_COUNT])
 {
+    VAImageFormat queried[4];
+    int queried_count = 0;
+    CHECK_STATUS(v->vaQueryImageFormats(ctx, queried, &queried_count),
+                 VA_STATUS_SUCCESS);
+    if (queried_count != 4 ||
+        queried[0].fourcc != VA_FOURCC_NV12 ||
+        queried[1].fourcc != VA_FOURCC_P010 ||
+        queried[2].fourcc != VA_FOURCC_I420 ||
+        queried[3].fourcc != VA_FOURCC_YV12) {
+        fputs("image format list changed unexpectedly\n", stderr);
+        exit(1);
+    }
+    VAImageFormat odd_planar = queried[2];
+    VAImage rejected_image;
+    CHECK_STATUS(v->vaCreateImage(ctx, &odd_planar, 15, 16,
+                                 &rejected_image),
+                 VA_STATUS_ERROR_INVALID_PARAMETER);
+
     VAImageFormat format = {0};
     format.fourcc = VA_FOURCC_NV12;
     format.byte_order = VA_LSB_FIRST;
@@ -397,6 +419,93 @@ static void test_surfaces(struct VADriverVTable *v, VADriverContextP ctx,
     }
     CHECK_STATUS(v->vaUnmapBuffer(ctx, images[2].buf), VA_STATUS_SUCCESS);
     CHECK_STATUS(v->vaUnmapBuffer(ctx, images[0].buf), VA_STATUS_SUCCESS);
+
+    const uint32_t planar_formats[] = { VA_FOURCC_I420, VA_FOURCC_YV12 };
+    for (size_t index = 0; index < 2; index++) {
+        VAImageFormat planar_format = {
+            .fourcc = planar_formats[index],
+            .byte_order = VA_LSB_FIRST,
+            .bits_per_pixel = 12,
+        };
+        VAImage planar_source;
+        VAImage planar_result;
+        CHECK_STATUS(v->vaCreateImage(ctx, &planar_format, 16, 16,
+                                     &planar_source), VA_STATUS_SUCCESS);
+        CHECK_STATUS(v->vaCreateImage(ctx, &planar_format, 16, 16,
+                                     &planar_result), VA_STATUS_SUCCESS);
+        if (planar_source.num_planes != 3 ||
+            planar_source.pitches[0] != 16 ||
+            planar_source.pitches[1] != 8 ||
+            planar_source.pitches[2] != 8 ||
+            planar_source.offsets[1] != 256 ||
+            planar_source.offsets[2] != 320 ||
+            planar_source.data_size != 384) {
+            fputs("planar image layout is invalid\n", stderr);
+            exit(1);
+        }
+
+        VASurfaceAttrib pixel_format = {
+            .type = VASurfaceAttribPixelFormat,
+            .flags = VA_SURFACE_ATTRIB_SETTABLE,
+            .value = {
+                .type = VAGenericValueTypeInteger,
+                .value.i = (int)planar_formats[index],
+            },
+        };
+        VASurfaceID planar_surface;
+        CHECK_STATUS(v->vaCreateSurfaces2(
+                         ctx, VA_RT_FORMAT_YUV420, 16, 16,
+                         &planar_surface, 1, &pixel_format, 1),
+                     VA_STATUS_SUCCESS);
+        VASurfaceAttrib conflicting_formats[] = {
+            pixel_format,
+            pixel_format,
+        };
+        conflicting_formats[1].value.value.i =
+            planar_formats[index] == VA_FOURCC_I420
+                ? VA_FOURCC_YV12 : VA_FOURCC_I420;
+        VASurfaceID rejected_surface;
+        CHECK_STATUS(v->vaCreateSurfaces2(
+                         ctx, VA_RT_FORMAT_YUV420, 16, 16,
+                         &rejected_surface, 1, conflicting_formats, 2),
+                     VA_STATUS_ERROR_INVALID_PARAMETER);
+        CHECK_STATUS(v->vaMapBuffer(
+                         ctx, planar_source.buf, (void **)&upload),
+                     VA_STATUS_SUCCESS);
+        for (unsigned int byte = 0; byte < planar_source.data_size; byte++)
+            upload[byte] = (uint8_t)(byte * 17u + index * 31u + 3u);
+        CHECK_STATUS(v->vaUnmapBuffer(ctx, planar_source.buf),
+                     VA_STATUS_SUCCESS);
+        CHECK_STATUS(v->vaPutImage(
+                         ctx, planar_surface, planar_source.image_id,
+                         0, 0, 16, 16, 0, 0, 16, 16),
+                     VA_STATUS_SUCCESS);
+        CHECK_STATUS(v->vaGetImage(
+                         ctx, planar_surface, 0, 0, 16, 16,
+                         planar_result.image_id), VA_STATUS_SUCCESS);
+        CHECK_STATUS(v->vaMapBuffer(
+                         ctx, planar_source.buf, (void **)&upload),
+                     VA_STATUS_SUCCESS);
+        CHECK_STATUS(v->vaMapBuffer(
+                         ctx, planar_result.buf, (void **)&download),
+                     VA_STATUS_SUCCESS);
+        if (memcmp(upload, download, planar_source.data_size) != 0) {
+            fputs("planar PutImage/GetImage round trip changed bytes\n",
+                  stderr);
+            exit(1);
+        }
+        CHECK_STATUS(v->vaUnmapBuffer(ctx, planar_result.buf),
+                     VA_STATUS_SUCCESS);
+        CHECK_STATUS(v->vaUnmapBuffer(ctx, planar_source.buf),
+                     VA_STATUS_SUCCESS);
+        CHECK_STATUS(v->vaDestroySurfaces(ctx, &planar_surface, 1),
+                     VA_STATUS_SUCCESS);
+        CHECK_STATUS(v->vaDestroyImage(ctx, planar_result.image_id),
+                     VA_STATUS_SUCCESS);
+        CHECK_STATUS(v->vaDestroyImage(ctx, planar_source.image_id),
+                     VA_STATUS_SUCCESS);
+    }
+
     VASurfaceStatus status;
     CHECK_STATUS(v->vaQuerySurfaceStatus(ctx, surfaces[SURFACE_COUNT - 1],
                                         &status), VA_STATUS_SUCCESS);
