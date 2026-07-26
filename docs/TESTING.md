@@ -44,11 +44,11 @@ make tests/.tsan-driver/rockchip_drv_video.so
 The manifest at `tests/conformance-vectors.tsv` pins both the downloaded file
 and extracted payload SHA-256. It currently covers three ITU-T H.264 streams
 (Constrained Baseline fallback, Main field-coded VA-API, and High VA-API with
-scaling lists), eight FFmpeg FATE HEVC Main conformance streams, and four
-official WebM/libvpx VP9 VA-API streams. The HEVC cases exercise long-term
-references, PPS syntax, RPS, scaling lists, tiles, VPS IDs, WPP, and weighted
-prediction; they remain `software-fallback` until the Phase 2 hardware gate is
-bit-exact. The
+scaling lists), eight FFmpeg FATE HEVC Main streams, one FATE HEVC Main10
+weighted-prediction stream, and four official WebM/libvpx VP9 VA-API streams.
+The HEVC cases exercise long-term references, PPS syntax, RPS, scaling lists,
+tiles, VPS IDs, WPP, and weighted prediction; they remain
+`software-fallback` by default until the Phase 2 hardware gates close. The
 `decode_path` column makes hardware expectations explicit; `vaapi` cases force
 hardware-frame output so an accidental software fallback cannot turn the gate
 green.
@@ -119,14 +119,16 @@ VA-API path both report `errinfo=1` from frame 1 onward, so the driver maps
 errored/discarded MPP frames to `VA_STATUS_ERROR_DECODING_ERROR` instead of
 returning corrupt output.
 
-`check-hevc-main10-experimental` generates 48 Main10 frames at 320x240, forces
-the hidden `hevc-main10` profile, downloads P010, and requires byte-for-byte
-equality with software decode. It also requires one MPP AFBC-to-RGA conversion
-per frame and rejects linear fallback, buffer mismatch, or decode failure. The
-gate is bit-exact on the tested 2026-07-25 kernel/librga stack. MPP AFBC is
-mandatory here because VDPU383's 448-byte linear NV15 stride is not
-RGA-expressible; the conversion also applies MPP's AFBC crop offset. Main10
-stays hidden until broader conformance and HDR playback checks pass.
+`check-hevc-main10-experimental` generates 48 Main10 frames at 320x240 and also
+runs the checksum-pinned FATE `WP_A_MAIN10_Toshiba_3.bit` weighted-prediction
+vector (416x240, 256 frames). It forces the hidden `hevc-main10` profile,
+downloads P010, and requires byte-for-byte equality with software decode for
+both inputs. It also requires one MPP AFBC-to-RGA conversion per frame and
+rejects linear fallback, buffer mismatch, or decode failure. Both cases are
+bit-exact on the tested 2026-07-25 kernel/librga stack. MPP AFBC is mandatory
+here because VDPU383's linear NV15 stride is not always RGA-expressible; the
+conversion also applies MPP's AFBC crop offset. Main10 stays hidden until
+broader conformance and HDR playback checks pass.
 
 `check-vp9-profile2-experimental` generates a lossless 48-frame VP9 Profile 2
 stream at 320x240, forces the hidden `vp9-profile2` profile, downloads P010,

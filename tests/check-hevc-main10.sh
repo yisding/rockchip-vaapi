@@ -1,5 +1,5 @@
 #!/bin/sh
-# Bit-exact HEVC Main10 -> MPP AFBC -> RGA P010 hardware gate.
+# Generated and pinned HEVC Main10 -> MPP AFBC -> RGA P010 hardware gate.
 
 set -eu
 
@@ -8,6 +8,13 @@ if [ -z "${FFMPEG:-}" ]; then
         FFMPEG=/usr/bin/ffmpeg
     else
         FFMPEG=ffmpeg
+    fi
+fi
+if [ -z "${FFPROBE:-}" ]; then
+    if [ -x /usr/bin/ffprobe ]; then
+        FFPROBE=/usr/bin/ffprobe
+    else
+        FFPROBE=ffprobe
     fi
 fi
 FFMPEG_TIMEOUT=${FFMPEG_TIMEOUT:-120}
@@ -20,6 +27,8 @@ WIDTH=${MAIN10_WIDTH:-320}
 HEIGHT=${MAIN10_HEIGHT:-240}
 FRAMES=${MAIN10_FRAMES:-48}
 FPS=${MAIN10_FPS:-24}
+PINNED_VECTOR=${MAIN10_PINNED_VECTOR:-$SCRIPT_DIR/vectors/WP_A_MAIN10_Toshiba_3.bit}
+PINNED_SHA256=3be359e9c70f56e478bb0c0710dcea112252541570f81856cc9f3dba3d988263
 
 case $FFMPEG_TIMEOUT in
     ''|*[!0-9]*) echo "error: FFMPEG_TIMEOUT must be an integer" >&2; exit 2 ;;
@@ -107,3 +116,70 @@ if [ "$conversions" -ne "$FRAMES" ] ||
 fi
 
 echo "ok    HEVC Main10 ${WIDTH}x${HEIGHT} $FRAMES frames bit-exact (MPP AFBC -> RGA P010)"
+
+if [ ! -f "$PINNED_VECTOR" ]; then
+    echo "FAIL  pinned Main10 vector missing; run 'make fetch-vectors'" >&2
+    exit 1
+fi
+actual_sha=$(sha256sum "$PINNED_VECTOR" | awk '{print $1}')
+if [ "$actual_sha" != "$PINNED_SHA256" ]; then
+    echo "FAIL  pinned Main10 vector checksum mismatch" >&2
+    exit 1
+fi
+
+pinned_software=$WORK/pinned-software.p010
+pinned_hardware=$WORK/pinned-hardware.p010
+pinned_log=$WORK/pinned-driver.log
+run_ffmpeg -nostdin -y -v error -i "$PINNED_VECTOR" -an \
+    -pix_fmt p010le -fps_mode passthrough -f rawvideo "$pinned_software"
+RK_VAAPI_EXPERIMENTAL_PROFILES=hevc-main10 \
+LIBVA_DRIVER_NAME=rockchip \
+LIBVA_DRIVERS_PATH=$DRIVER_DIR \
+RK_VAAPI_LOG=$pinned_log \
+run_ffmpeg -nostdin -y -v error \
+    -hwaccel vaapi -hwaccel_output_format vaapi \
+    -vaapi_device "$RENDER_NODE" -i "$PINNED_VECTOR" -an \
+    -vf 'hwdownload,format=p010le' -pix_fmt p010le \
+    -fps_mode passthrough -f rawvideo "$pinned_hardware"
+
+dimensions=$("$FFPROBE" -v error -select_streams v:0 \
+    -show_entries stream=width,height -of csv=s=x:p=0 "$PINNED_VECTOR")
+case $dimensions in
+    *x*) ;;
+    *) echo "FAIL  could not determine pinned Main10 dimensions" >&2; exit 1 ;;
+esac
+pinned_width=${dimensions%x*}
+pinned_height=${dimensions#*x}
+for value in "$pinned_width" "$pinned_height"; do
+    case $value in
+        ''|*[!0-9]*|0)
+            echo "FAIL  pinned Main10 dimensions are invalid: $dimensions" >&2
+            exit 1
+            ;;
+    esac
+done
+pinned_frame_size=$((pinned_width * pinned_height * 3))
+pinned_software_size=$(wc -c <"$pinned_software")
+pinned_hardware_size=$(wc -c <"$pinned_hardware")
+if [ "$pinned_frame_size" -eq 0 ] ||
+   [ $((pinned_software_size % pinned_frame_size)) -ne 0 ]; then
+    echo "FAIL  pinned Main10 software output has an invalid size" >&2
+    exit 1
+fi
+pinned_frames=$((pinned_software_size / pinned_frame_size))
+if [ "$pinned_frames" -eq 0 ] ||
+   [ "$pinned_hardware_size" -ne "$pinned_software_size" ] ||
+   ! cmp -s "$pinned_software" "$pinned_hardware"; then
+    echo "FAIL  pinned Main10 P010 output differs from software reference" >&2
+    exit 1
+fi
+
+pinned_conversions=$(grep -c 'convert: NV15->P010.*afbc=1' "$pinned_log" || true)
+if [ "$pinned_conversions" -ne "$pinned_frames" ] ||
+   ! grep -q 'CreateContext: 10-bit output mode=AFBC_V2 profile=18' "$pinned_log" ||
+   grep -q 'external buffer mismatch\|decode failed\|afbc=0' "$pinned_log"; then
+    echo "FAIL  pinned Main10 AFBC/RGA audit failed (conversions=$pinned_conversions frames=$pinned_frames)" >&2
+    exit 1
+fi
+
+echo "ok    HEVC Main10 WP_A_MAIN10_Toshiba_3.bit ${pinned_width}x${pinned_height} $pinned_frames frames bit-exact"

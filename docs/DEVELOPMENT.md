@@ -448,7 +448,8 @@ patching Firefox's sandbox policy).
 - HEVC reconstruction is host-validated but unadvertised pending the pinned
   on-device Main conformance gate. Seven of eight pinned vectors are bit-exact;
   MPP-reported errored TILES output is the remaining fail-closed class.
-- HEVC Main10 has a bit-exact 48-frame AFBC NV15-to-P010 development gate.
+- HEVC Main10 has bit-exact generated 48-frame and pinned FATE 256-frame AFBC
+  NV15-to-P010 development gates.
   VP9 Profile 2 has a separate bit-exact 48-frame gate through the same
   conversion path. Both remain unadvertised until broader conformance and HDR
   gates pass. VP8 and AV1 are also unadvertised.

@@ -342,12 +342,18 @@ MPP's `offset_x`/`offset_y` to the source rectangle before writing a
 driver-owned linear P010 buffer. Ignoring the measured four-row AFBC offset
 produced a shifted image at 21.7 dB PSNR; honoring it is byte-exact.
 
-`make check-hevc-main10-experimental` generates a 48-frame Main10 stream,
-compares downloaded P010 bytes against software decode, and audits that all 48
-frames used AFBC conversion. It passes bit-exactly on the 2026-07-25
-kernel/librga stack. The profile remains hidden by default until broader
-Main10 conformance and HDR metadata/playback gates pass; VP9 Profile 2 remains
-unadvertised and is not covered by this result.
+`make check-hevc-main10-experimental` generates a 48-frame Main10 stream and
+runs the pinned FATE `WP_A_MAIN10_Toshiba_3.bit` weighted-prediction vector
+(416x240, 256 frames), compares downloaded P010 bytes against software decode,
+and audits one AFBC conversion per frame. Both pass bit-exactly on the
+2026-07-25 kernel/librga stack. Direct-backend triage rejected three other
+candidate vectors rather than laundering them through the VA gate:
+`DBLK_A_MAIN10_VIXS_2.bit` duplicated/missed direct-MPP frames,
+`WPP_A_ericsson_MAIN10_2.bit` emitted an extra direct-MPP frame, and
+`TSUNEQBD_A_MAIN10_Technicolor_2.bit` uses unequal luma/chroma bit depths that
+FFmpeg rejects and P010 cannot represent. The profile remains hidden by
+default until broader Main10 conformance and HDR metadata/playback gates pass;
+VP9 Profile 2 remains unadvertised and is not covered by this result.
 
 **Progress (2026-07-26, VP9 Profile 2 hardware slice):** The VP9
 uncompressed-header parser and synthetic hidden-reference repeat now support
@@ -476,9 +482,10 @@ concurrent with decode contexts are race-free.
 - **External buffer group parity:** resolved for shipping H.264 and VP9 on the
   pinned MPP/ROCK 5B stack. HEVC must repeat the parity gate when its decode
   path lands; the internal-group ref-holding fallback remains zero-copy.
-- **10-bit exactness:** resolved for the narrow HEVC Main10 AFBC path. RGA
-  performs a pure NV15-to-P010 repack and the 48-frame gate is byte-exact.
-  Broader Main10/HDR vectors and VP9 Profile 2 still need their own gates.
+- **10-bit exactness:** resolved for the generated HEVC Main10 and VP9 Profile
+  2 AFBC paths plus the pinned 256-frame Main10 weighted-prediction vector.
+  RGA performs a pure NV15-to-P010 repack and all three gates are byte-exact.
+  Broader conformance and HDR playback remain open.
 - **Encode conformance:** encoders aren't spec-exact; the gate must be
   round-trip PSNR + interop, and depends on the kernel RKVENC2 hardening.
 - **Sandbox upstreamability:** the Firefox RDD policy patch is small but must be
@@ -499,9 +506,10 @@ concurrent with decode contexts are race-free.
   decoders, sanitizer gates, and the multi-hour 4K resource soak are green.
 - Phase 2: in progress; the first host reconstruction/routing slice is green,
   the fail-fast experimental HEVC Main hardware gate is 7/8 bit-exact, and the
-  separate 48-frame Main10 and VP9 Profile 2 AFBC-to-P010 gates are bit-exact.
-  HEVC Main remains hidden on the direct-MPP TILES failure; both 10-bit
-  profiles remain hidden while broader conformance and HDR validation are open.
+  generated 48-frame Main10/Profile 2 and pinned 256-frame Main10
+  AFBC-to-P010 gates are bit-exact. HEVC Main remains hidden on the direct-MPP
+  TILES failure; both 10-bit profiles remain hidden while broader conformance
+  and HDR validation are open.
 - Phases 3–5: planned.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement
