@@ -27,10 +27,45 @@ static bool read_bits(BitReader *reader, unsigned count, uint32_t *value)
     return true;
 }
 
-bool rk_vp9_parse_profile0_frame(const uint8_t *data, size_t size,
-                                 RKVP9FrameInfo *info)
+static bool read_profile(BitReader *reader, uint8_t *profile)
 {
-    if (!data || !size || !info || size > SIZE_MAX / 8)
+    uint32_t low_bit;
+    uint32_t high_bit;
+    if (!read_bits(reader, 1, &low_bit) ||
+        !read_bits(reader, 1, &high_bit))
+        return false;
+
+    uint32_t parsed = low_bit | (high_bit << 1);
+    if (parsed == 3) {
+        uint32_t reserved_zero;
+        if (!read_bits(reader, 1, &reserved_zero) || reserved_zero)
+            return false;
+    }
+    *profile = (uint8_t)parsed;
+    return true;
+}
+
+static bool skip_color_config(BitReader *reader, uint8_t profile)
+{
+    uint32_t value;
+    if (profile >= 2) {
+        if (!read_bits(reader, 1, &value) || value != 0)
+            return false;
+    }
+    if (!read_bits(reader, 3, &value))
+        return false;
+
+    /* Profiles 0 and 2 are 4:2:0. RGB requires the 4:4:4 profiles. */
+    if (value == 7)
+        return false;
+    return read_bits(reader, 1, &value);
+}
+
+bool rk_vp9_parse_frame(const uint8_t *data, size_t size, uint8_t profile,
+                        RKVP9FrameInfo *info)
+{
+    if (!data || !size || !info || (profile != 0 && profile != 2) ||
+        size > SIZE_MAX / 8)
         return false;
 
     BitReader reader = {
@@ -41,8 +76,10 @@ bool rk_vp9_parse_profile0_frame(const uint8_t *data, size_t size,
     uint32_t value;
     memset(info, 0, sizeof(*info));
 
+    uint8_t parsed_profile;
     if (!read_bits(&reader, 2, &value) || value != 2 ||
-        !read_bits(&reader, 2, &value) || value != 0 ||
+        !read_profile(&reader, &parsed_profile) ||
+        parsed_profile != profile ||
         !read_bits(&reader, 1, &value))
         return false;
 
@@ -67,6 +104,8 @@ bool rk_vp9_parse_profile0_frame(const uint8_t *data, size_t size,
         /* Key frames refresh all eight reference slots. */
         if (!read_bits(&reader, 24, &value) || value != 0x498342)
             return false;
+        if (profile > 0 && !skip_color_config(&reader, profile))
+            return false;
         info->refresh_frame_flags = 0xff;
         return true;
     }
@@ -80,7 +119,8 @@ bool rk_vp9_parse_profile0_frame(const uint8_t *data, size_t size,
     if (intra_only) {
         if (!read_bits(&reader, 24, &value) || value != 0x498342)
             return false;
-        /* Profile 0 infers its color configuration for intra-only frames. */
+        if (profile > 0 && !skip_color_config(&reader, profile))
+            return false;
     }
 
     if (!read_bits(&reader, 8, &value))
@@ -89,12 +129,12 @@ bool rk_vp9_parse_profile0_frame(const uint8_t *data, size_t size,
     return true;
 }
 
-bool rk_vp9_make_profile0_show_existing(uint8_t slot, uint8_t *packet)
+bool rk_vp9_make_show_existing(uint8_t profile, uint8_t slot, uint8_t *packet)
 {
-    if (!packet || slot >= 8)
+    if (!packet || (profile != 0 && profile != 2) || slot >= 8)
         return false;
 
-    /* frame_marker=2, profile=0, show_existing_frame=1, then the slot. */
-    *packet = (uint8_t)(0x88u | slot);
+    /* frame_marker=2, profile bits low-first, show_existing_frame=1, slot. */
+    *packet = (uint8_t)(0x88u | (profile == 2 ? 0x10u : 0u) | slot);
     return true;
 }

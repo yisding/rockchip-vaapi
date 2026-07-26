@@ -132,16 +132,19 @@ VAStatus rk_CreateContext(VADriverContextP ctx,
     }
     LOG("CreateContext: mpp_init OK");
 
-    if (profile == VAProfileHEVCMain10) {
-        MppFrameFormat output_format = MPP_FRAME_FBC_AFBC_V2;
+    bool output_10bit = profile == VAProfileHEVCMain10 ||
+                        profile == VAProfileVP9Profile2;
+    if (output_10bit) {
+        RK_U32 output_format = MPP_FRAME_FBC_AFBC_V2;
         if (!rk_rga_available() ||
             c->mpi->control(c->mpp, MPP_DEC_SET_OUTPUT_FORMAT,
                             &output_format) != MPP_OK) {
-            LOG("CreateContext: Main10 AFBC output configuration failed");
+            LOG("CreateContext: 10-bit AFBC output configuration failed "
+                "profile=%d", profile);
             rk_object_unref(&c->base);
             return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
         }
-        LOG("CreateContext: Main10 output mode=AFBC_V2");
+        LOG("CreateContext: 10-bit output mode=AFBC_V2 profile=%d", profile);
     }
 
     /* Must be set after mpp_init: split_parse=0 means we send complete

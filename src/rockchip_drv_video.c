@@ -70,7 +70,10 @@ static VAStatus rk_Terminate(VADriverContextP ctx) {
  *   - HEVC Main10: MPP AFBC-to-P010 conversion is bit-exact on the narrow
  *     hevc-main10 gate, but it remains hidden until the broader conformance
  *     and HDR gates pass.
- *   - H.264 High10 / VP9 Profile 2: not yet wired to an experimental gate.
+ *   - VP9 Profile 2: a narrow vp9-profile2 AFBC-to-P010 gate is available,
+ *     but the profile remains hidden pending broader conformance and HDR
+ *     validation.
+ *   - H.264 High10: not yet wired to an experimental gate.
  *   - VP8: verified segfault in the generic path.
  *   - AV1: MPP needs a full OBU bytestream but VA-API hands us only
  *     headerless tile data, so MPP can never parse it. Firefox falls back
@@ -95,6 +98,8 @@ static bool profile_supported(VAProfile p) {
         return experimental_profile_enabled("hevc-main");
     case VAProfileHEVCMain10:
         return experimental_profile_enabled("hevc-main10");
+    case VAProfileVP9Profile2:
+        return experimental_profile_enabled("vp9-profile2");
     default:
         return false;
     }
@@ -111,6 +116,8 @@ static VAStatus rk_QueryConfigProfiles(VADriverContextP ctx,
         list[i++] = VAProfileHEVCMain;
     if (profile_supported(VAProfileHEVCMain10))
         list[i++] = VAProfileHEVCMain10;
+    if (profile_supported(VAProfileVP9Profile2))
+        list[i++] = VAProfileVP9Profile2;
     *n = i;
     return VA_STATUS_SUCCESS;
 }
@@ -135,7 +142,8 @@ static VAStatus rk_GetConfigAttributes(VADriverContextP ctx,
         LOG("GetConfigAttributes: type=%d", list[i].type);
         switch (list[i].type) {
         case VAConfigAttribRTFormat:
-            list[i].value = profile == VAProfileHEVCMain10
+            list[i].value = profile == VAProfileHEVCMain10 ||
+                            profile == VAProfileVP9Profile2
                           ? VA_RT_FORMAT_YUV420_10
                           : VA_RT_FORMAT_YUV420;
             break;

@@ -98,6 +98,7 @@ FFMPEG=/usr/bin/ffmpeg make check-concurrent-decode-tsan
 FFMPEG=/usr/bin/ffmpeg make check-soak
 FFMPEG=/usr/bin/ffmpeg make check-hevc-experimental
 FFMPEG=/usr/bin/ffmpeg make check-hevc-main10-experimental
+FFMPEG=/usr/bin/ffmpeg make check-vp9-profile2-experimental
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-conformance
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-sanitize
 ```
@@ -125,8 +126,16 @@ per frame and rejects linear fallback, buffer mismatch, or decode failure. The
 gate is bit-exact on the tested 2026-07-25 kernel/librga stack. MPP AFBC is
 mandatory here because VDPU383's 448-byte linear NV15 stride is not
 RGA-expressible; the conversion also applies MPP's AFBC crop offset. Main10
-stays hidden until broader conformance and HDR playback checks pass, and this
-result does not cover VP9 Profile 2.
+stays hidden until broader conformance and HDR playback checks pass.
+
+`check-vp9-profile2-experimental` generates a lossless 48-frame VP9 Profile 2
+stream at 320x240, forces the hidden `vp9-profile2` profile, downloads P010,
+and requires byte-for-byte equality with software decode. Like Main10, it
+requires one AFBC NV15-to-P010 conversion per frame and rejects linear
+fallback, buffer mismatch, or decode failure. This independently validates
+the VP9 uncompressed-header parser and profile-matched hidden-reference repeat
+packet in addition to the shared 10-bit conversion/export path. The profile
+remains hidden pending pinned Profile 2 conformance and HDR playback gates.
 
 The object-lifecycle gate crosses every former fixed-array ceiling, validates
 all five typed handle namespaces and stale-handle rejection, and creates nine

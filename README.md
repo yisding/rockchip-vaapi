@@ -61,9 +61,10 @@ decoder gates, and two-hour 4K resource soak are also complete; see
   remains hidden until every pinned HEVC case is either supported bit-exactly
   or has a documented fallback contract. HEVC Main10 has a separate opt-in
   gate whose 48-frame MPP AFBC-to-RGA P010 path is bit-exact, but it remains
-  hidden pending broader conformance and HDR validation. VP8 and the other
-  10-bit profiles are also not advertised, so applications fall back instead
-  of receiving an unsafe format or decode path.
+  hidden pending broader conformance and HDR validation. VP9 Profile 2 has its
+  own opt-in 48-frame P010-exact AFBC/RGA gate and remains hidden for the same
+  reason. VP8 and the other unvalidated profiles are also not advertised, so
+  applications fall back instead of receiving an unsafe format or decode path.
 - Packaging/build hygiene: `DESTDIR`/`PREFIX`/multiarch-aware Makefile,
   no `sudo` in `make install`, `make check` validation gate.
 
@@ -99,11 +100,12 @@ Key features:
 | H.264 | Main, High | full normal + ASan/UBSan gates bit-exact | scaling-list reconstruction included |
 | H.264 | Constrained Baseline | not offered | pinned SVA vector is corrupt in MPP; software fallback |
 | VP9 | Profile 0 | full normal + ASan/UBSan gates bit-exact | hidden-reference vector included on audited kernel |
+| VP9 | Profile 2 (under development) | not offered | opt-in 48-frame gate is P010 bit-exact through MPP AFBC + RGA; conformance/HDR matrix pending |
 | HEVC | Main (under development) | not offered | gated hardware path has 7/8 pinned Main vectors bit-exact; MPP rejects the remaining TILES vector |
 | HEVC | Main10 (under development) | not offered | opt-in 48-frame gate is P010 bit-exact through MPP AFBC + RGA; conformance/HDR matrix pending |
 | VP8 | — | not offered | crashes in the generic path; needs debugging |
 | AV1 | — | not offered | VA-API hands headerless tile data; MPP needs full OBUs |
-| H.264 High10 / VP9 Profile 2 | — | not offered | profile-specific reconstruction and validation pending |
+| H.264 | High10 | not offered | profile-specific reconstruction and validation pending |
 
 Applications fall back to their software decoders for the codecs that are
 not offered.

@@ -910,8 +910,9 @@ static VAStatus build_generic_job(RKContext *c, RKDriver *d,
     }
     RKVP9FrameInfo vp9_info = {0};
     bool is_vp9 = c->coding == MPP_VIDEO_CodingVP9;
+    uint8_t vp9_profile = c->profile == VAProfileVP9Profile2 ? 2 : 0;
     if (pkt_sz && is_vp9 &&
-        !rk_vp9_parse_profile0_frame(pkt_data, pkt_sz, &vp9_info)) {
+        !rk_vp9_parse_frame(pkt_data, pkt_sz, vp9_profile, &vp9_info)) {
         LOG("build_generic_job: malformed or unsupported VP9 header");
         free(pkt_data);
         return VA_STATUS_ERROR_DECODING_ERROR;
@@ -1035,9 +1036,10 @@ static void worker_submit_job(RKContext *c, RKDecodeJob *job)
 
         uint8_t repeat_data;
         RKFrameRoute *route = frame_route_create(job);
+        uint8_t profile = c->profile == VAProfileVP9Profile2 ? 2 : 0;
         if (!route ||
-            !rk_vp9_make_profile0_show_existing(job->repeat_slot,
-                                                 &repeat_data)) {
+            !rk_vp9_make_show_existing(profile, job->repeat_slot,
+                                       &repeat_data)) {
             frame_route_destroy(route);
             complete_surface_ref(job->surface, job->fence, false);
             return;

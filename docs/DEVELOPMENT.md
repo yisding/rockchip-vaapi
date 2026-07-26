@@ -268,7 +268,7 @@ frame even though routing and buffer indices were correct.
 MPP reports 10-bit 4:2:0 output as compact NV15
 (`MPP_FMT_YUV420SP_10BIT`). Apps expect P010, so `assign_mpp_frame` converts
 NV15 from the external decode pool into a driver-owned P010 buffer via
-`rk_convert_nv15_to_p010`. HEVC Main10 contexts request
+`rk_convert_nv15_to_p010`. HEVC Main10 and VP9 Profile 2 contexts request
 `MPP_FRAME_FBC_AFBC_V2`: VDPU383's normal linear 10-bit byte stride is not
 always a whole, 64-aligned number of compact pixels and cannot be passed to
 librga honestly. AFBC input uses `mpp_frame_get_fbc_hdr_stride()` as its pixel
@@ -409,7 +409,8 @@ display output.
 This path is intentionally not advertised yet. Adding a profile requires
 changing `profile_supported`, its surface attributes, and the conformance
 manifest together only after the on-device bit-exact gate passes. VP9 Profile
-0 remains the other shipping path; VP9 Profile 2 and AV1 remain future work.
+0 remains the other shipping path. Profile 2 has an experimental AFBC/P010
+gate; AV1 remains future work.
 
 For Phase 2 debugging, `RK_VAAPI_EXPERIMENTAL_PROFILES=hevc-main` temporarily
 enables `VAProfileHEVCMain` so `make check-hevc-experimental` can force the
@@ -448,9 +449,9 @@ patching Firefox's sandbox policy).
   on-device Main conformance gate. Seven of eight pinned vectors are bit-exact;
   MPP-reported errored TILES output is the remaining fail-closed class.
 - HEVC Main10 has a bit-exact 48-frame AFBC NV15-to-P010 development gate.
-  It remains unadvertised until broader conformance and HDR gates pass. VP9
-  Profile 2 has not inherited that result and remains unwired. VP8 and AV1
-  are also unadvertised.
+  VP9 Profile 2 has a separate bit-exact 48-frame gate through the same
+  conversion path. Both remain unadvertised until broader conformance and HDR
+  gates pass. VP8 and AV1 are also unadvertised.
 
 ---
 

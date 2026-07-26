@@ -349,6 +349,16 @@ kernel/librga stack. The profile remains hidden by default until broader
 Main10 conformance and HDR metadata/playback gates pass; VP9 Profile 2 remains
 unadvertised and is not covered by this result.
 
+**Progress (2026-07-26, VP9 Profile 2 hardware slice):** The VP9
+uncompressed-header parser and synthetic hidden-reference repeat now support
+Profiles 0 and 2 with exact profile matching. Profile 2 context creation is
+available only under `RK_VAAPI_EXPERIMENTAL_PROFILES=vp9-profile2`, reports
+`VA_RT_FORMAT_YUV420_10`, and requires the same MPP AFBC-to-RGA P010 path as
+HEVC Main10. A generated lossless 48-frame 320x240 gate is byte-identical to
+software and audits 48 AFBC conversions. A direct RKMPP AFBC plus RGA
+discriminator is also byte-identical; direct linear NV15 misread as P010 is
+not. Profile 2 remains hidden pending pinned conformance and HDR playback.
+
 **Progress (2026-07-26, HEVC hardware gate):** Added a gated HEVC Main
 validation path without advertising HEVC by default:
 `RK_VAAPI_EXPERIMENTAL_PROFILES=hevc-main` enables `VAProfileHEVCMain`, and
@@ -489,9 +499,9 @@ concurrent with decode contexts are race-free.
   decoders, sanitizer gates, and the multi-hour 4K resource soak are green.
 - Phase 2: in progress; the first host reconstruction/routing slice is green,
   the fail-fast experimental HEVC Main hardware gate is 7/8 bit-exact, and the
-  separate 48-frame Main10 AFBC-to-P010 gate is bit-exact. HEVC Main remains
-  hidden on the direct-MPP TILES failure; Main10 remains hidden while broader
-  conformance and HDR validation are open.
+  separate 48-frame Main10 and VP9 Profile 2 AFBC-to-P010 gates are bit-exact.
+  HEVC Main remains hidden on the direct-MPP TILES failure; both 10-bit
+  profiles remain hidden while broader conformance and HDR validation are open.
 - Phases 3–5: planned.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement

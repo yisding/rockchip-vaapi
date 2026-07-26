@@ -114,6 +114,9 @@ check-hevc-experimental: $(TARGET) test
 check-hevc-main10-experimental: $(TARGET) test
 	tests/check-hevc-main10.sh
 
+check-vp9-profile2-experimental: $(TARGET) test
+	tests/check-vp9-profile2.sh
+
 check-synthetic: $(TARGET) test
 	TEST_SET=synthetic tests/validate.sh
 
@@ -315,6 +318,7 @@ clean:
 
 .PHONY: all install fetch-vectors check check-conformance check-synthetic \
 	check-hevc-experimental check-hevc-experimental-sanitize \
+	check-hevc-main10-experimental check-vp9-profile2-experimental \
 	check-safe check-zero-copy check-zero-copy-sanitize \
 	check-concurrent-decode check-concurrent-decode-sanitize \
 	check-concurrent-decode-tsan check-soak test test-valgrind test-sanitize sanitize \
