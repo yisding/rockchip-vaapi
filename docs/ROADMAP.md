@@ -330,6 +330,38 @@ post-slice Phase 0 hardware regression is green normally and under ASan/UBSan,
 but that proves only the already-shipping profiles and HEVC fallback contract;
 HEVC Main hardware output remains pending rather than inferred from it.
 
+**Progress (2026-07-26, 10-bit plumbing):** The driver now has a fail-closed
+RGA-backed NV15->P010 path for MPP's compact 10-bit output. The decode worker
+accepts linear NV15 only from the external decode pool, converts it into a
+driver-owned P010 backing buffer with librga im2d, stores P010 pixel stride for
+export/readback, and releases the source `MppFrame` back to MPP. Surface export
+and `vaGetImage` prefer the converted backing buffer, so consumers see P010
+instead of compact NV15. Host gates passed for this slice: `make`, `make test`,
+`make sanitize`, `make test-tsan`, and the TSan driver artifact build. The
+standalone P010/librga issue is fixed on the tested kernel/librga stack and is
+not the current HEVC Main blocker, but Main10 and VP9 Profile 2 remain
+unadvertised until the full on-device 10-bit conformance/HDR gate passes.
+
+**Progress (2026-07-26, HEVC hardware gate):** Added a gated HEVC Main
+validation path without advertising HEVC by default:
+`RK_VAAPI_EXPERIMENTAL_PROFILES=hevc-main` enables `VAProfileHEVCMain`, and
+`make check-hevc-experimental` runs only the pinned HEVC conformance vectors
+with fail-fast FFmpeg timeouts. The gate is intentionally still non-green:
+`LTRPSPS_A_Qualcomm_1.bit` now rejects immediately with
+`unsupported HEVC SPS long-term refs count=8` because VA-API exposes only
+`num_long_term_ref_pic_sps`, not the `lt_ref_pic_poc_lsb_sps[]` or
+`used_by_curr_pic_lt_sps_flag[]` table needed to reconstruct the stream.
+`SLIST_A_Sony_4.bit` rejects with
+`unsupported HEVC scaling-list stream with SPS RPS tables count=11` until that
+SPS-RPS/scaling-list class can be reconstructed without timeouts or corruption.
+Forced hardware runs for `PPS_A_qualcomm_7.bit` and `RPS_A_docomo_4.bit`
+complete but are not bit-exact yet: 14/81 and 7/44 frames differ respectively.
+A diagnostic PPS_A access-unit reconstruction software-decoded bit-exact after
+the uniform tile syntax fix, so the remaining mismatch is in the MPP submission
+cadence/parameter interaction rather than the P010/RGA path. The safe advertised
+hardware subset (`check-safe`) still passes with HEVC software fallback and the
+risky VP9 vector blocked. HEVC Main stays hidden.
+
 **Gate:** HEVC Main bit-exact vs software on conformance vectors; HEVC Main10 /
 VP9 P2 validated (PSNR-bounded, since RGA P010 conversion is not
 transform-exact — or NV15-space bit-exact if direct export lands); HDR HEVC
@@ -434,7 +466,9 @@ concurrent with decode contexts are race-free.
   zero-copy, worker/fence synchronization, module separation, two active
   decoders, sanitizer gates, and the multi-hour 4K resource soak are green.
 - Phase 2: in progress; the first host reconstruction/routing slice is green,
-  while HEVC Main hardware conformance and all 10-bit/HDR work remain open.
+  the NV15->P010 plumbing builds cleanly, and a fail-fast experimental HEVC
+  hardware gate exists. HEVC Main still fails that gate, while 10-bit profile
+  advertisement and HDR validation remain open.
 - Phases 3–5: planned.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement

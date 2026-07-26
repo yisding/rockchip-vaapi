@@ -7,6 +7,8 @@
 set -u
 
 FFMPEG=${FFMPEG:-ffmpeg}
+FFMPEG_TIMEOUT=${FFMPEG_TIMEOUT:-300}
+FAIL_FAST=${FAIL_FAST:-0}
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)
 DRIVER_DIR=${DRIVER_DIR:-$REPO_ROOT}
@@ -15,6 +17,7 @@ VECTOR_DIR=${VECTOR_DIR:-$SCRIPT_DIR/vectors}
 MANIFEST=${MANIFEST:-$SCRIPT_DIR/conformance-vectors.tsv}
 TEST_SET=${TEST_SET:-all}
 RISKY_VECTORS=${RISKY_VECTORS:-skip}
+EXPERIMENTAL_HEVC=${EXPERIMENTAL_HEVC:-0}
 RISKY_KERNEL_RELEASE=${RISKY_KERNEL_RELEASE:-6.18.38-current-rockchip64}
 RISKY_KERNEL_NOTES_SHA256=${RISKY_KERNEL_NOTES_SHA256:-db292410e58bd9c658a0b32b6fc7c7895f3ac4a349ae3c292c441e92e340690e}
 ALLOW_QUARANTINE=${ALLOW_QUARANTINE:-0}
@@ -22,13 +25,29 @@ VP9_RUNS=${VP9_RUNS:-5}
 KEEP_WORK=${KEEP_WORK:-0}
 
 case $TEST_SET in
-    all|conformance|synthetic) ;;
-    *) echo "error: TEST_SET must be all, conformance, or synthetic" >&2; exit 2 ;;
+    all|conformance|synthetic|hevc) ;;
+    *) echo "error: TEST_SET must be all, conformance, synthetic, or hevc" >&2; exit 2 ;;
 esac
 case $RISKY_VECTORS in
     skip|run) ;;
     *) echo "error: RISKY_VECTORS must be skip or run" >&2; exit 2 ;;
 esac
+case $EXPERIMENTAL_HEVC in
+    0|1) ;;
+    *) echo "error: EXPERIMENTAL_HEVC must be 0 or 1" >&2; exit 2 ;;
+esac
+case $FAIL_FAST in
+    0|1) ;;
+    *) echo "error: FAIL_FAST must be 0 or 1" >&2; exit 2 ;;
+esac
+case $FFMPEG_TIMEOUT in
+    ''|*[!0-9]*) echo "error: FFMPEG_TIMEOUT must be a non-negative integer" >&2; exit 2 ;;
+esac
+
+if [ "$EXPERIMENTAL_HEVC" = 1 ]; then
+    RK_VAAPI_EXPERIMENTAL_PROFILES=${RK_VAAPI_EXPERIMENTAL_PROFILES:-hevc-main}
+    export RK_VAAPI_EXPERIMENTAL_PROFILES
+fi
 
 # A typo or stale CI checkbox must not turn a conformance run into a kernel
 # panic. Kernel-crash vectors are enabled only on the exact release and GNU
@@ -57,6 +76,11 @@ fi
 export LIBVA_DRIVER_NAME=rockchip
 export LIBVA_DRIVERS_PATH="$DRIVER_DIR"
 
+if [ "$FFMPEG_TIMEOUT" != 0 ] && ! command -v timeout >/dev/null 2>&1; then
+    echo "error: timeout is required when FFMPEG_TIMEOUT is non-zero" >&2
+    exit 2
+fi
+
 WORK=$(mktemp -d "$REPO_ROOT/.test-work.validate.XXXXXX") || exit 1
 # shellcheck disable=SC2317,SC2329 # Invoked by the EXIT trap.
 cleanup()
@@ -79,22 +103,31 @@ checksum()
     sha256sum "$1" | awk '{print $1}'
 }
 
+run_ffmpeg()
+{
+    if [ "$FFMPEG_TIMEOUT" = 0 ]; then
+        "$FFMPEG" "$@"
+    else
+        timeout --kill-after=5s "$FFMPEG_TIMEOUT" "$FFMPEG" "$@"
+    fi
+}
+
 sw_md5()
 {
-    "$FFMPEG" -nostdin -y -v error -i "$1" -an -vf format=yuv420p \
+    run_ffmpeg -nostdin -y -v error -i "$1" -an -vf format=yuv420p \
         -f framemd5 "$2" >"$2.log" 2>&1
 }
 
 hw_md5()
 {
     if [ "$3" = vaapi ]; then
-        "$FFMPEG" -nostdin -y -v error -hwaccel vaapi \
+        run_ffmpeg -nostdin -y -v error -hwaccel vaapi \
             -hwaccel_output_format vaapi -vaapi_device "$RENDER_NODE" \
             -i "$1" -an \
             -vf 'hwdownload,format=nv12,format=yuv420p' \
             -f framemd5 "$2" >"$2.log" 2>&1
     else
-        "$FFMPEG" -nostdin -y -v error -hwaccel vaapi \
+        run_ffmpeg -nostdin -y -v error -hwaccel vaapi \
             -vaapi_device "$RENDER_NODE" -i "$1" -an \
             -vf format=yuv420p -f framemd5 "$2" \
             >"$2.log" 2>&1
@@ -138,6 +171,11 @@ compare_clip()
     fi
 }
 
+fail_fast_requested()
+{
+    [ "$FAIL_FAST" = 1 ] && [ "$FAIL" -ne 0 ]
+}
+
 run_conformance()
 {
     echo "== Pinned conformance vectors =="
@@ -146,6 +184,9 @@ run_conformance()
         case $codec in
             ''|'#'*) continue ;;
         esac
+        if [ "$TEST_SET" = hevc ] && [ "$codec" != hevc ]; then
+            continue
+        fi
         : "$download" "$url" "$download_sha" "$member"
         input=$VECTOR_DIR/$output
         if [ ! -f "$input" ]; then
@@ -168,7 +209,14 @@ run_conformance()
             vaapi|software-fallback) ;;
             *) echo "FAIL  $codec/$output (invalid decode path $decode_path)"; FAIL=1; continue ;;
         esac
+        if [ "$EXPERIMENTAL_HEVC" = 1 ] && [ "$codec" = hevc ] &&
+           [ "$decode_path" = software-fallback ]; then
+            decode_path=vaapi
+        fi
         compare_clip "$codec/$output" "$input" "$decode_path"
+        if fail_fast_requested; then
+            return
+        fi
     done 3<"$MANIFEST"
 }
 
@@ -176,7 +224,7 @@ generate()
 {
     output=$1
     shift
-    "$FFMPEG" -nostdin -y -v error -f lavfi \
+    run_ffmpeg -nostdin -y -v error -f lavfi \
         -i testsrc2=size=1280x720:rate=30:duration=4 \
         "$@" -pix_fmt yuv420p "$WORK/$output" >"$WORK/$output.log" 2>&1
 }
@@ -196,7 +244,7 @@ run_synthetic()
     done
 
     echo "== Supplemental 4K H.264 =="
-    if "$FFMPEG" -nostdin -y -v error -f lavfi \
+    if run_ffmpeg -nostdin -y -v error -f lavfi \
         -i testsrc2=size=3840x2160:rate=30:duration=4 \
         -c:v libx264 -x264-params ref=3:bframes=2 -pix_fmt yuv420p \
         "$WORK/h264_4k.mp4" >"$WORK/h264_4k.mp4.log" 2>&1; then
@@ -220,7 +268,7 @@ run_synthetic()
 
     echo "== Unadvertised-codec software fallback =="
     if generate vp8.webm -c:v libvpx -b:v 1M && \
-       "$FFMPEG" -nostdin -y -v error -hwaccel vaapi -vaapi_device "$RENDER_NODE" \
+       run_ffmpeg -nostdin -y -v error -hwaccel vaapi -vaapi_device "$RENDER_NODE" \
            -i "$WORK/vp8.webm" -an -f null - >"$WORK/vp8-fallback.log" 2>&1; then
         echo "ok    vp8 software fallback decodes"
     else
@@ -232,6 +280,7 @@ run_synthetic()
 case $TEST_SET in
     all)         run_conformance; run_synthetic ;;
     conformance) run_conformance ;;
+    hevc)        run_conformance ;;
     synthetic)   run_synthetic ;;
 esac
 

@@ -25,6 +25,15 @@ bool rk_nv12_layout_size(size_t byte_stride, size_t vertical_stride,
     return true;
 }
 
+bool rk_p010_layout_size(size_t pixel_stride, size_t vertical_stride,
+                         size_t *size_out)
+{
+    if (!size_out || !pixel_stride || pixel_stride > SIZE_MAX / 2)
+        return false;
+
+    return rk_nv12_layout_size(pixel_stride * 2, vertical_stride, size_out);
+}
+
 bool rk_surface_buffer_size(unsigned width, unsigned height, size_t *size_out)
 {
     size_t aligned_width;

@@ -36,6 +36,8 @@ rockchip-vaapi/
 │   ├── buffer.h
 │   ├── context.c              # Context lifecycle and MPP decode workers
 │   ├── context.h
+│   ├── convert.c              # RGA-backed NV15-to-P010 conversion
+│   ├── convert.h
 │   ├── export.c               # DRM PRIME 2 descriptor construction
 │   ├── export.h
 │   ├── log.c                  # Thread-safe driver logging
@@ -46,6 +48,8 @@ rockchip-vaapi/
 │   ├── surface.h
 │   ├── h264.c                 # H.264 SPS/PPS Annex B reconstruction
 │   ├── h264.h
+│   ├── hevc.c                 # HEVC VPS/SPS/PPS Annex B reconstruction
+│   ├── hevc.h
 │   ├── frame_layout.c         # Checked NV12 sizing and frame copies
 │   ├── frame_layout.h
 │   ├── object_heap.c          # Dynamic generation-tagged VA handles
@@ -259,6 +263,23 @@ with `DMA_BUF_IOCTL_SYNC` start/end operations. Without that ownership
 transition, the direct VPU-written mapping produced an intermittent stale
 frame even though routing and buffer indices were correct.
 
+### 10-bit NV15-to-P010 conversion
+
+MPP reports 10-bit 4:2:0 output as compact NV15
+(`MPP_FMT_YUV420SP_10BIT`). Apps expect P010, so `assign_mpp_frame` converts
+linear NV15 from the external decode pool into a driver-owned P010 buffer via
+`rk_convert_nv15_to_p010`. The source layout is bounded with MPP's byte stride;
+the RGA image wrapper and exported P010 descriptor use MPP's pixel stride
+(`mpp_frame_get_hor_stride_pixel`, or the derived 4/5 ratio when MPP omits it).
+
+The converted P010 buffer is stored as `surface->backing_buf` and the source
+`MppFrame` is released back to MPP after the surface is signaled. Export and
+image readback always prefer `backing_buf`, which lets the 10-bit path expose
+P010 without retaining compact NV15 as the public surface memory. If librga is
+not available or conversion fails, the frame is not bound and the surface fence
+is failed; the driver must not report success with compact NV15 described as
+P010.
+
 ### Why `vaQuerySurfaceAttributes` matters
 
 This is the function Firefox calls **before** attempting hardware decode to
@@ -364,17 +385,30 @@ val++ → find bit length k of val → write k zeros → write val in k+1 bits
 
 `hevc.c` reconstructs Annex B VPS/SPS/PPS units from the picture and IQ
 buffers, including Main/Main10 profile-tier-level syntax, scaling-list scan
-order, tiles, and the current short/long-term reference set. The first slice
-NAL is parsed only far enough to recover its PPS ID; malformed and unsupported
-state fails before a worker job is queued. `mpp_dec.c` prepends the parameter
-bundle, preserves already-prefixed slices, and adds a start code to bare NALs.
-HEVC shares H.264's token-based output routing because both codecs may reorder
-display output.
+order, tiles, and the current short/long-term reference set. Slice NALs are
+parsed far enough to recover their PPS ID and rewrite explicit RPS state from
+the VA picture buffer. Malformed and unsupported state fails before a worker
+job is queued. `mpp_dec.c` emits a full parameter bundle at the first
+picture/IRAP, emits PPS-only headers when a new PPS ID appears, preserves
+already-prefixed slices, and adds a start code to bare NALs. HEVC shares
+H.264's token-based output routing because both codecs may reorder display
+output.
 
 This path is intentionally not advertised yet. Adding a profile requires
 changing `profile_supported`, its surface attributes, and the conformance
 manifest together only after the on-device bit-exact gate passes. VP9 Profile
 0 remains the other shipping path; VP9 Profile 2 and AV1 remain future work.
+
+For Phase 2 debugging, `RK_VAAPI_EXPERIMENTAL_PROFILES=hevc-main` temporarily
+enables `VAProfileHEVCMain` so `make check-hevc-experimental` can force the
+pinned HEVC vectors through hardware. The switch is intentionally narrow and
+must not be used as release evidence by itself. The current boundary is:
+SPS-stored long-term reference streams are fail-closed because VA-API provides
+only `num_long_term_ref_pic_sps`, not the corresponding SPS POC and used
+flags; scaling-list streams with SPS RPS tables are also fail-closed until that
+class is proven; and forced hardware runs for the PPS_A/RPS_A vectors still
+complete with frame mismatches. HEVC stays hidden until the pinned gate is
+bit-exact.
 
 ---
 
@@ -397,9 +431,13 @@ patching Firefox's sandbox policy).
   the lowest Annex A level supported by the available frame/DPB constraints.
   Bitrate and frame-rate distinctions cannot be recovered from this buffer.
 - HEVC reconstruction is host-validated but unadvertised pending the pinned
-  on-device Main conformance gate and external-buffer parity audit.
-- HEVC Main10 and VP9 Profile 2 need the NV15-to-P010 output path before they
-  can be offered. VP8 and AV1 are also unadvertised.
+  on-device Main conformance gate and external-buffer parity audit. Streams
+  requiring SPS-stored long-term reference POC tables are fail-closed because
+  VA-API does not carry enough data to reconstruct them.
+- HEVC Main10 and VP9 Profile 2 have NV15-to-P010 plumbing. The standalone
+  P010/librga blocker is fixed on the tested kernel/librga stack, but these
+  profiles remain unadvertised until the on-device 10-bit conformance/HDR
+  gates pass. VP8 and AV1 are also unadvertised.
 
 ---
 

@@ -145,12 +145,30 @@ VAStatus rk_CreateContext(VADriverContextP ctx,
     }
     mpp_dec_cfg_deinit(dec_cfg);
 
+    RK_S64 input_timeout_ms = 0;
+    if (c->mpi->control(c->mpp, MPP_SET_INPUT_TIMEOUT,
+                        (MppParam)&input_timeout_ms) != MPP_OK) {
+        LOG("CreateContext: input timeout configuration failed");
+        rk_object_unref(&c->base);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
+
     RK_S64 output_timeout_ms = 20;
     if (c->mpi->control(c->mpp, MPP_SET_OUTPUT_TIMEOUT,
                         (MppParam)&output_timeout_ms) != MPP_OK) {
         LOG("CreateContext: output timeout configuration failed");
         rk_object_unref(&c->base);
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
+
+    if (coding == MPP_VIDEO_CodingHEVC) {
+        RK_U32 immediate_out = 1;
+        if (c->mpi->control(c->mpp, MPP_DEC_SET_IMMEDIATE_OUT,
+                            (MppParam)&immediate_out) != MPP_OK) {
+            LOG("CreateContext: HEVC immediate-output configuration failed");
+            rk_object_unref(&c->base);
+            return VA_STATUS_ERROR_ALLOCATION_FAILED;
+        }
     }
 
     c->profile  = profile;

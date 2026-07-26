@@ -34,5 +34,6 @@ void rk_log_message(const char *format, ...)
     vfprintf(log_file, format, arguments);
     va_end(arguments);
     fputc('\n', log_file);
+    fflush(log_file);
     funlockfile(log_file);
 }

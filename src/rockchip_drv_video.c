@@ -26,6 +26,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <pthread.h>
+#include <string.h>
 
 #include "buffer.h"
 #include "context.h"
@@ -61,21 +62,35 @@ static VAStatus rk_Terminate(VADriverContextP ctx) {
  *   - H.264 Constrained Baseline: MPP decodes the pinned SVA_Base_B stream
  *     incorrectly even though the reconstructed Annex B stream is
  *     software-exact. Fall back instead of returning corrupt frames.
- *   - HEVC: reconstruction and worker routing exist, but the profile remains
- *     hidden until the pinned Main vectors pass the on-device bit-exact gate.
+ *   - HEVC: reconstruction and worker routing exist, and a narrow
+ *     RK_VAAPI_EXPERIMENTAL_PROFILES=hevc-main gate can expose Main for
+ *     validation, but the profile remains hidden by default until the pinned
+ *     Main vectors pass the on-device bit-exact gate.
  *   - VP8: verified segfault in the generic path.
- *   - H.264 High10 / VP9 Profile 2 (10-bit): MPP outputs compact NV15, but
- *     the export/readback path treats 10-bit as 2-byte-per-sample P010 — layout
- *     mismatch, would render garbage.
+ *   - H.264 High10 / VP9 Profile 2 (10-bit): compact NV15-to-P010 conversion
+ *     is implemented, but these profiles remain hidden until the fixed
+ *     kernel/librga pair and 10-bit hardware gate pass.
  *   - AV1: MPP needs a full OBU bytestream but VA-API hands us only
  *     headerless tile data, so MPP can never parse it. Firefox falls back
  *     to VP9 (hardware-decoded) for AV1-capable content. */
+static bool experimental_profile_enabled(const char *profile)
+{
+    const char *enabled = getenv("RK_VAAPI_EXPERIMENTAL_PROFILES");
+    if (!enabled || !enabled[0] || !strcmp(enabled, "0"))
+        return false;
+    return !strcmp(enabled, "1") ||
+           !strcmp(enabled, "all") ||
+           !strcmp(enabled, profile);
+}
+
 static bool profile_supported(VAProfile p) {
     switch (p) {
     case VAProfileH264Main:
     case VAProfileH264High:
     case VAProfileVP9Profile0:
         return true;
+    case VAProfileHEVCMain:
+        return experimental_profile_enabled("hevc-main");
     default:
         return false;
     }
@@ -88,6 +103,8 @@ static VAStatus rk_QueryConfigProfiles(VADriverContextP ctx,
     list[i++] = VAProfileH264Main;
     list[i++] = VAProfileH264High;
     list[i++] = VAProfileVP9Profile0;
+    if (profile_supported(VAProfileHEVCMain))
+        list[i++] = VAProfileHEVCMain;
     *n = i;
     return VA_STATUS_SUCCESS;
 }

@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <va/va.h>
@@ -21,7 +22,7 @@ enum {
     HEVC_NAL_VPS = 32,
     HEVC_NAL_SPS = 33,
     HEVC_NAL_PPS = 34,
-    HEVC_MAX_CURRENT_REFS = 8,
+    HEVC_MAX_RPS_REFS = 15,
     HEVC_MAX_LONG_TERM_SPS = 32,
     HEVC_RAW_NAL_CAPACITY = 32768,
 };
@@ -33,9 +34,15 @@ typedef struct {
 } HEVCBitReader;
 
 typedef struct {
-    uint32_t negative[HEVC_MAX_CURRENT_REFS];
-    uint32_t positive[HEVC_MAX_CURRENT_REFS];
-    uint32_t long_term_poc[HEVC_MAX_CURRENT_REFS];
+    uint32_t delta;
+    uint32_t poc;
+    bool used;
+} HEVCRPSEntry;
+
+typedef struct {
+    HEVCRPSEntry negative[HEVC_MAX_RPS_REFS];
+    HEVCRPSEntry positive[HEVC_MAX_RPS_REFS];
+    HEVCRPSEntry long_term[HEVC_MAX_RPS_REFS];
     unsigned int negative_count;
     unsigned int positive_count;
     unsigned int long_term_count;
@@ -71,6 +78,44 @@ static bool br_read_ue(HEVCBitReader *br, uint32_t *value)
     *value = (zeros == 31 ? UINT32_MAX : (UINT32_C(1) << zeros) - 1) +
              suffix;
     return true;
+}
+
+static bool br_read_bits(HEVCBitReader *br, unsigned int count,
+                         uint32_t *value)
+{
+    uint32_t out = 0;
+
+    if (!br || !value || count > 32 || br->bit > br->size * 8 ||
+        count > br->size * 8 - br->bit)
+        return false;
+    for (unsigned int i = 0; i < count; i++) {
+        uint32_t bit;
+        if (!br_read_bit(br, &bit))
+            return false;
+        out = (out << 1) | bit;
+    }
+    *value = out;
+    return true;
+}
+
+static bool br_skip_bits(HEVCBitReader *br, size_t count)
+{
+    if (!br || br->bit > br->size * 8 || count > br->size * 8 - br->bit)
+        return false;
+    br->bit += count;
+    return true;
+}
+
+static unsigned int ceil_log2_u32(uint32_t value)
+{
+    unsigned int bits = 0;
+    uint32_t max = value > 0 ? value - 1 : 0;
+
+    while (max) {
+        bits++;
+        max >>= 1;
+    }
+    return bits;
 }
 
 static size_t nal_offset(const uint8_t *data, size_t size)
@@ -234,12 +279,12 @@ static bool valid_picture(const VAPictureHEVC *picture)
            !(picture->flags & VA_PICTURE_HEVC_INVALID);
 }
 
-static void sort_u32(uint32_t *values, unsigned int count)
+static void sort_entries(HEVCRPSEntry *values, unsigned int count)
 {
     for (unsigned int i = 1; i < count; i++) {
-        uint32_t value = values[i];
+        HEVCRPSEntry value = values[i];
         unsigned int j = i;
-        while (j > 0 && values[j - 1] > value) {
+        while (j > 0 && values[j - 1].delta > value.delta) {
             values[j] = values[j - 1];
             j--;
         }
@@ -257,37 +302,84 @@ static bool collect_rps(const VAPictureParameterBufferHEVC *pp, HEVCRPS *rps)
         if (!valid_picture(ref))
             continue;
 
-        uint32_t current_flags = ref->flags &
+        uint32_t rps_flags = ref->flags &
             (VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE |
              VA_PICTURE_HEVC_RPS_ST_CURR_AFTER |
              VA_PICTURE_HEVC_RPS_LT_CURR);
-        if (!current_flags)
+        if (!rps_flags)
             continue;
-        if ((current_flags & (current_flags - 1)) != 0)
+        if ((rps_flags & (rps_flags - 1)) != 0)
             return false;
 
         unsigned int total = rps->negative_count + rps->positive_count +
                              rps->long_term_count;
-        if (total >= HEVC_MAX_CURRENT_REFS)
+        if (total >= HEVC_MAX_RPS_REFS)
             return false;
 
         int64_t delta = (int64_t)ref->pic_order_cnt - current_poc;
-        if (current_flags == VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE) {
+        bool is_long_term = (ref->flags & VA_PICTURE_HEVC_LONG_TERM_REFERENCE) ||
+                            rps_flags == VA_PICTURE_HEVC_RPS_LT_CURR;
+        if (is_long_term) {
+            rps->long_term[rps->long_term_count++] = (HEVCRPSEntry) {
+                .poc = (uint32_t)ref->pic_order_cnt,
+                .used = true,
+            };
+        } else if (delta < 0) {
             if (delta >= 0 || -delta > UINT16_MAX)
                 return false;
-            rps->negative[rps->negative_count++] = (uint32_t)-delta;
-        } else if (current_flags == VA_PICTURE_HEVC_RPS_ST_CURR_AFTER) {
+            rps->negative[rps->negative_count++] = (HEVCRPSEntry) {
+                .delta = (uint32_t)-delta,
+                .poc = (uint32_t)ref->pic_order_cnt,
+                .used = true,
+            };
+        } else if (delta > 0) {
             if (delta <= 0 || delta > UINT16_MAX)
                 return false;
-            rps->positive[rps->positive_count++] = (uint32_t)delta;
-        } else {
-            rps->long_term_poc[rps->long_term_count++] =
-                (uint32_t)ref->pic_order_cnt;
+            rps->positive[rps->positive_count++] = (HEVCRPSEntry) {
+                .delta = (uint32_t)delta,
+                .poc = (uint32_t)ref->pic_order_cnt,
+                .used = true,
+            };
         }
     }
 
-    sort_u32(rps->negative, rps->negative_count);
-    sort_u32(rps->positive, rps->positive_count);
+    sort_entries(rps->negative, rps->negative_count);
+    sort_entries(rps->positive, rps->positive_count);
+    return true;
+}
+
+static unsigned int hevc_ctb_size(const VAPictureParameterBufferHEVC *pp)
+{
+    unsigned int min_cb_log2 =
+        pp->log2_min_luma_coding_block_size_minus3 + 3;
+    unsigned int ctb_log2 =
+        min_cb_log2 + pp->log2_diff_max_min_luma_coding_block_size;
+
+    return 1u << ctb_log2;
+}
+
+static bool tile_spacing_is_uniform(const VAPictureParameterBufferHEVC *pp)
+{
+    unsigned int ctb_size = hevc_ctb_size(pp);
+    unsigned int width_ctbs =
+        (pp->pic_width_in_luma_samples + ctb_size - 1) / ctb_size;
+    unsigned int height_ctbs =
+        (pp->pic_height_in_luma_samples + ctb_size - 1) / ctb_size;
+    unsigned int columns = pp->num_tile_columns_minus1 + 1;
+    unsigned int rows = pp->num_tile_rows_minus1 + 1;
+
+    for (unsigned int i = 0; i < pp->num_tile_columns_minus1; i++) {
+        unsigned int start = (i * width_ctbs) / columns;
+        unsigned int end = ((i + 1) * width_ctbs) / columns;
+        if (end <= start || pp->column_width_minus1[i] != end - start - 1)
+            return false;
+    }
+    for (unsigned int i = 0; i < pp->num_tile_rows_minus1; i++) {
+        unsigned int start = (i * height_ctbs) / rows;
+        unsigned int end = ((i + 1) * height_ctbs) / rows;
+        if (end <= start || pp->row_height_minus1[i] != end - start - 1)
+            return false;
+    }
     return true;
 }
 
@@ -324,12 +416,19 @@ static bool validate_picture_parameters(const VAPictureParameterBufferHEVC *pp,
         (pp->pic_fields.bits.scaling_list_enabled_flag && !iq))
         return false;
 
+    if (pp->pic_fields.bits.scaling_list_enabled_flag &&
+        pp->num_short_term_ref_pic_sets > 0)
+        return false;
+    if (pp->slice_parsing_fields.bits.long_term_ref_pics_present_flag &&
+        pp->num_long_term_ref_pic_sps > 0)
+        return false;
+
     unsigned int min_cb_log2 =
         pp->log2_min_luma_coding_block_size_minus3 + 3;
     unsigned int ctb_log2 = min_cb_log2 +
                             pp->log2_diff_max_min_luma_coding_block_size;
     unsigned int min_cb_size = 1u << min_cb_log2;
-    unsigned int ctb_size = 1u << ctb_log2;
+    unsigned int ctb_size = hevc_ctb_size(pp);
     if (ctb_log2 > 6 ||
         pp->pic_width_in_luma_samples % min_cb_size != 0 ||
         pp->pic_height_in_luma_samples % min_cb_size != 0 ||
@@ -485,16 +584,295 @@ static void write_short_term_rps(BSWriter *bs, const HEVCRPS *rps,
 
     uint32_t previous = 0;
     for (unsigned int i = 0; i < rps->negative_count; i++) {
-        bs_write_ue(bs, rps->negative[i] - previous - 1);
-        bs_write(bs, 1, 1);       /* used_by_curr_pic_s0_flag */
-        previous = rps->negative[i];
+        bs_write_ue(bs, rps->negative[i].delta - previous - 1);
+        bs_write(bs, rps->negative[i].used, 1);
+        previous = rps->negative[i].delta;
     }
     previous = 0;
     for (unsigned int i = 0; i < rps->positive_count; i++) {
-        bs_write_ue(bs, rps->positive[i] - previous - 1);
-        bs_write(bs, 1, 1);       /* used_by_curr_pic_s1_flag */
-        previous = rps->positive[i];
+        bs_write_ue(bs, rps->positive[i].delta - previous - 1);
+        bs_write(bs, rps->positive[i].used, 1);
+        previous = rps->positive[i].delta;
     }
+}
+
+static bool write_long_term_rps(BSWriter *bs, const HEVCRPS *rps,
+                                const VAPictureParameterBufferHEVC *pp,
+                                uint32_t poc_lsb)
+{
+    if (!pp->slice_parsing_fields.bits.long_term_ref_pics_present_flag)
+        return true;
+
+    unsigned int poc_bits = pp->log2_max_pic_order_cnt_lsb_minus4 + 4;
+    uint32_t max_poc_lsb = UINT32_C(1) << poc_bits;
+    uint32_t mask = max_poc_lsb - 1;
+    int64_t current_poc = pp->CurrPic.pic_order_cnt;
+    int64_t prev_delta_msb = 0;
+
+    bs_write_ue(bs, rps->long_term_count);
+    for (unsigned int i = 0; i < rps->long_term_count; i++) {
+        int64_t ref_poc = (int32_t)rps->long_term[i].poc;
+        uint32_t ref_lsb = (uint32_t)ref_poc & mask;
+        int64_t delta_msb =
+            ((int64_t)ref_lsb + current_poc - poc_lsb - ref_poc) /
+            max_poc_lsb;
+
+        bs_write(bs, ref_lsb, (int)poc_bits);
+        bs_write(bs, rps->long_term[i].used, 1);
+        if (delta_msb <= 0) {
+            bs_write(bs, 0, 1);
+            continue;
+        }
+        if (i > 0) {
+            if (delta_msb < prev_delta_msb)
+                return false;
+            delta_msb -= prev_delta_msb;
+        }
+        if (delta_msb > UINT32_MAX)
+            return false;
+        bs_write(bs, 1, 1);
+        bs_write_ue(bs, (uint32_t)delta_msb);
+        prev_delta_msb += delta_msb;
+    }
+    return true;
+}
+
+static bool copy_bits(BSWriter *bs, const uint8_t *src,
+                      size_t start_bit, size_t end_bit)
+{
+    if (start_bit > end_bit)
+        return false;
+    for (size_t bit = start_bit; bit < end_bit; bit++) {
+        int value = (src[bit / 8] >> (7 - bit % 8)) & 1;
+        bs_write1(bs, value);
+    }
+    return true;
+}
+
+static int bit_at(const uint8_t *src, size_t bit)
+{
+    return (src[bit / 8] >> (7 - bit % 8)) & 1;
+}
+
+static bool find_byte_alignment_start(const uint8_t *rbsp,
+                                      size_t rps_end_bit,
+                                      size_t slice_data_bit,
+                                      size_t *align_start_bit)
+{
+    if (!rbsp || !align_start_bit || rps_end_bit > slice_data_bit)
+        return false;
+
+    for (size_t bit = slice_data_bit; bit > rps_end_bit; bit--) {
+        size_t candidate = bit - 1;
+        if (bit_at(rbsp, candidate)) {
+            *align_start_bit = candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool skip_original_rps(HEVCBitReader *br,
+                              const VAPictureParameterBufferHEVC *pp)
+{
+    uint32_t flag;
+
+    if (!br_read_bit(br, &flag))
+        return false;
+    if (!flag) {
+        if (!br_skip_bits(br, pp->st_rps_bits))
+            return false;
+    } else {
+        if (pp->num_short_term_ref_pic_sets == 0)
+            return false;
+        unsigned int idx_bits =
+            ceil_log2_u32(pp->num_short_term_ref_pic_sets);
+        if (!br_skip_bits(br, idx_bits))
+            return false;
+    }
+
+    if (pp->slice_parsing_fields.bits.long_term_ref_pics_present_flag) {
+        uint32_t num_lt_sps = 0;
+        uint32_t num_lt_pics;
+        if (pp->num_long_term_ref_pic_sps > 0 &&
+            !br_read_ue(br, &num_lt_sps))
+            return false;
+        if (!br_read_ue(br, &num_lt_pics) ||
+            num_lt_sps > pp->num_long_term_ref_pic_sps ||
+            num_lt_sps + num_lt_pics > HEVC_MAX_RPS_REFS)
+            return false;
+        unsigned int idx_bits =
+            ceil_log2_u32(pp->num_long_term_ref_pic_sps);
+        unsigned int poc_bits = pp->log2_max_pic_order_cnt_lsb_minus4 + 4;
+        for (uint32_t i = 0; i < num_lt_sps + num_lt_pics; i++) {
+            if (i < num_lt_sps) {
+                if (!br_skip_bits(br, idx_bits))
+                    return false;
+            } else if (!br_skip_bits(br, poc_bits + 1)) {
+                return false;
+            }
+            uint32_t delta_present;
+            if (!br_read_bit(br, &delta_present))
+                return false;
+            if (delta_present) {
+                uint32_t ignored;
+                if (!br_read_ue(br, &ignored))
+                    return false;
+            }
+        }
+    }
+    return true;
+}
+
+int rk_hevc_rewrite_slice_nal(uint8_t *buf, size_t buf_size,
+                              const uint8_t *data, size_t size,
+                              const VAPictureParameterBufferHEVC *pp,
+                              const VASliceParameterBufferHEVC *sp)
+{
+    if (!buf || !data || !pp)
+        return -1;
+
+    size_t prefix = nal_offset(data, size);
+    if (prefix == SIZE_MAX || size - prefix < 3 || size > INT_MAX)
+        return -1;
+
+    const uint8_t *nal = data + prefix;
+    size_t nal_size = size - prefix;
+    uint8_t nal_type = (nal[0] >> 1) & 0x3f;
+    if ((nal[0] & 0x80) != 0 || nal_type > 31 || (nal[1] & 7) == 0)
+        return -1;
+
+    if (nal_type == 19 || nal_type == 20) {
+        if (buf_size < size)
+            return -1;
+        memcpy(buf, data, size);
+        return (int)size;
+    }
+
+    uint8_t *rbsp = malloc(nal_size);
+    uint8_t *rewritten = malloc(nal_size + 4096);
+    if (!rbsp || !rewritten) {
+        free(rbsp);
+        free(rewritten);
+        return -1;
+    }
+
+    size_t rbsp_size = unescape_prefix(nal + 2, nal_size - 2,
+                                       rbsp, nal_size);
+    HEVCBitReader br = { rbsp, rbsp_size, 0 };
+    uint32_t bit;
+    uint32_t ignored;
+    if (!br_read_bit(&br, &bit))
+        goto fail;
+    bool first_slice = bit != 0;
+    if (nal_type >= 16 && nal_type <= 23 &&
+        !br_read_bit(&br, &ignored))
+        goto fail;
+    if (!br_read_ue(&br, &ignored))
+        goto fail;
+
+    bool dependent = false;
+    if (!first_slice) {
+        if (pp->slice_parsing_fields.bits.dependent_slice_segments_enabled_flag) {
+            if (!br_read_bit(&br, &bit))
+                goto fail;
+            dependent = bit != 0;
+        }
+        unsigned int min_cb_log2 =
+            pp->log2_min_luma_coding_block_size_minus3 + 3;
+        unsigned int ctb_log2 = min_cb_log2 +
+            pp->log2_diff_max_min_luma_coding_block_size;
+        uint32_t ctb_size = UINT32_C(1) << ctb_log2;
+        uint32_t width_ctbs =
+            (pp->pic_width_in_luma_samples + ctb_size - 1) / ctb_size;
+        uint32_t height_ctbs =
+            (pp->pic_height_in_luma_samples + ctb_size - 1) / ctb_size;
+        if (!br_skip_bits(&br, ceil_log2_u32(width_ctbs * height_ctbs)))
+            goto fail;
+    }
+    if (dependent) {
+        if (buf_size < size)
+            goto fail;
+        memcpy(buf, data, size);
+        free(rbsp);
+        free(rewritten);
+        return (int)size;
+    }
+
+    for (unsigned int i = 0; i < pp->num_extra_slice_header_bits; i++) {
+        if (!br_read_bit(&br, &ignored))
+            goto fail;
+    }
+    if (!br_read_ue(&br, &ignored))
+        goto fail;
+    if (pp->slice_parsing_fields.bits.output_flag_present_flag &&
+        !br_read_bit(&br, &ignored))
+        goto fail;
+    if (pp->pic_fields.bits.separate_colour_plane_flag &&
+        !br_skip_bits(&br, 2))
+        goto fail;
+
+    uint32_t poc_lsb = 0;
+    if (!br_read_bits(&br, pp->log2_max_pic_order_cnt_lsb_minus4 + 4,
+                      &poc_lsb))
+        goto fail;
+    size_t rps_start = br.bit;
+    if (!skip_original_rps(&br, pp))
+        goto fail;
+    size_t rps_end = br.bit;
+
+    HEVCRPS rps;
+    if (!collect_rps(pp, &rps))
+        goto fail;
+
+    BSWriter bs;
+    bs_init(&bs, rewritten, nal_size + 4096);
+    if (!copy_bits(&bs, rbsp, 0, rps_start))
+        goto fail;
+    bs_write(&bs, 0, 1);       /* short_term_ref_pic_set_sps_flag */
+    write_short_term_rps(&bs, &rps, 0);
+    if (!write_long_term_rps(&bs, &rps, pp, poc_lsb))
+        goto fail;
+    size_t suffix_start = rps_end;
+    if (sp && sp->slice_data_byte_offset >= 2) {
+        size_t slice_data_bit =
+            ((size_t)sp->slice_data_byte_offset - 2) * 8;
+        size_t align_start;
+        if (slice_data_bit > rbsp_size * 8 ||
+            !find_byte_alignment_start(rbsp, rps_end, slice_data_bit,
+                                       &align_start))
+            goto fail;
+        if (!copy_bits(&bs, rbsp, rps_end, align_start))
+            goto fail;
+        bs_write1(&bs, 1);
+        while (bs.bit_pos != 0)
+            bs_write1(&bs, 0);
+        suffix_start = slice_data_bit;
+    }
+    if (!copy_bits(&bs, rbsp, suffix_start, rbsp_size * 8))
+        goto fail;
+
+    size_t used = 0;
+    if (buf_size < prefix + 2) goto fail;
+    if (prefix) {
+        memcpy(buf, data, prefix);
+        used += prefix;
+    }
+    buf[used++] = nal[0];
+    buf[used++] = nal[1];
+    size_t escaped = emulation_prevent(rewritten, bs_bytes(&bs),
+                                       buf + used, buf_size - used);
+    if (!escaped || escaped > (size_t)INT_MAX - used)
+        goto fail;
+    used += escaped;
+    free(rbsp);
+    free(rewritten);
+    return (int)used;
+
+fail:
+    free(rbsp);
+    free(rewritten);
+    return -1;
 }
 
 static int write_sps(uint8_t *buf, size_t buf_size,
@@ -548,24 +926,13 @@ static int write_sps(uint8_t *buf, size_t buf_size,
         bs_write_ue(&bs, pp->log2_diff_max_min_pcm_luma_coding_block_size);
         bs_write(&bs, pp->pic_fields.bits.pcm_loop_filter_disabled_flag, 1);
     }
-    bs_write_ue(&bs, pp->num_short_term_ref_pic_sets);
-    for (unsigned int i = 0; i < pp->num_short_term_ref_pic_sets; i++)
-        write_short_term_rps(&bs, rps, i);
+    (void)rps;
+    bs_write_ue(&bs, 0);          /* rewritten slices carry explicit RPS */
 
     bool has_long_term = pp->slice_parsing_fields.bits.long_term_ref_pics_present_flag;
     bs_write(&bs, has_long_term, 1);
     if (has_long_term) {
-        bs_write_ue(&bs, pp->num_long_term_ref_pic_sps);
-        unsigned int poc_bits = pp->log2_max_pic_order_cnt_lsb_minus4 + 4;
-        uint32_t mask = poc_bits == 32 ? UINT32_MAX :
-                        (UINT32_C(1) << poc_bits) - 1;
-        for (unsigned int i = 0; i < pp->num_long_term_ref_pic_sps; i++) {
-            bool used = rps->long_term_count > 0;
-            uint32_t poc = used
-                ? rps->long_term_poc[i % rps->long_term_count] & mask : 0;
-            bs_write(&bs, poc, (int)poc_bits);
-            bs_write(&bs, used, 1);
-        }
+        bs_write_ue(&bs, 0);      /* rewritten slices carry explicit LT refs */
     }
     bs_write(&bs, pp->slice_parsing_fields.bits.sps_temporal_mvp_enabled_flag, 1);
     bs_write(&bs, pp->pic_fields.bits.strong_intra_smoothing_enabled_flag, 1);
@@ -613,11 +980,14 @@ static int write_pps(uint8_t *buf, size_t buf_size,
     if (pp->pic_fields.bits.tiles_enabled_flag) {
         bs_write_ue(&bs, pp->num_tile_columns_minus1);
         bs_write_ue(&bs, pp->num_tile_rows_minus1);
-        bs_write(&bs, 0, 1);       /* uniform_spacing_flag */
-        for (unsigned int i = 0; i < pp->num_tile_columns_minus1; i++)
-            bs_write_ue(&bs, pp->column_width_minus1[i]);
-        for (unsigned int i = 0; i < pp->num_tile_rows_minus1; i++)
-            bs_write_ue(&bs, pp->row_height_minus1[i]);
+        bool uniform_spacing = tile_spacing_is_uniform(pp);
+        bs_write(&bs, uniform_spacing, 1);
+        if (!uniform_spacing) {
+            for (unsigned int i = 0; i < pp->num_tile_columns_minus1; i++)
+                bs_write_ue(&bs, pp->column_width_minus1[i]);
+            for (unsigned int i = 0; i < pp->num_tile_rows_minus1; i++)
+                bs_write_ue(&bs, pp->row_height_minus1[i]);
+        }
         bs_write(&bs, pp->pic_fields.bits.loop_filter_across_tiles_enabled_flag, 1);
     }
     bs_write(&bs, pp->pic_fields.bits.pps_loop_filter_across_slices_enabled_flag, 1);
@@ -666,4 +1036,17 @@ int rk_hevc_write_parameter_sets(uint8_t *buf, size_t buf_size,
         return -1;
     used += (size_t)size;
     return (int)used;
+}
+
+int rk_hevc_write_picture_parameter_set(uint8_t *buf, size_t buf_size,
+                                        const VAPictureParameterBufferHEVC *pp,
+                                        const VAIQMatrixBufferHEVC *iq,
+                                        uint8_t pps_id, int profile_idc)
+{
+    HEVCRPS rps;
+
+    if (!buf || pps_id > 63 ||
+        !validate_picture_parameters(pp, iq, profile_idc, &rps))
+        return -1;
+    return write_pps(buf, buf_size, pp, pps_id);
 }

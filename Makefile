@@ -13,12 +13,22 @@ VA_CFLAGS  ?= $(shell $(PKG_CONFIG) --cflags libva 2>/dev/null)
 VA_LIBS    ?= $(shell $(PKG_CONFIG) --libs libva 2>/dev/null)
 MPP_CFLAGS ?= -I/usr/include/rockchip
 MPP_LIBS   ?= -lrockchip_mpp
-LDLIBS     ?= $(VA_LIBS) $(MPP_LIBS) -lpthread
+RGA_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags librga 2>/dev/null || \
+	if [ -f /usr/include/rga/im2d.h ]; then printf '%s' '-I/usr/include/rga'; fi)
+RGA_LIBS   ?= $(shell $(PKG_CONFIG) --libs librga 2>/dev/null || \
+	if [ -n "$(MULTIARCH)" ] && [ -e "/usr/lib/$(MULTIARCH)/librga.so" ]; then \
+		printf '%s' '-L/usr/lib/$(MULTIARCH) -lrga'; \
+	elif [ -e /usr/lib/librga.so ]; then printf '%s' '-lrga'; fi)
+LDLIBS     ?= $(VA_LIBS) $(MPP_LIBS) $(RGA_LIBS) -lpthread
+
+ifneq ($(strip $(RGA_LIBS)),)
+CPPFLAGS += -DRK_HAVE_RGA=1
+endif
 
 TARGET := rockchip_drv_video.so
-SRCS   := src/rockchip_drv_video.c src/buffer.c src/context.c src/export.c \
-	src/log.c src/mpp_dec.c src/object_heap.c src/surface.c src/h264.c \
-	src/frame_layout.c src/hevc.c src/vp9.c
+SRCS   := src/rockchip_drv_video.c src/buffer.c src/context.c src/convert.c \
+	src/export.c src/log.c src/mpp_dec.c src/object_heap.c src/surface.c \
+	src/h264.c src/frame_layout.c src/hevc.c src/vp9.c
 OBJS   := $(SRCS:.c=.o)
 
 UNIT_TESTS := tests/object_heap_test tests/frame_layout_test tests/h264_test \
@@ -45,14 +55,14 @@ TSAN_TARGET  := $(TSAN_DIR)/$(TARGET)
 TSAN_OBJS    := $(SRCS:.c=.tsan.o)
 
 DRIVER_COMPILE = $(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) -fPIC \
-	$(VA_CFLAGS) $(MPP_CFLAGS) -Isrc
+	$(VA_CFLAGS) $(MPP_CFLAGS) $(RGA_CFLAGS) -Isrc
 TEST_COMPILE = $(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(VA_CFLAGS) -Isrc
 SAN_DRIVER_COMPILE = $(CC) $(CPPFLAGS) $(SAN_CFLAGS) $(WARNINGS) -fPIC \
-	$(VA_CFLAGS) $(MPP_CFLAGS) -Isrc
+	$(VA_CFLAGS) $(MPP_CFLAGS) $(RGA_CFLAGS) -Isrc
 SAN_TEST_COMPILE = $(CC) $(CPPFLAGS) $(SAN_CFLAGS) $(WARNINGS) \
 	$(VA_CFLAGS) -Isrc
 TSAN_DRIVER_COMPILE = $(CC) $(CPPFLAGS) $(TSAN_CFLAGS) $(WARNINGS) -fPIC \
-	$(VA_CFLAGS) $(MPP_CFLAGS) -Isrc
+	$(VA_CFLAGS) $(MPP_CFLAGS) $(RGA_CFLAGS) -Isrc
 
 all: $(TARGET)
 
@@ -71,8 +81,10 @@ src/context.o: src/context.h src/driver_internal.h src/log.h src/mpp_dec.h \
 src/export.o: src/driver_internal.h src/export.h src/log.h src/object_heap.h \
 	src/surface.h
 src/log.o: src/log.h
-src/mpp_dec.o: src/driver_internal.h src/frame_layout.h src/h264.h src/log.h \
-	src/hevc.h src/mpp_dec.h src/object_heap.h src/vp9.h
+src/convert.o: src/convert.h src/frame_layout.h src/log.h
+src/mpp_dec.o: src/convert.h src/driver_internal.h src/frame_layout.h \
+	src/h264.h src/log.h src/hevc.h src/mpp_dec.h src/object_heap.h \
+	src/vp9.h
 src/object_heap.o: src/object_heap.h
 src/surface.o: src/driver_internal.h src/frame_layout.h src/log.h \
 	src/object_heap.h src/surface.h
@@ -94,6 +106,10 @@ check: $(TARGET) test
 
 check-conformance: $(TARGET) test
 	TEST_SET=conformance tests/validate.sh
+
+check-hevc-experimental: $(TARGET) test
+	TEST_SET=hevc EXPERIMENTAL_HEVC=1 FAIL_FAST=1 FFMPEG_TIMEOUT=60 \
+		tests/validate.sh
 
 check-synthetic: $(TARGET) test
 	TEST_SET=synthetic tests/validate.sh
@@ -130,21 +146,22 @@ check-safe: $(TARGET) test
 	TEST_SET=conformance ALLOW_QUARANTINE=1 tests/validate.sh
 
 tests/driver_objects_test: tests/driver_objects_test.c $(SRCS) \
-		src/buffer.h src/context.h src/driver_internal.h src/export.h \
-		src/object_heap.h src/frame_layout.h src/h264.h src/log.h \
-		src/hevc.h src/mpp_dec.h src/surface.h src/vp9.h
+		src/buffer.h src/context.h src/convert.h src/driver_internal.h \
+		src/export.h src/object_heap.h src/frame_layout.h src/h264.h \
+		src/log.h src/hevc.h src/mpp_dec.h src/surface.h src/vp9.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(VA_CFLAGS) $(MPP_CFLAGS) \
-		-Isrc tests/driver_objects_test.c $(SRCS) $(LDLIBS) -o $@
+		$(RGA_CFLAGS) -Isrc tests/driver_objects_test.c $(SRCS) \
+		$(LDLIBS) -o $@
 
 check-driver-objects: $(HARDWARE_TESTS)
 	@set -e; for test_binary in $(HARDWARE_TESTS); do ./$$test_binary; done
 
 tests/driver_objects_test.san: tests/driver_objects_test.c $(SRCS) \
-		src/buffer.h src/context.h src/driver_internal.h src/export.h \
-		src/object_heap.h src/frame_layout.h src/h264.h src/log.h \
-		src/hevc.h src/mpp_dec.h src/surface.h src/vp9.h
+		src/buffer.h src/context.h src/convert.h src/driver_internal.h \
+		src/export.h src/object_heap.h src/frame_layout.h src/h264.h \
+		src/log.h src/hevc.h src/mpp_dec.h src/surface.h src/vp9.h
 	$(CC) $(CPPFLAGS) $(SAN_CFLAGS) $(WARNINGS) $(VA_CFLAGS) $(MPP_CFLAGS) \
-		-Isrc tests/driver_objects_test.c $(SRCS) $(SAN_LDFLAGS) \
+		$(RGA_CFLAGS) -Isrc tests/driver_objects_test.c $(SRCS) $(SAN_LDFLAGS) \
 		$(LDLIBS) -o $@
 
 check-driver-objects-sanitize: tests/driver_objects_test.san
@@ -152,11 +169,11 @@ check-driver-objects-sanitize: tests/driver_objects_test.san
 	UBSAN_OPTIONS=halt_on_error=1 ./tests/driver_objects_test.san
 
 tests/driver_objects_test.tsan: tests/driver_objects_test.c $(SRCS) \
-		src/buffer.h src/context.h src/driver_internal.h src/export.h \
-		src/object_heap.h src/frame_layout.h src/h264.h src/log.h \
-		src/hevc.h src/mpp_dec.h src/surface.h src/vp9.h
+		src/buffer.h src/context.h src/convert.h src/driver_internal.h \
+		src/export.h src/object_heap.h src/frame_layout.h src/h264.h \
+		src/log.h src/hevc.h src/mpp_dec.h src/surface.h src/vp9.h
 	$(CC) $(CPPFLAGS) $(TSAN_CFLAGS) $(WARNINGS) $(VA_CFLAGS) $(MPP_CFLAGS) \
-		-Isrc tests/driver_objects_test.c $(SRCS) $(TSAN_LDFLAGS) \
+		$(RGA_CFLAGS) -Isrc tests/driver_objects_test.c $(SRCS) $(TSAN_LDFLAGS) \
 		$(LDLIBS) -o $@
 
 check-driver-objects-tsan: tests/driver_objects_test.tsan
@@ -202,9 +219,9 @@ $(TSAN_TARGET): $(TSAN_OBJS)
 src/%.tsan.o: src/%.c
 	$(TSAN_DRIVER_COMPILE) -c $< -o $@
 
-$(TSAN_OBJS): src/buffer.h src/context.h src/driver_internal.h src/export.h \
-	src/frame_layout.h src/h264.h src/hevc.h src/log.h src/mpp_dec.h src/object_heap.h \
-	src/surface.h src/vp9.h
+$(TSAN_OBJS): src/buffer.h src/context.h src/convert.h src/driver_internal.h \
+	src/export.h src/frame_layout.h src/h264.h src/hevc.h src/log.h \
+	src/mpp_dec.h src/object_heap.h src/surface.h src/vp9.h
 
 src/rockchip_drv_video.san.o: src/buffer.h src/context.h \
 	src/driver_internal.h src/export.h src/log.h src/object_heap.h \
@@ -216,8 +233,11 @@ src/context.san.o: src/context.h src/driver_internal.h src/log.h \
 src/export.san.o: src/driver_internal.h src/export.h src/log.h \
 	src/object_heap.h src/surface.h
 src/log.san.o: src/log.h
-src/mpp_dec.san.o: src/driver_internal.h src/frame_layout.h src/h264.h \
-	src/hevc.h src/log.h src/mpp_dec.h src/object_heap.h src/vp9.h
+src/convert.san.o: src/convert.h src/frame_layout.h src/log.h
+src/convert.tsan.o: src/convert.h src/frame_layout.h src/log.h
+src/mpp_dec.san.o: src/convert.h src/driver_internal.h src/frame_layout.h \
+	src/h264.h src/hevc.h src/log.h src/mpp_dec.h src/object_heap.h \
+	src/vp9.h
 src/object_heap.san.o: src/object_heap.h
 src/surface.san.o: src/driver_internal.h src/frame_layout.h src/log.h \
 	src/object_heap.h src/surface.h
@@ -265,6 +285,13 @@ check-sanitize: sanitize
 	UBSAN_OPTIONS=halt_on_error=1 \
 	DRIVER_DIR="$(abspath $(SAN_DIR))" TEST_SET=all tests/validate.sh
 
+check-hevc-experimental-sanitize: sanitize
+	LD_PRELOAD="$(shell $(CC) -print-file-name=libasan.so)" \
+	ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
+	UBSAN_OPTIONS=halt_on_error=1 \
+	DRIVER_DIR="$(abspath $(SAN_DIR))" TEST_SET=hevc EXPERIMENTAL_HEVC=1 \
+		FAIL_FAST=1 FFMPEG_TIMEOUT=60 tests/validate.sh
+
 check-sanitize-safe: sanitize
 	LD_PRELOAD="$(shell $(CC) -print-file-name=libasan.so)" \
 	ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
@@ -275,7 +302,7 @@ check-sanitize-safe: sanitize
 lint:
 	@command -v clang-tidy >/dev/null || { echo "clang-tidy is required" >&2; exit 1; }
 	clang-tidy $(SRCS) -- $(CPPFLAGS) $(CFLAGS) $(WARNINGS) -fPIC \
-		$(VA_CFLAGS) $(MPP_CFLAGS) -Isrc
+		$(VA_CFLAGS) $(MPP_CFLAGS) $(RGA_CFLAGS) -Isrc
 
 clean:
 	rm -f $(OBJS) $(SAN_OBJS) $(TSAN_OBJS) $(TARGET) $(UNIT_TESTS) $(SAN_TESTS) \
@@ -284,6 +311,7 @@ clean:
 	rm -rf $(SAN_DIR) $(TSAN_DIR)
 
 .PHONY: all install fetch-vectors check check-conformance check-synthetic \
+	check-hevc-experimental check-hevc-experimental-sanitize \
 	check-safe check-zero-copy check-zero-copy-sanitize \
 	check-concurrent-decode check-concurrent-decode-sanitize \
 	check-concurrent-decode-tsan check-soak test test-valgrind test-sanitize sanitize \

@@ -25,6 +25,13 @@ typedef struct {
 bool rk_hevc_parse_slice_info(const uint8_t *data, size_t size,
                               RKHEVCSliceInfo *info);
 
+/* Rewrite a slice NAL so short/long-term RPS data is explicit in the slice
+ * header.  The output preserves the input's Annex B prefix style. */
+int rk_hevc_rewrite_slice_nal(uint8_t *buf, size_t buf_size,
+                              const uint8_t *data, size_t size,
+                              const VAPictureParameterBufferHEVC *pp,
+                              const VASliceParameterBufferHEVC *sp);
+
 /* Write one Annex B VPS/SPS/PPS bundle.  profile_idc is 1 for Main and 2 for
  * Main10.  Returns the byte count or -1 when VA parameters are malformed or
  * cannot be represented without guessing. */
@@ -32,3 +39,7 @@ int rk_hevc_write_parameter_sets(uint8_t *buf, size_t buf_size,
                                  const VAPictureParameterBufferHEVC *pp,
                                  const VAIQMatrixBufferHEVC *iq,
                                  uint8_t pps_id, int profile_idc);
+int rk_hevc_write_picture_parameter_set(uint8_t *buf, size_t buf_size,
+                                        const VAPictureParameterBufferHEVC *pp,
+                                        const VAIQMatrixBufferHEVC *iq,
+                                        uint8_t pps_id, int profile_idc);

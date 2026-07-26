@@ -25,8 +25,11 @@ static void test_bounds_rejection(void)
 
     assert(rk_nv12_layout_size(4, 4, &size));
     assert(size == 24);
+    assert(rk_p010_layout_size(4, 4, &size));
+    assert(size == 48);
     assert(!rk_nv12_layout_size(SIZE_MAX, 2, &size));
     assert(!rk_nv12_layout_size(4, 3, &size));
+    assert(!rk_p010_layout_size(SIZE_MAX, 2, &size));
     assert(!rk_surface_buffer_size(0, 288, &size));
     assert(!rk_surface_buffer_size(UINT32_MAX, UINT32_MAX, &size));
 }

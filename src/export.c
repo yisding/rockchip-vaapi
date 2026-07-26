@@ -46,8 +46,8 @@ VAStatus rk_ExportSurfaceHandle(VADriverContextP context, VASurfaceID id,
     }
 
     pthread_mutex_lock(&surface->lock);
-    MppBuffer active_buffer = surface->frame
-                            ? mpp_frame_get_buffer(surface->frame)
+    MppBuffer active_buffer = surface->backing_buf ? surface->backing_buf
+                            : surface->frame ? mpp_frame_get_buffer(surface->frame)
                             : surface->priv_buf;
     int fd = active_buffer ? mpp_buffer_get_fd(active_buffer) : -1;
     size_t object_size = active_buffer ? mpp_buffer_get_size(active_buffer) : 0;
@@ -56,7 +56,7 @@ VAStatus rk_ExportSurfaceHandle(VADriverContextP context, VASurfaceID id,
     int width = surface->width;
     int height = surface->height;
     bool decoded = surface->decoded;
-    bool is_placeholder = surface->frame == NULL;
+    bool is_placeholder = surface->frame == NULL && surface->backing_buf == NULL;
     bool is_10bit = MPP_FRAME_FMT_IS_YUV_10BIT(surface->fmt);
     int export_fd = fd >= 0 ? dup(fd) : -1;
     int duplicate_error = export_fd < 0 ? errno : 0;

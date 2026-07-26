@@ -11,6 +11,7 @@
 #include <rockchip/mpp_packet.h>
 #include <rockchip/rk_mpi.h>
 
+#include "convert.h"
 #include "frame_layout.h"
 #include "h264.h"
 #include "hevc.h"
@@ -363,6 +364,7 @@ static bool assign_mpp_frame(MppFrame frame, RKContext *c)
     int            fheight= (int)mpp_frame_get_height(frame);
     int            fhs    = (int)mpp_frame_get_hor_stride(frame);
     int            fvs    = (int)mpp_frame_get_ver_stride(frame);
+    int            fhs_pix= (int)mpp_frame_get_hor_stride_pixel(frame);
     MppFrameFormat ffmt   = mpp_frame_get_fmt(frame);
 
     int  frame_w = fwidth  > 0 ? fwidth  : surface_width;
@@ -372,26 +374,53 @@ static bool assign_mpp_frame(MppFrame frame, RKContext *c)
     size_t src_size = buf ? mpp_buffer_get_size(buf) : 0;
     size_t layout_size = 0;
     bool linear_nv12 = (ffmt & MPP_FRAME_FMT_MASK) == MPP_FMT_YUV420SP;
-    bool layout_valid = linear_nv12 && src_hs > 0 && src_vs > 0 &&
+    bool linear_nv15 = (ffmt & MPP_FRAME_FMT_MASK) == MPP_FMT_YUV420SP_10BIT;
+    int  src_hs_pixels = fhs_pix > 0 ? fhs_pix : frame_w;
+    if (linear_nv15 && fhs_pix <= 0)
+        src_hs_pixels = src_hs > 0 && (src_hs % 5) == 0
+                      ? src_hs / 5 * 4 : 0;
+    bool supported_layout = linear_nv12 || linear_nv15;
+    bool layout_valid = supported_layout && src_hs > 0 && src_vs > 0 &&
+        (!linear_nv15 || src_hs_pixels > 0) &&
         rk_nv12_layout_size((size_t)src_hs, (size_t)src_vs, &layout_size) &&
         src_size >= layout_size;
     int pool_index = -1;
     bool pool_match = external_buffer_matches_pool(c, buf, &pool_index);
     RKDecodePool *pool = c->decode_pool;
     bool external_ready = pool != NULL;
-    bool zero_copy = layout_valid &&
-        (!external_ready || pool_match);
-    MppBuffer backing = (zero_copy && external_ready)
-                      ? pool->buffers[pool_index] : NULL;
-    if (zero_copy && backing && mpp_buffer_inc_ref(backing) != MPP_OK)
-        zero_copy = false;
-    if (zero_copy && pool && !rk_object_ref(&pool->base)) {
-        mpp_buffer_put(backing);
+    bool usable = layout_valid && (!external_ready || pool_match);
+    bool converted_10bit = false;
+    MppBuffer backing = NULL;
+    MppFrame stored_frame = frame;
+    int output_hstride = src_hs;
+
+    if (usable && linear_nv15) {
+        MppBuffer converted = NULL;
+        usable = external_ready &&
+            rk_convert_nv15_to_p010(pool->backing_group, buf,
+                                    (uint32_t)frame_w, (uint32_t)frame_h,
+                                    (uint32_t)src_hs,
+                                    (uint32_t)src_hs_pixels,
+                                    (uint32_t)src_vs, &converted);
+        if (usable) {
+            converted_10bit = true;
+            backing = converted;
+            stored_frame = NULL;
+            output_hstride = src_hs_pixels;
+        }
+    } else if (usable && external_ready) {
+        backing = pool->buffers[pool_index];
+        if (backing && mpp_buffer_inc_ref(backing) != MPP_OK)
+            usable = false;
+    }
+    if (usable && pool && !rk_object_ref(&pool->base)) {
+        if (backing)
+            mpp_buffer_put(backing);
         backing = NULL;
-        zero_copy = false;
+        usable = false;
     }
 
-    if (zero_copy) {
+    if (usable) {
         pthread_mutex_lock(&s->lock);
         if (s->fence != route->fence) {
             pthread_mutex_unlock(&s->lock);
@@ -406,13 +435,13 @@ static bool assign_mpp_frame(MppFrame frame, RKContext *c)
         MppFrame old_frame = s->frame;
         MppBuffer old_backing = s->backing_buf;
         RKDecodePool *old_pool = s->decode_pool;
-        s->frame = frame;
+        s->frame = stored_frame;
         s->backing_buf = backing;
         s->decode_pool = pool;
         s->fmt = ffmt;
         if (fwidth  > 0) s->width   = fwidth;
         if (fheight > 0) s->height  = fheight;
-        if (fhs     > 0) s->hstride = fhs;
+        if (output_hstride > 0) s->hstride = output_hstride;
         if (fvs     > 0) s->vstride = fvs;
         s->decoded = true;
         s->decode_failed = false;
@@ -421,14 +450,19 @@ static bool assign_mpp_frame(MppFrame frame, RKContext *c)
         pthread_mutex_unlock(&s->lock);
         if (old_frame)
             mpp_frame_deinit(&old_frame);
+        if (converted_10bit)
+            mpp_frame_deinit(&frame);
         if (old_backing)
             mpp_buffer_put(old_backing);
         if (old_pool)
             rk_object_unref(&old_pool->base);
         LOG("assign_mpp_frame: surface=0x%x MPP %dx%d stride=%dx%d "
-            "fmt=0x%x zero_copy=1 external=%d pool_index=%d fd=%d fence=%llu",
-            (unsigned)sid, fwidth, fheight, fhs, fvs, (unsigned)ffmt,
-            external_ready, pool_index, mpp_buffer_get_fd(buf),
+            "fmt=0x%x zero_copy=%d converted_10bit=%d external=%d "
+            "pool_index=%d fd=%d fence=%llu",
+            (unsigned)sid, fwidth, fheight, output_hstride, fvs,
+            (unsigned)ffmt, !converted_10bit, converted_10bit,
+            external_ready, pool_index,
+            backing ? mpp_buffer_get_fd(backing) : mpp_buffer_get_fd(buf),
             (unsigned long long)route->fence);
         frame_route_destroy(route);
         return true;
@@ -469,6 +503,20 @@ static bool decode_worker_stopping(RKContext *c)
     return stopping;
 }
 
+static bool drain_output_frame(RKContext *c)
+{
+    MppFrame frame = NULL;
+    MPP_RET ret = c->mpi->decode_get_frame(c->mpp, &frame);
+    if (ret == MPP_OK && frame) {
+        if (assign_mpp_frame(frame, c) && c->outstanding_frames > 0)
+            c->outstanding_frames--;
+        return true;
+    }
+    if (ret != MPP_OK && ret != MPP_ERR_TIMEOUT)
+        LOG("decode worker: output wait failed: %d", ret);
+    return false;
+}
+
 static MPP_RET put_packet_draining(RKContext *c, MppPacket pkt)
 {
     MPP_RET ret = MPP_OK;
@@ -477,12 +525,15 @@ static MPP_RET put_packet_draining(RKContext *c, MppPacket pkt)
             return MPP_NOK;
         ret = c->mpi->decode_put_packet(c->mpp, pkt);
         if (ret == MPP_OK) return MPP_OK;
-        MppFrame f = NULL;
-        if (c->mpi->decode_get_frame(c->mpp, &f) == MPP_OK && f &&
-            assign_mpp_frame(f, c) && c->outstanding_frames > 0)
-            c->outstanding_frames--;
+        (void)drain_output_frame(c);
     }
     return ret;
+}
+
+static void drain_hevc_after_submit(RKContext *c)
+{
+    if (c->coding == MPP_VIDEO_CodingHEVC && c->outstanding_frames > 0)
+        (void)drain_output_frame(c);
 }
 
 static RKDecodeJob *decode_job_create(RKContext *c, uint8_t *data,
@@ -667,45 +718,104 @@ static VAStatus build_hevc_job(RKContext *c, RKDriver *d,
         return VA_STATUS_ERROR_DECODING_ERROR;
     }
 
-    uint8_t *headers = malloc(HEVC_HEADER_CAPACITY);
-    if (!headers)
-        return VA_STATUS_ERROR_ALLOCATION_FAILED;
-    int header_size = rk_hevc_write_parameter_sets(
-        headers, HEVC_HEADER_CAPACITY, &c->last_hevc_pp,
-        c->has_hevc_iq ? &c->last_hevc_iq : NULL, slice_info.pps_id,
-        c->profile == VAProfileHEVCMain10 ? 2 : 1);
-    if (header_size <= 0) {
-        LOG("build_hevc_job: parameter-set reconstruction failed");
-        free(headers);
-        return VA_STATUS_ERROR_DECODING_ERROR;
-    }
-
     uint8_t *packet = NULL;
     size_t packet_size = 0;
     size_t packet_capacity = 0;
-    VAStatus status = packet_append(&packet, &packet_size, &packet_capacity,
-                                    headers, (size_t)header_size);
-    free(headers);
-    if (status != VA_STATUS_SUCCESS) {
-        free(packet);
-        return status;
+    VAStatus status = VA_STATUS_SUCCESS;
+
+    bool is_irap = slice_info.nal_unit_type >= 16 && slice_info.nal_unit_type <= 23;
+    bool need_full_headers = is_irap || !c->sps_sent;
+    bool need_pps_header = need_full_headers ||
+                           !c->hevc_pps_sent[slice_info.pps_id];
+    if (need_pps_header) {
+        uint8_t *headers = malloc(HEVC_HEADER_CAPACITY);
+        if (!headers)
+            return VA_STATUS_ERROR_ALLOCATION_FAILED;
+        int profile_idc = c->profile == VAProfileHEVCMain10 ? 2 : 1;
+        int header_size = need_full_headers ?
+            rk_hevc_write_parameter_sets(
+                headers, HEVC_HEADER_CAPACITY, &c->last_hevc_pp,
+                c->has_hevc_iq ? &c->last_hevc_iq : NULL,
+                slice_info.pps_id, profile_idc) :
+            rk_hevc_write_picture_parameter_set(
+                headers, HEVC_HEADER_CAPACITY, &c->last_hevc_pp,
+                c->has_hevc_iq ? &c->last_hevc_iq : NULL,
+                slice_info.pps_id, profile_idc);
+        if (header_size <= 0) {
+            if (c->last_hevc_pp.slice_parsing_fields.bits.long_term_ref_pics_present_flag &&
+                c->last_hevc_pp.num_long_term_ref_pic_sps > 0) {
+                LOG("build_hevc_job: unsupported HEVC SPS long-term refs count=%u",
+                    c->last_hevc_pp.num_long_term_ref_pic_sps);
+            } else if (c->last_hevc_pp.pic_fields.bits.scaling_list_enabled_flag &&
+                       c->last_hevc_pp.num_short_term_ref_pic_sets > 0) {
+                LOG("build_hevc_job: unsupported HEVC scaling-list stream with SPS RPS tables count=%u",
+                    c->last_hevc_pp.num_short_term_ref_pic_sets);
+            } else {
+                LOG("build_hevc_job: parameter-set reconstruction failed");
+            }
+            free(headers);
+            return VA_STATUS_ERROR_DECODING_ERROR;
+        }
+
+        status = packet_append(&packet, &packet_size, &packet_capacity,
+                               headers, (size_t)header_size);
+        free(headers);
+        if (status != VA_STATUS_SUCCESS) {
+            free(packet);
+            return status;
+        }
+        if (need_full_headers) {
+            memset(c->hevc_pps_sent, 0, sizeof(c->hevc_pps_sent));
+            c->sps_sent = true;
+        }
+        c->hevc_pps_sent[slice_info.pps_id] = true;
     }
 
     unsigned int slice_count = 0;
+    VASliceParameterBufferHEVC last_slice_param;
+    bool have_slice_param = false;
     for (int i = 0; i < c->n_pending; i++) {
         RKBuffer *b = buffer_acquire(d, c->pending[i]);
         if (!b)
             continue;
+        if (b->type == VASliceParameterBufferType &&
+            b->capacity >= sizeof(last_slice_param)) {
+            memcpy(&last_slice_param, b->data, sizeof(last_slice_param));
+            have_slice_param = true;
+            rk_object_unref(&b->base);
+            continue;
+        }
         if (b->type != VASliceDataBufferType || b->capacity == 0) {
             rk_object_unref(&b->base);
             continue;
         }
-        if (!has_annex_b_prefix(b->data, b->capacity))
+        size_t data_size = b->capacity;
+        const uint8_t *data = b->data;
+        uint8_t *rewritten = malloc(b->capacity + 4096);
+        if (!rewritten) {
+            rk_object_unref(&b->base);
+            free(packet);
+            return VA_STATUS_ERROR_ALLOCATION_FAILED;
+        }
+        int rewritten_size = rk_hevc_rewrite_slice_nal(
+            rewritten, b->capacity + 4096, b->data, b->capacity,
+            &c->last_hevc_pp, have_slice_param ? &last_slice_param : NULL);
+        if (rewritten_size < 0) {
+            LOG("build_hevc_job: slice RPS rewrite failed");
+            free(rewritten);
+            rk_object_unref(&b->base);
+            free(packet);
+            return VA_STATUS_ERROR_DECODING_ERROR;
+        }
+        data = rewritten;
+        data_size = (size_t)rewritten_size;
+        if (!has_annex_b_prefix(data, data_size))
             status = packet_append(&packet, &packet_size, &packet_capacity,
                                    start_code, sizeof(start_code));
         if (status == VA_STATUS_SUCCESS)
             status = packet_append(&packet, &packet_size, &packet_capacity,
-                                   b->data, b->capacity);
+                                   data, data_size);
+        free(rewritten);
         rk_object_unref(&b->base);
         if (status != VA_STATUS_SUCCESS) {
             free(packet);
@@ -717,7 +827,6 @@ static VAStatus build_hevc_job(RKContext *c, RKDriver *d,
         free(packet);
         return VA_STATUS_ERROR_DECODING_ERROR;
     }
-
     RKDecodeJob *job = decode_job_create(c, packet, packet_size);
     if (!job) {
         free(packet);
@@ -851,6 +960,7 @@ static void worker_submit_job(RKContext *c, RKDecodeJob *job)
         }
         if (new_route) {
             c->outstanding_frames++;
+            drain_hevc_after_submit(c);
         } else if (!h264_route_find_surface(c, job->target, job->fence)) {
             /* Backpressure draining consumed the prior field route while the
              * continuation packet was being accepted. Track its later output
@@ -863,6 +973,7 @@ static void worker_submit_job(RKContext *c, RKDecodeJob *job)
             replacement->token = route_token;
             h264_route_add(c, replacement);
             c->outstanding_frames++;
+            drain_hevc_after_submit(c);
         } else {
             LOG("decode worker: paired H.264 field surface=0x%x fence=%llu",
                 (unsigned)job->target, (unsigned long long)job->fence);
@@ -906,6 +1017,7 @@ static void worker_submit_job(RKContext *c, RKDecodeJob *job)
             return;
         }
         c->outstanding_frames++;
+        drain_hevc_after_submit(c);
         LOG("decode worker: hidden VP9 target=0x%x fence=%llu via ref slot %u",
             (unsigned)job->target, (unsigned long long)job->fence,
             (unsigned)job->repeat_slot);
@@ -927,19 +1039,12 @@ static void worker_submit_job(RKContext *c, RKDecodeJob *job)
         return;
     }
     c->outstanding_frames++;
+    drain_hevc_after_submit(c);
 }
 
 static void worker_drain_one(RKContext *c)
 {
-    MppFrame frame = NULL;
-    MPP_RET ret = c->mpi->decode_get_frame(c->mpp, &frame);
-    if (ret == MPP_OK && frame) {
-        if (assign_mpp_frame(frame, c) &&
-            c->outstanding_frames > 0)
-            c->outstanding_frames--;
-    } else if (ret != MPP_OK && ret != MPP_ERR_TIMEOUT) {
-        LOG("decode worker: output wait failed: %d", ret);
-    }
+    (void)drain_output_frame(c);
 }
 
 void *rk_mpp_dec_worker_main(void *opaque)

@@ -131,6 +131,46 @@ static void check_nal_header(BitReader *br, unsigned int type)
     assert(read_bits(br, 3) == 1);
 }
 
+static uint32_t read_pps_uniform_spacing(const uint8_t *bundle,
+                                         size_t bundle_size)
+{
+    uint8_t rbsp[4096];
+    size_t nal_size;
+    const uint8_t *nal = find_nal(bundle, bundle_size, 34, &nal_size);
+    assert(nal && nal_size > 2);
+
+    BitReader br = {
+        rbsp, unescape_nal(nal, nal_size, rbsp, sizeof(rbsp)), 0
+    };
+    check_nal_header(&br, 34);
+    (void)read_ue(&br);       /* pps_pic_parameter_set_id */
+    (void)read_ue(&br);       /* pps_seq_parameter_set_id */
+    (void)read_bit(&br);      /* dependent_slice_segments_enabled_flag */
+    (void)read_bit(&br);      /* output_flag_present_flag */
+    (void)read_bits(&br, 3);  /* num_extra_slice_header_bits */
+    (void)read_bit(&br);      /* sign_data_hiding_enabled_flag */
+    (void)read_bit(&br);      /* cabac_init_present_flag */
+    (void)read_ue(&br);       /* num_ref_idx_l0_default_active_minus1 */
+    (void)read_ue(&br);       /* num_ref_idx_l1_default_active_minus1 */
+    (void)read_se(&br);       /* init_qp_minus26 */
+    (void)read_bit(&br);      /* constrained_intra_pred_flag */
+    (void)read_bit(&br);      /* transform_skip_enabled_flag */
+    uint32_t cu_qp_delta_enabled = read_bit(&br);
+    if (cu_qp_delta_enabled)
+        (void)read_ue(&br);   /* diff_cu_qp_delta_depth */
+    (void)read_se(&br);       /* pps_cb_qp_offset */
+    (void)read_se(&br);       /* pps_cr_qp_offset */
+    (void)read_bit(&br);      /* pps_slice_chroma_qp_offsets_present_flag */
+    (void)read_bit(&br);      /* weighted_pred_flag */
+    (void)read_bit(&br);      /* weighted_bipred_flag */
+    (void)read_bit(&br);      /* transquant_bypass_enabled_flag */
+    assert(read_bit(&br) == 1); /* tiles_enabled_flag */
+    (void)read_bit(&br);      /* entropy_coding_sync_enabled_flag */
+    (void)read_ue(&br);       /* num_tile_columns_minus1 */
+    (void)read_ue(&br);       /* num_tile_rows_minus1 */
+    return read_bit(&br);
+}
+
 static void check_ptl(BitReader *br, int profile_idc, int level_idc)
 {
     assert(read_bits(br, 2) == 0);
@@ -219,7 +259,7 @@ static void test_reference_sets_and_pps(void)
     init_picture(&pp);
     pp.num_short_term_ref_pic_sets = 3;
     pp.slice_parsing_fields.bits.long_term_ref_pics_present_flag = 1;
-    pp.num_long_term_ref_pic_sps = 2;
+    pp.num_long_term_ref_pic_sps = 0;
     add_reference(&pp, 0, 2, 9, VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE);
     add_reference(&pp, 1, 3, 7, VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE);
     add_reference(&pp, 2, 4, 12, VA_PICTURE_HEVC_RPS_ST_CURR_AFTER);
@@ -252,22 +292,9 @@ static void test_reference_sets_and_pps(void)
     assert(read_bit(&br) == 1); /* amp */
     assert(read_bit(&br) == 1); /* sao */
     assert(read_bit(&br) == 0); /* pcm */
-    assert(read_ue(&br) == 3);
-    for (int set = 0; set < 3; set++) {
-        if (set)
-            assert(read_bit(&br) == 0);
-        assert(read_ue(&br) == 2);
-        assert(read_ue(&br) == 1);
-        assert(read_ue(&br) == 0 && read_bit(&br) == 1);
-        assert(read_ue(&br) == 1 && read_bit(&br) == 1);
-        assert(read_ue(&br) == 1 && read_bit(&br) == 1);
-    }
+    assert(read_ue(&br) == 0);
     assert(read_bit(&br) == 1);
-    assert(read_ue(&br) == 2);
-    for (int i = 0; i < 2; i++) {
-        assert(read_bits(&br, 8) == 2);
-        assert(read_bit(&br) == 1);
-    }
+    assert(read_ue(&br) == 0);
 
     nal = find_nal(bundle, (size_t)bundle_size, 34, &nal_size);
     assert(nal && nal_size > 2);
@@ -278,6 +305,82 @@ static void test_reference_sets_and_pps(void)
     assert(read_bit(&br) == 0);
     assert(read_bit(&br) == 0);
     assert(read_bits(&br, 3) == 0);
+}
+
+static void test_slice_rps_rewrite(void)
+{
+    VAPictureParameterBufferHEVC pp;
+    VASliceParameterBufferHEVC sp;
+    uint8_t slice[128];
+    uint8_t rewritten[512];
+    uint8_t rbsp[512];
+    init_picture(&pp);
+    memset(&sp, 0xff, sizeof(sp));
+    sp.slice_data_byte_offset = 0;
+    pp.num_short_term_ref_pic_sets = 3;
+    add_reference(&pp, 0, 2, 9, VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE);
+    add_reference(&pp, 1, 3, 7, VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE);
+    add_reference(&pp, 2, 4, 12, VA_PICTURE_HEVC_RPS_ST_CURR_AFTER);
+    sp.RefPicList[0][0] = 0;
+    sp.RefPicList[0][1] = 2;
+
+    BSWriter bs;
+    bs_init(&bs, slice, sizeof(slice));
+    bs_write(&bs, 0, 1);
+    bs_write(&bs, 1, 6);
+    bs_write(&bs, 0, 6);
+    bs_write(&bs, 1, 3);
+    bs_write(&bs, 1, 1);       /* first_slice_segment_in_pic_flag */
+    bs_write_ue(&bs, 0);       /* slice_pic_parameter_set_id */
+    bs_write_ue(&bs, 1);       /* P slice */
+    bs_write(&bs, 10, 8);      /* slice_pic_order_cnt_lsb */
+    bs_write(&bs, 1, 1);       /* short_term_ref_pic_set_sps_flag */
+    bs_write(&bs, 2, 2);       /* short_term_ref_pic_set_idx */
+    bs_write(&bs, 1, 1);       /* suffix sentinel */
+    bs_rbsp_trailing(&bs);
+
+    int size = rk_hevc_rewrite_slice_nal(rewritten, sizeof(rewritten),
+                                         slice, bs_bytes(&bs), &pp, &sp);
+    assert(size > 0);
+    size_t rbsp_size = unescape_nal(rewritten + 2, (size_t)size - 2,
+                                    rbsp, sizeof(rbsp));
+    BitReader br = {rbsp, rbsp_size, 0};
+    assert(read_bit(&br) == 1);
+    assert(read_ue(&br) == 0);
+    assert(read_ue(&br) == 1);
+    assert(read_bits(&br, 8) == 10);
+    assert(read_bit(&br) == 0);
+    assert(read_ue(&br) == 2);
+    assert(read_ue(&br) == 1);
+    assert(read_ue(&br) == 0 && read_bit(&br) == 1);
+    assert(read_ue(&br) == 1 && read_bit(&br) == 1);
+    assert(read_ue(&br) == 1 && read_bit(&br) == 1);
+    assert(read_bit(&br) == 1);
+}
+
+static void test_pps_uniform_tile_spacing(void)
+{
+    VAPictureParameterBufferHEVC pp;
+    uint8_t bundle[65536];
+    init_picture(&pp);
+    pp.pic_width_in_luma_samples = 832;
+    pp.pic_height_in_luma_samples = 480;
+    pp.pic_fields.bits.tiles_enabled_flag = 1;
+    pp.pic_fields.bits.loop_filter_across_tiles_enabled_flag = 1;
+    pp.num_tile_columns_minus1 = 1;
+    pp.num_tile_rows_minus1 = 0;
+    pp.column_width_minus1[0] = 5;
+
+    int size = rk_hevc_write_parameter_sets(bundle, sizeof(bundle),
+                                            &pp, NULL, 31, 1);
+    assert(size > 0);
+    assert(read_pps_uniform_spacing(bundle, (size_t)size) == 1);
+
+    pp.column_width_minus1[0] = 4;
+    size = rk_hevc_write_parameter_sets(bundle, sizeof(bundle),
+                                        &pp, NULL, 31, 1);
+    assert(size > 0);
+    assert(read_pps_uniform_spacing(bundle, (size_t)size) == 0);
 }
 
 static const uint8_t scan4x4_x[16] = {
@@ -389,6 +492,12 @@ static void test_rejection(void)
     assert(rk_hevc_write_parameter_sets(large, sizeof(large), &pp, &iq, 0, 1) < 0);
 
     init_picture(&pp);
+    pp.pic_fields.bits.scaling_list_enabled_flag = 1;
+    pp.num_short_term_ref_pic_sets = 1;
+    memset(&iq, 16, sizeof(iq));
+    assert(rk_hevc_write_parameter_sets(large, sizeof(large), &pp, &iq, 0, 1) < 0);
+
+    init_picture(&pp);
     pp.bit_depth_luma_minus8 = 2;
     pp.bit_depth_chroma_minus8 = 2;
     assert(rk_hevc_write_parameter_sets(large, sizeof(large), &pp, NULL, 0, 1) < 0);
@@ -413,6 +522,11 @@ static void test_rejection(void)
 
     init_picture(&pp);
     pp.pps_beta_offset_div2 = 7;
+    assert(rk_hevc_write_parameter_sets(large, sizeof(large), &pp, NULL, 0, 1) < 0);
+
+    init_picture(&pp);
+    pp.slice_parsing_fields.bits.long_term_ref_pics_present_flag = 1;
+    pp.num_long_term_ref_pic_sps = 1;
     assert(rk_hevc_write_parameter_sets(large, sizeof(large), &pp, NULL, 0, 1) < 0);
 }
 
@@ -442,6 +556,8 @@ int main(int argc, char **argv)
     }
     test_slice_info();
     test_reference_sets_and_pps();
+    test_slice_rps_rewrite();
+    test_pps_uniform_tile_spacing();
     test_scaling_lists();
     test_rejection();
     puts("HEVC reconstruction tests: OK");

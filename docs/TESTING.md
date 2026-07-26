@@ -31,6 +31,13 @@ the dynamic loader's symbols before it can start.
 and refcounted destruction under ThreadSanitizer. The full two-decoder TSan
 gate remains a Phase 1 exit requirement.
 
+When changing driver-wide compile wiring, also build the instrumented driver
+artifacts directly:
+
+```sh
+make tests/.tsan-driver/rockchip_drv_video.so
+```
+
 ## Pinned conformance vectors
 
 The manifest at `tests/conformance-vectors.tsv` pins both the downloaded file
@@ -88,9 +95,30 @@ FFMPEG=/usr/bin/ffmpeg make check-concurrent-decode
 FFMPEG=/usr/bin/ffmpeg make check-concurrent-decode-sanitize
 FFMPEG=/usr/bin/ffmpeg make check-concurrent-decode-tsan
 FFMPEG=/usr/bin/ffmpeg make check-soak
+FFMPEG=/usr/bin/ffmpeg make check-hevc-experimental
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-conformance
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-sanitize
 ```
+
+`check-hevc-experimental` sets
+`RK_VAAPI_EXPERIMENTAL_PROFILES=hevc-main` through the validator, runs only
+the pinned HEVC vectors, and fails fast with a bounded FFmpeg timeout. It is a
+Phase 2 development gate, not a release gate: HEVC remains unadvertised until
+this target is bit-exact. On 2026-07-26 it fails on
+`LTRPSPS_A_Qualcomm_1.bit` with
+`unsupported HEVC SPS long-term refs count=8`. Direct MPP decode of the
+original Annex B stream works, but VA-API omits the SPS long-term reference POC
+table that this stream uses, so the driver rejects that state fail-closed
+rather than emitting guessed parameter sets. Focused forced-hardware probes also
+show `SLIST_A_Sony_4.bit` is fail-closed for scaling-list + SPS-RPS state,
+while `PPS_A_qualcomm_7.bit` and `RPS_A_docomo_4.bit` complete with 14/81 and
+7/44 frame mismatches respectively.
+
+For the 10-bit Phase 2 gate, the board must run a kernel/librga pair whose
+standalone RGA NV15/P010 probes pass; the prior standalone P010/librga blocker
+is fixed on the tested stack. The driver converts MPP's compact NV15 output to
+P010 with librga and intentionally keeps Main10 / VP9 Profile 2 hidden until
+that stack also passes the VA-API conformance and HDR playback checks.
 
 The object-lifecycle gate crosses every former fixed-array ceiling, validates
 all five typed handle namespaces and stale-handle rejection, and creates nine
