@@ -467,6 +467,14 @@ decode errors, buffer mismatch, or linear 10-bit fallback. DMABuf display-sink
 and HDR presentation remain open, so this closes one app/readback slice rather
 than the GStreamer matrix row.
 
+**Progress (2026-07-26, VLC environment probe):** Stock VLC 3.0.23 includes
+its `vaapi`/`vaapi_drm` decoder plugins and libavcodec selects VAAPI as an
+available H.264 output format. In the current headless login, however, dummy
+video output supplies no hardware decoder device; VLC reports `no hw decoder
+modules matched`, falls back to software, and never loads this driver. There is
+no Wayland/X11 socket in the session. A valid VLC gate therefore requires a
+real display/DRM session; headless playback success is not hardware evidence.
+
 **Progress (2026-07-26, packaging slice):** Debian packaging now declares its
 RGA build dependency and produces separate `rockchip-vaapi` and
 `rockchip-vaapi-config` packages. The optional config package selects the
