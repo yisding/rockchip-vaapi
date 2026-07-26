@@ -151,10 +151,12 @@ remains hidden pending pinned Profile 2 conformance and HDR playback gates.
 
 The object-lifecycle gate crosses every former fixed-array ceiling, validates
 all five typed handle namespaces and stale-handle rejection, and creates nine
-simultaneous MPP decode contexts. It also checks immediate success for a
-placeholder surface, zero-timeout behavior for a pending fence, and failure
-signaling when that fence's context is destroyed. Its sanitized and TSan
-variants apply ASan/UBSan and thread-race checking to the complete lifecycle.
+simultaneous MPP decode contexts. It also checks immediate success for NV12
+and P010 placeholder surfaces, validates composed P010 and split R16/GR1616
+descriptors before decode, rejects inconsistent RT/pixel formats, checks
+zero-timeout behavior for a pending fence, and checks failure signaling when
+that fence's context is destroyed. Its sanitized and TSan variants apply
+ASan/UBSan and thread-race checking to the complete lifecycle.
 
 The zero-copy gate runs the synthetic H.264 reference/B-frame matrix, 4K
 decode, and five VP9 runs while auditing the driver log. It requires at least

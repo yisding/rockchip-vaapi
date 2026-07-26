@@ -15,4 +15,8 @@ bool rk_p010_layout_size(size_t pixel_stride, size_t vertical_stride,
 /* Conservative 8-bit MPP decode allocation, including codec/HAL side data. */
 bool rk_surface_buffer_size(unsigned width, unsigned height, size_t *size_out);
 
+/* Pre-decode export allocation large enough for the declared linear format. */
+bool rk_surface_placeholder_size(unsigned width, unsigned height, bool is_10bit,
+                                 size_t *size_out);
+
 #endif

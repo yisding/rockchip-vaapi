@@ -1,6 +1,7 @@
 #include "surface.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -40,12 +41,10 @@ static void surface_destroy(void *opaque) {
     free(surface);
 }
 
-/* vaCreateSurfaces (old API, redirected) */
-VAStatus rk_CreateSurfaces(VADriverContextP ctx,
-                                   int width, int height, int format,
-                                   int n, VASurfaceID *ids) {
+static VAStatus create_surfaces(VADriverContextP ctx, int width, int height,
+                                int n, VASurfaceID *ids, bool is_10bit)
+{
     RKDriver *d = drv_from_ctx(ctx);
-    (void)format;
 
     if (width <= 0 || height <= 0 || n < 0 || (n > 0 && !ids))
         return VA_STATUS_ERROR_INVALID_PARAMETER;
@@ -60,6 +59,8 @@ VAStatus rk_CreateSurfaces(VADriverContextP ctx,
         rk_object_init(&surf->base, surface_destroy);
         surf->width    = width;
         surf->height   = height;
+        surf->fmt      = is_10bit ? MPP_FMT_YUV420SP_10BIT
+                                  : MPP_FMT_YUV420SP;
 
         if (pthread_mutex_init(&surf->lock, NULL) != 0) {
             free(surf);
@@ -77,8 +78,9 @@ VAStatus rk_CreateSurfaces(VADriverContextP ctx,
             size_t alloc_size = 0;
             MppBufferGroup grp = NULL;
             MppBuffer      buf = NULL;
-            if (rk_surface_buffer_size((unsigned)width, (unsigned)height,
-                                       &alloc_size) &&
+            if (rk_surface_placeholder_size((unsigned)width,
+                                            (unsigned)height, is_10bit,
+                                            &alloc_size) &&
                 mpp_buffer_group_get_internal(&grp, MPP_BUFFER_TYPE_DRM) == MPP_OK &&
                 mpp_buffer_get(grp, &buf, alloc_size) == MPP_OK) {
                 int raw_fd = mpp_buffer_get_fd(buf);
@@ -87,9 +89,10 @@ VAStatus rk_CreateSurfaces(VADriverContextP ctx,
                     surf->priv_buf   = buf;
                     surf->hstride    = (int)((width  + 15) & ~15);
                     surf->vstride    = (int)((height + 15) & ~15);
-                    LOG("CreateSurfaces: surface %ux%u placeholder fd=%d size=%zu",
+                    LOG("CreateSurfaces: surface %ux%u placeholder fd=%d "
+                        "size=%zu format=%s",
                         (unsigned)width, (unsigned)height, raw_fd,
-                        mpp_buffer_get_size(buf));
+                        mpp_buffer_get_size(buf), is_10bit ? "P010" : "NV12");
                 } else {
                     LOG("CreateSurfaces: mpp_buffer_get_fd failed (raw_fd=%d), no placeholder", raw_fd);
                     mpp_buffer_put(buf);
@@ -132,6 +135,18 @@ rollback:
     return VA_STATUS_ERROR_ALLOCATION_FAILED;
 }
 
+/* vaCreateSurfaces (old API, redirected) */
+VAStatus rk_CreateSurfaces(VADriverContextP ctx,
+                           int width, int height, int format,
+                           int n, VASurfaceID *ids)
+{
+    if (format != VA_RT_FORMAT_YUV420 &&
+        format != VA_RT_FORMAT_YUV420_10)
+        return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
+    return create_surfaces(ctx, width, height, n, ids,
+                           format == VA_RT_FORMAT_YUV420_10);
+}
+
 VAStatus rk_DestroySurfaces(VADriverContextP ctx,
                                     VASurfaceID *list, int n) {
     LOG("DestroySurfaces: n=%d", n);
@@ -149,21 +164,44 @@ VAStatus rk_DestroySurfaces(VADriverContextP ctx,
 
 /* vaCreateSurfaces2 (new API with attributes) */
 VAStatus rk_CreateSurfaces2(VADriverContextP ctx,
-                                    unsigned int format,
-                                    unsigned int width, unsigned int height,
-                                    VASurfaceID *ids, unsigned int n,
-                                    VASurfaceAttrib *attribs,
-                                    unsigned int n_attribs) {
+                            unsigned int format,
+                            unsigned int width, unsigned int height,
+                            VASurfaceID *ids, unsigned int n,
+                            VASurfaceAttrib *attribs,
+                            unsigned int n_attribs)
+{
     LOG("CreateSurfaces2: %ux%u fmt=0x%x n=%u n_attribs=%u",
         width, height, format, n, n_attribs);
+    if ((n_attribs > 0 && !attribs) || width > INT_MAX ||
+        height > INT_MAX || n > INT_MAX)
+        return VA_STATUS_ERROR_INVALID_PARAMETER;
+
+    uint32_t fourcc;
+    if (format == VA_RT_FORMAT_YUV420)
+        fourcc = VA_FOURCC_NV12;
+    else if (format == VA_RT_FORMAT_YUV420_10)
+        fourcc = VA_FOURCC_P010;
+    else
+        return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
+
     for (unsigned i = 0; i < n_attribs; i++) {
         LOG("  attrib[%u] type=%d flags=%d value=0x%x",
             i, attribs[i].type, attribs[i].flags,
             attribs[i].value.type == VAGenericValueTypeInteger
                 ? (unsigned)attribs[i].value.value.i : 0u);
+        if (attribs[i].type != VASurfaceAttribPixelFormat)
+            continue;
+        if (attribs[i].value.type != VAGenericValueTypeInteger)
+            return VA_STATUS_ERROR_INVALID_PARAMETER;
+        uint32_t requested = (uint32_t)attribs[i].value.value.i;
+        if (requested != VA_FOURCC_NV12 && requested != VA_FOURCC_P010)
+            return VA_STATUS_ERROR_ATTR_NOT_SUPPORTED;
+        if (requested != fourcc)
+            return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
     }
-    return rk_CreateSurfaces(ctx, (int)width, (int)height, (int)format,
-                              (int)n, ids);
+
+    return create_surfaces(ctx, (int)width, (int)height, (int)n, ids,
+                           fourcc == VA_FOURCC_P010);
 }
 
 static VAStatus sync_surface_timeout(VADriverContextP ctx, VASurfaceID id,
@@ -339,4 +377,3 @@ VAStatus rk_GetImage(VADriverContextP ctx, VASurfaceID surface_id,
     rk_object_unref(&s->base);
     return sync_ok ? VA_STATUS_SUCCESS : VA_STATUS_ERROR_OPERATION_FAILED;
 }
-

@@ -34,10 +34,26 @@ static void test_bounds_rejection(void)
     assert(!rk_surface_buffer_size(UINT32_MAX, UINT32_MAX, &size));
 }
 
+static void test_placeholder_formats(void)
+{
+    size_t placeholder_8bit;
+    size_t placeholder_10bit;
+
+    assert(rk_surface_placeholder_size(7680, 4320, false,
+                                       &placeholder_8bit));
+    assert(rk_surface_placeholder_size(7680, 4320, true,
+                                       &placeholder_10bit));
+    assert(placeholder_10bit >= 7680u * 4320u * 3u);
+    assert(placeholder_10bit > placeholder_8bit);
+    assert(!rk_surface_placeholder_size(0, 4320, true,
+                                        &placeholder_10bit));
+}
+
 int main(void)
 {
     test_vp9_odd_stride_surface();
     test_bounds_rejection();
+    test_placeholder_formats();
     puts("frame layout tests: OK");
     return 0;
 }

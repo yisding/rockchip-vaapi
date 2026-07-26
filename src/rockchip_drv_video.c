@@ -324,13 +324,15 @@ static VAStatus rk_QuerySurfaceAttrs(VADriverContextP ctx, VAConfigID config,
 
     /* Pixel format: NV12 (8-bit) */
     attrib_list[0].type              = VASurfaceAttribPixelFormat;
-    attrib_list[0].flags             = VA_SURFACE_ATTRIB_GETTABLE;
+    attrib_list[0].flags             = VA_SURFACE_ATTRIB_GETTABLE |
+                                       VA_SURFACE_ATTRIB_SETTABLE;
     attrib_list[0].value.type        = VAGenericValueTypeInteger;
     attrib_list[0].value.value.i     = VA_FOURCC_NV12;
 
     /* Pixel format: P010 (10-bit) */
     attrib_list[1].type              = VASurfaceAttribPixelFormat;
-    attrib_list[1].flags             = VA_SURFACE_ATTRIB_GETTABLE;
+    attrib_list[1].flags             = VA_SURFACE_ATTRIB_GETTABLE |
+                                       VA_SURFACE_ATTRIB_SETTABLE;
     attrib_list[1].value.type        = VAGenericValueTypeInteger;
     attrib_list[1].value.value.i     = VA_FOURCC_P010;
 

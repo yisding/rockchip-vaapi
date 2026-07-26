@@ -418,6 +418,14 @@ SPS deliberately keeps `vui_parameters_present_flag=0`. This contract is now
 tested instead of depending on MPP to reproduce application-facing metadata.
 Actual HDR presentation in Firefox and mpv remains an app/display-system gate.
 
+**Progress (2026-07-26, P010 consumer contract):** Surface creation now
+validates the requested RT format and `VASurfaceAttribPixelFormat`, records
+NV12 or P010 before decode, and sizes the placeholder DMA-BUF for its declared
+linear layout. A pre-decode P010 export therefore reports P010 rather than
+NV12 and is valid in both composed P010 and split R16/GR1616 forms. The
+driver-object gate checks both descriptors normally and under ASan/UBSan; the
+HDR Main10 and shipping-profile hardware regressions remain green.
+
 **Gate:** HEVC Main bit-exact vs software on conformance vectors; HEVC Main10 /
 VP9 P2 bit-exact after P010 repacking; HDR HEVC plays correctly in Firefox and
 mpv on-device.

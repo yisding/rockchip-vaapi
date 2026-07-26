@@ -56,3 +56,26 @@ bool rk_surface_buffer_size(unsigned width, unsigned height, size_t *size_out)
     *size_out = luma_size * 2;
     return true;
 }
+
+bool rk_surface_placeholder_size(unsigned width, unsigned height, bool is_10bit,
+                                 size_t *size_out)
+{
+    size_t conservative_size;
+    if (!rk_surface_buffer_size(width, height, &conservative_size))
+        return false;
+
+    if (is_10bit) {
+        size_t pixel_stride;
+        size_t vertical_stride;
+        size_t p010_size;
+        if (!align_up(width, 16, &pixel_stride) ||
+            !align_up(height, 16, &vertical_stride) ||
+            !rk_p010_layout_size(pixel_stride, vertical_stride, &p010_size))
+            return false;
+        if (p010_size > conservative_size)
+            conservative_size = p010_size;
+    }
+
+    *size_out = conservative_size;
+    return true;
+}

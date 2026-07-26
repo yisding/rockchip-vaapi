@@ -131,12 +131,12 @@ functions that actually do meaningful work are:
 |----------|------|
 | `rk_CreateConfig` | Validate profile/entrypoint; allocate `RKConfig` |
 | `rk_CreateContext` | `mpp_create` + `mpp_init`; retain render-target hints; allocate `RKContext` |
-| `rk_CreateSurfaces2` | Allocate `RKSurface` objects and pre-decode placeholder DMA-BUFs |
+| `rk_CreateSurfaces2` | Validate NV12/P010 attributes; allocate format-aware `RKSurface` objects and pre-decode placeholder DMA-BUFs |
 | `rk_CreateBuffer` | Allocate a dynamic, stale-safe `RKBuffer` object and copy caller data |
 | `rk_BeginPicture` | Reset the render target and advance its surface fence |
 | `rk_RenderPicture` | Collect buffer IDs into `pending[]` and snapshot H.264/HEVC picture and IQ state |
 | `rk_EndPicture` | Build an owned packet and enqueue it to the context worker |
-| `rk_QuerySurfaceAttrs` | Report NV12 + `DRM_PRIME_2` support (critical for Firefox) |
+| `rk_QuerySurfaceAttrs` | Report settable NV12/P010 + `DRM_PRIME_2` support (critical for Firefox) |
 | `rk_ExportSurfaceHandle` | Return `VADRMPRIMESurfaceDescriptor` with `dup()`'d DMABUF fd |
 | `rk_SyncSurface` / `rk_SyncSurface2` | Wait on the surface fence indefinitely or for the requested timeout |
 | `rk_Terminate` | Destroy MPP contexts; close fds; `free(RKDriver)` |
@@ -227,6 +227,11 @@ queued or routed fences before destroying MPP.
 Firefox calls `vaExportSurfaceHandle` with
 `VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2` to get a zero-copy handle to the
 surface's currently bound decode buffer (or its placeholder before decode).
+The surface's requested RT/pixel format is recorded at creation, so a
+pre-decode 10-bit capability probe receives a sufficiently sized P010 object
+with either a composed P010 layer or split R16/GR1616 layers. Decode later
+replaces the placeholder with the retained NV12 frame or converted P010
+backing buffer without changing that consumer-facing format contract.
 
 `rk_ExportSurfaceHandle` returns a `VADRMPRIMESurfaceDescriptor`:
 
@@ -322,7 +327,9 @@ MPP writes directly into the 24-buffer context pool. `assign_mpp_frame` keeps
 MPP's display-frame reference on the VA surface, so MPP cannot recycle that
 buffer while the application may still display it. Surface reuse drops the
 old frame, backing, and shared-pool references. A separate per-surface
-allocation remains only so pre-decode PRIME capability probes can succeed.
+allocation remains only so pre-decode PRIME capability probes can succeed. It
+uses the declared NV12/P010 format and is sized for the exported linear layout
+in addition to MPP's conservative alignment.
 
 The exact physical placement of the DRM allocations is platform-dependent.
 At 4K, the decode pool and GPU compositor can still put substantial pressure

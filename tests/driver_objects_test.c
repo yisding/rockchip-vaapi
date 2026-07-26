@@ -193,6 +193,70 @@ static void test_surfaces(struct VADriverVTable *v, VADriverContextP ctx,
         exit(1);
     }
     close(descriptor.objects[0].fd);
+
+    VASurfaceAttrib p010_format = {
+        .type = VASurfaceAttribPixelFormat,
+        .flags = VA_SURFACE_ATTRIB_SETTABLE,
+        .value = {
+            .type = VAGenericValueTypeInteger,
+            .value.i = VA_FOURCC_P010,
+        },
+    };
+    VASurfaceID p010_surface;
+    CHECK_STATUS(v->vaCreateSurfaces2(
+                     ctx, VA_RT_FORMAT_YUV420_10, 16, 16, &p010_surface, 1,
+                     &p010_format, 1),
+                 VA_STATUS_SUCCESS);
+
+    memset(&descriptor, 0, sizeof(descriptor));
+    CHECK_STATUS(v->vaExportSurfaceHandle(
+                     ctx, p010_surface,
+                     VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+                     VA_EXPORT_SURFACE_READ_ONLY |
+                         VA_EXPORT_SURFACE_COMPOSED_LAYERS,
+                     &descriptor),
+                 VA_STATUS_SUCCESS);
+    if (descriptor.fourcc != VA_FOURCC_P010 ||
+        descriptor.num_objects != 1 || descriptor.objects[0].fd < 0 ||
+        descriptor.objects[0].size < 16u * 16u * 3u ||
+        descriptor.num_layers != 1 ||
+        descriptor.layers[0].drm_format != VA_FOURCC_P010 ||
+        descriptor.layers[0].num_planes != 2 ||
+        descriptor.layers[0].pitch[0] != 32 ||
+        descriptor.layers[0].pitch[1] != 32 ||
+        descriptor.layers[0].offset[1] != 16u * 16u * 2u) {
+        fputs("P010 composed placeholder descriptor is invalid\n", stderr);
+        exit(1);
+    }
+    close(descriptor.objects[0].fd);
+
+    memset(&descriptor, 0, sizeof(descriptor));
+    CHECK_STATUS(v->vaExportSurfaceHandle(
+                     ctx, p010_surface,
+                     VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+                     VA_EXPORT_SURFACE_READ_ONLY |
+                         VA_EXPORT_SURFACE_SEPARATE_LAYERS,
+                     &descriptor),
+                 VA_STATUS_SUCCESS);
+    if (descriptor.fourcc != VA_FOURCC_P010 ||
+        descriptor.num_layers != 2 ||
+        descriptor.layers[0].drm_format != 0x20363152 ||
+        descriptor.layers[1].drm_format != 0x36315247 ||
+        descriptor.layers[0].pitch[0] != 32 ||
+        descriptor.layers[1].pitch[0] != 32 ||
+        descriptor.layers[1].offset[0] != 16u * 16u * 2u) {
+        fputs("P010 split placeholder descriptor is invalid\n", stderr);
+        exit(1);
+    }
+    close(descriptor.objects[0].fd);
+    CHECK_STATUS(v->vaDestroySurfaces(ctx, &p010_surface, 1),
+                 VA_STATUS_SUCCESS);
+
+    p010_format.value.value.i = VA_FOURCC_NV12;
+    CHECK_STATUS(v->vaCreateSurfaces2(
+                     ctx, VA_RT_FORMAT_YUV420_10, 16, 16, &p010_surface, 1,
+                     &p010_format, 1),
+                 VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
 }
 
 static void test_contexts(struct VADriverVTable *v, VADriverContextP ctx,
