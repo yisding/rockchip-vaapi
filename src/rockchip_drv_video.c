@@ -88,14 +88,32 @@ static bool experimental_profile_enabled(const char *profile)
            !strcmp(enabled, profile);
 }
 
-static bool experimental_h264_encode_enabled(void)
+static bool experimental_encode_enabled(const char *codec)
 {
     const char *enabled = getenv("RK_VAAPI_EXPERIMENTAL_ENCODE");
-    return enabled && (!strcmp(enabled, "1") || !strcmp(enabled, "all") ||
-                       !strcmp(enabled, "h264"));
+    if (!enabled || !enabled[0] || !strcmp(enabled, "0"))
+        return false;
+    if (!strcmp(enabled, "1") || !strcmp(enabled, "all"))
+        return true;
+
+    size_t codec_len = strlen(codec);
+    const char *cursor = enabled;
+    while (*cursor) {
+        while (*cursor == ',' || *cursor == ' ' || *cursor == '\t')
+            cursor++;
+        const char *end = cursor;
+        while (*end && *end != ',' && *end != ' ' && *end != '\t')
+            end++;
+        if ((size_t)(end - cursor) == codec_len &&
+            !memcmp(cursor, codec, codec_len))
+            return true;
+        cursor = end;
+    }
+    return false;
 }
 
-static bool profile_supported(VAProfile p) {
+static bool decode_profile_supported(VAProfile p)
+{
     switch (p) {
     case VAProfileH264Main:
     case VAProfileH264High:
@@ -110,6 +128,44 @@ static bool profile_supported(VAProfile p) {
     default:
         return false;
     }
+}
+
+static bool encode_profile_supported(VAProfile profile)
+{
+    return ((profile == VAProfileH264Main ||
+             profile == VAProfileH264High) &&
+            experimental_encode_enabled("h264")) ||
+           (profile == VAProfileHEVCMain &&
+            experimental_encode_enabled("hevc"));
+}
+
+static bool profile_supported(VAProfile profile)
+{
+    return decode_profile_supported(profile) ||
+           encode_profile_supported(profile);
+}
+
+static uint32_t hevc_encode_features(void)
+{
+    VAConfigAttribValEncHEVCFeatures features = { .value = 0 };
+    return features.value;
+}
+
+static uint32_t hevc_encode_block_sizes(void)
+{
+    VAConfigAttribValEncHEVCBlockSizes sizes = { .value = 0 };
+    sizes.bits.log2_max_coding_tree_block_size_minus3 = 3;
+    sizes.bits.log2_min_coding_tree_block_size_minus3 = 3;
+    sizes.bits.log2_min_luma_coding_block_size_minus3 = 0;
+    sizes.bits.log2_max_luma_transform_block_size_minus2 = 3;
+    sizes.bits.log2_min_luma_transform_block_size_minus2 = 0;
+    sizes.bits.max_max_transform_hierarchy_depth_inter = 1;
+    sizes.bits.min_max_transform_hierarchy_depth_inter = 1;
+    sizes.bits.max_max_transform_hierarchy_depth_intra = 1;
+    sizes.bits.min_max_transform_hierarchy_depth_intra = 1;
+    sizes.bits.log2_max_pcm_coding_block_size_minus3 = 2;
+    sizes.bits.log2_min_pcm_coding_block_size_minus3 = 0;
+    return sizes.value;
 }
 
 static VAStatus rk_QueryConfigProfiles(VADriverContextP ctx,
@@ -136,9 +192,9 @@ static VAStatus rk_QueryConfigEntrypoints(VADriverContextP ctx,
     if (!profile_supported(profile))
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
     int count = 0;
-    list[count++] = VAEntrypointVLD;
-    if ((profile == VAProfileH264Main || profile == VAProfileH264High) &&
-        experimental_h264_encode_enabled())
+    if (decode_profile_supported(profile))
+        list[count++] = VAEntrypointVLD;
+    if (encode_profile_supported(profile))
         list[count++] = VAEntrypointEncSlice;
     *n = count;
     return VA_STATUS_SUCCESS;
@@ -150,9 +206,7 @@ static VAStatus rk_GetConfigAttributes(VADriverContextP ctx,
                                        VAConfigAttrib *list, int n) {
     (void)ctx;
     bool encode = entrypoint == VAEntrypointEncSlice;
-    if (encode && (!experimental_h264_encode_enabled() ||
-                   (profile != VAProfileH264Main &&
-                    profile != VAProfileH264High)))
+    if (encode && !encode_profile_supported(profile))
         return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
     for (int i = 0; i < n; i++) {
         LOG("GetConfigAttributes: type=%d", list[i].type);
@@ -195,6 +249,16 @@ static VAStatus rk_GetConfigAttributes(VADriverContextP ctx,
         case VAConfigAttribMaxPictureHeight:
             list[i].value = encode ? RK_MAX_HEIGHT : VA_ATTRIB_NOT_SUPPORTED;
             break;
+        case VAConfigAttribEncHEVCFeatures:
+            list[i].value = encode && profile == VAProfileHEVCMain
+                          ? hevc_encode_features()
+                          : VA_ATTRIB_NOT_SUPPORTED;
+            break;
+        case VAConfigAttribEncHEVCBlockSizes:
+            list[i].value = encode && profile == VAProfileHEVCMain
+                          ? hevc_encode_block_sizes()
+                          : VA_ATTRIB_NOT_SUPPORTED;
+            break;
         case VAConfigAttribDecSliceMode:
             list[i].value = encode ? VA_ATTRIB_NOT_SUPPORTED
                                    : VA_DEC_SLICE_MODE_NORMAL;
@@ -227,9 +291,10 @@ static VAStatus rk_CreateConfig(VADriverContextP ctx,
         LOG("CreateConfig: unsupported entrypoint %d", entrypoint);
         return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
     }
-    if (encode && (!experimental_h264_encode_enabled() ||
-                   (profile != VAProfileH264Main &&
-                    profile != VAProfileH264High)))
+    if (entrypoint == VAEntrypointVLD &&
+        !decode_profile_supported(profile))
+        return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
+    if (encode && !encode_profile_supported(profile))
         return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
     if (n_attribs < 0 || (n_attribs > 0 && !attribs))
         return VA_STATUS_ERROR_INVALID_PARAMETER;

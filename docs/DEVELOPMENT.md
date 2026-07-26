@@ -436,25 +436,29 @@ corrupt output. HEVC stays hidden until the pinned gate is bit-exact.
 
 ---
 
-## H.264 encode pipeline (experimental)
+## H.264 and HEVC encode pipeline (experimental)
 
-`RK_VAAPI_EXPERIMENTAL_ENCODE=h264` adds `VAEntrypointEncSlice` to H.264
-Main/High without changing default capabilities. The encoder config stores the
-selected CQP, CBR, or VBR mode. `vaRenderPicture` snapshots sequence, picture,
-slice, and supported misc parameters before applications can destroy those VA
-buffers; `mpp_enc.c` maps them to MPP prep/rate-control/H.264 keys.
+`RK_VAAPI_EXPERIMENTAL_ENCODE=h264`, `hevc`, or `h264,hevc` adds
+`VAEntrypointEncSlice` to H.264 Main/High and HEVC Main without changing
+default capabilities. The encoder config stores the selected CQP, CBR, or VBR
+mode. `vaRenderPicture` snapshots codec-specific sequence, picture, slice, and
+supported misc parameters before applications can destroy those VA buffers;
+`mpp_enc.c` maps them to common MPP prep/rate-control plus H.264 or HEVC keys.
+HEVC advertises RK3588 MPP's native 64x64 CTU, 8x8 minimum coding-block, and
+4x4-to-32x32 transform contract so applications do not guess 32x32 CTUs.
 
 System-memory upload uses `vaCreateImage` plus `vaPutImage`. The latter now
 performs a checked NV12 copy into the surface DMA-BUF with explicit CPU
 synchronization. `vaEndPicture` submits that buffer to rkvenc2, waits for one
 MPP packet, and publishes it through a `VACodedBufferSegment`. MPP emits
-SPS/PPS on each IDR. Coded-buffer overflow fails closed.
+H.264 SPS/PPS or HEVC VPS/SPS/PPS on each IDR. Coded-buffer overflow fails
+closed.
 
 The current boundary is deliberately narrow: progressive NV12, one complete
-frame-level slice, MPP-managed references, and synchronous completion. P010,
-RGA input conversion, packed application headers, B-frames, multi-slice,
-HEVC, and WebRTC integration are not advertised. This also avoids exercising
-the kernel's historically vulnerable multi-slice FIFO path.
+frame-level macroblock/CTU slice, MPP-managed references, and synchronous
+completion. P010, RGA input conversion, packed application headers, B-frames,
+multi-slice, and WebRTC integration are not advertised. This also avoids
+exercising the kernel's historically vulnerable multi-slice FIFO path.
 
 ---
 
@@ -486,8 +490,9 @@ config package deliberately do not weaken that sandbox.
   VP9 Profile 2 has a separate bit-exact 48-frame gate through the same
   conversion path. Both remain unadvertised until broader conformance and HDR
   gates pass. VP8 and AV1 are also unadvertised.
-- H.264 encode is experimental and restricted to full-frame NV12 with one
-  slice. It is not exposed unless `RK_VAAPI_EXPERIMENTAL_ENCODE=h264` is set.
+- H.264 and HEVC encode are experimental and restricted to full-frame NV12
+  with one slice. They are exposed only through
+  `RK_VAAPI_EXPERIMENTAL_ENCODE`.
 
 ---
 

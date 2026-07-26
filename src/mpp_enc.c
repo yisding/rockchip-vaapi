@@ -40,20 +40,49 @@ static int32_t bounded_bitrate(int64_t value)
     return (int32_t)value;
 }
 
+static uint32_t encoder_bitrate(const RKContext *context)
+{
+    if (context->enc_bitrate)
+        return context->enc_bitrate;
+    return context->coding == MPP_VIDEO_CodingHEVC
+         ? context->enc_hevc_seq.bits_per_second
+         : context->enc_seq.bits_per_second;
+}
+
+static uint32_t encoder_gop(const RKContext *context)
+{
+    uint32_t value = context->coding == MPP_VIDEO_CodingHEVC
+                   ? context->enc_hevc_seq.intra_period
+                   : context->enc_seq.intra_period;
+    return value ? value : 60;
+}
+
+static int32_t encoder_qp(const RKContext *context)
+{
+    uint8_t value = context->coding == MPP_VIDEO_CodingHEVC
+                  ? context->enc_hevc_pic.pic_init_qp
+                  : context->enc_pic.pic_init_qp;
+    return value >= 1 && value <= 51 ? value : 26;
+}
+
+static uint32_t hevc_ctu_size(const RKContext *context)
+{
+    const VAEncSequenceParameterBufferHEVC *seq = &context->enc_hevc_seq;
+    unsigned int log2_size =
+        3u + seq->log2_min_luma_coding_block_size_minus3 +
+        seq->log2_diff_max_min_luma_coding_block_size;
+    return log2_size <= 6 ? 1u << log2_size : 0;
+}
+
 static bool configure_encoder(RKContext *context)
 {
-    const VAEncSequenceParameterBufferH264 *seq = &context->enc_seq;
-    const VAEncPictureParameterBufferH264 *pic = &context->enc_pic;
     int32_t hstride = (context->width + 15) & ~15;
     int32_t vstride = (context->height + 15) & ~15;
-    int32_t bitrate = bounded_bitrate(context->enc_bitrate
-                                   ? context->enc_bitrate
-                                   : seq->bits_per_second
-                                   ? seq->bits_per_second : 2000000);
-    int32_t gop = seq->intra_period
-                ? (int32_t)seq->intra_period : 60;
-    int32_t qp = pic->pic_init_qp >= 1 && pic->pic_init_qp <= 51
-               ? pic->pic_init_qp : 26;
+    uint32_t requested_bitrate = encoder_bitrate(context);
+    int32_t bitrate = bounded_bitrate(requested_bitrate
+                                   ? requested_bitrate : 2000000);
+    int32_t gop = (int32_t)encoder_gop(context);
+    int32_t qp = encoder_qp(context);
     uint32_t rc_mode = mpp_rc_mode(context->rate_control);
     uint32_t fps_num = context->enc_fps_num ? context->enc_fps_num : 30;
     uint32_t fps_den = context->enc_fps_den ? context->enc_fps_den : 1;
@@ -71,17 +100,60 @@ static bool configure_encoder(RKContext *context)
         !enc_set_s32(context->enc_cfg, "rc:fps_out_denom", (int32_t)fps_den) ||
         !enc_set_s32(context->enc_cfg, "rc:gop", gop) ||
         !enc_set_s32(context->enc_cfg, "rc:mode", (int32_t)rc_mode) ||
-        !enc_set_s32(context->enc_cfg, "rc:qp_init", qp) ||
-        !enc_set_s32(context->enc_cfg, "h264:profile",
-                     context->profile == VAProfileH264High ? 100 : 77) ||
-        !enc_set_s32(context->enc_cfg, "h264:level",
-                     seq->level_idc ? seq->level_idc : 40) ||
-        !enc_set_s32(context->enc_cfg, "h264:cabac_en",
-                     pic->pic_fields.bits.entropy_coding_mode_flag) ||
-        !enc_set_s32(context->enc_cfg, "h264:cabac_idc", 0) ||
-        !enc_set_s32(context->enc_cfg, "h264:trans8x8",
-                     pic->pic_fields.bits.transform_8x8_mode_flag)) {
+        !enc_set_s32(context->enc_cfg, "rc:qp_init", qp)) {
         return false;
+    }
+
+    if (context->coding == MPP_VIDEO_CodingAVC) {
+        const VAEncSequenceParameterBufferH264 *seq = &context->enc_seq;
+        const VAEncPictureParameterBufferH264 *pic = &context->enc_pic;
+        if (!enc_set_s32(context->enc_cfg, "h264:profile",
+                         context->profile == VAProfileH264High ? 100 : 77) ||
+            !enc_set_s32(context->enc_cfg, "h264:level",
+                         seq->level_idc ? seq->level_idc : 40) ||
+            !enc_set_s32(context->enc_cfg, "h264:cabac_en",
+                         pic->pic_fields.bits.entropy_coding_mode_flag) ||
+            !enc_set_s32(context->enc_cfg, "h264:cabac_idc", 0) ||
+            !enc_set_s32(context->enc_cfg, "h264:trans8x8",
+                         pic->pic_fields.bits.transform_8x8_mode_flag))
+            return false;
+    } else {
+        const VAEncSequenceParameterBufferHEVC *seq =
+            &context->enc_hevc_seq;
+        const VAEncPictureParameterBufferHEVC *pic =
+            &context->enc_hevc_pic;
+        const VAEncSliceParameterBufferHEVC *slice =
+            &context->enc_hevc_slice;
+        if (!enc_set_s32(context->enc_cfg, "h265:profile",
+                         seq->general_profile_idc) ||
+            !enc_set_s32(context->enc_cfg, "h265:tier",
+                         seq->general_tier_flag) ||
+            !enc_set_s32(context->enc_cfg, "h265:level",
+                         seq->general_level_idc
+                             ? seq->general_level_idc : 120) ||
+            !enc_set_s32(context->enc_cfg, "h265:lcu_size",
+                         (int32_t)hevc_ctu_size(context)) ||
+            !enc_set_s32(context->enc_cfg,
+                         "h265:diff_cu_qp_delta_depth",
+                         pic->diff_cu_qp_delta_depth) ||
+            !enc_set_s32(context->enc_cfg, "h265:cb_qp_offset",
+                         pic->pps_cb_qp_offset) ||
+            !enc_set_s32(context->enc_cfg, "h265:cr_qp_offset",
+                         pic->pps_cr_qp_offset) ||
+            !enc_set_s32(context->enc_cfg, "h265:const_intra",
+                         pic->pic_fields.bits.constrained_intra_pred_flag) ||
+            !enc_set_s32(context->enc_cfg, "h265:sao_luma_disable",
+                         !slice->slice_fields.bits.slice_sao_luma_flag) ||
+            !enc_set_s32(context->enc_cfg, "h265:sao_chroma_disable",
+                         !slice->slice_fields.bits.slice_sao_chroma_flag) ||
+            !enc_set_s32(context->enc_cfg, "h265:dblk_disable",
+                         slice->slice_fields.bits
+                             .slice_deblocking_filter_disabled_flag != 0) ||
+            !enc_set_s32(context->enc_cfg, "h265:dblk_alpha",
+                         slice->slice_beta_offset_div2) ||
+            !enc_set_s32(context->enc_cfg, "h265:dblk_beta",
+                         slice->slice_tc_offset_div2))
+            return false;
     }
 
     if (rc_mode == MPP_ENC_RC_MODE_FIXQP) {
@@ -147,29 +219,107 @@ VAStatus rk_mpp_enc_render_buffer(RKContext *context, RKBuffer *buffer)
     size_t bytes = (size_t)buffer->size * buffer->num_elements;
     switch (buffer->type) {
     case VAEncSequenceParameterBufferType:
-        if (bytes < sizeof(context->enc_seq))
-            return VA_STATUS_ERROR_INVALID_BUFFER;
-        memcpy(&context->enc_seq, buffer->data, sizeof(context->enc_seq));
-        if (!context->enc_seq.picture_width_in_mbs ||
-            !context->enc_seq.picture_height_in_mbs ||
-            context->enc_seq.picture_width_in_mbs !=
-                (uint16_t)((context->width + 15) / 16) ||
-            context->enc_seq.picture_height_in_mbs !=
-                (uint16_t)((context->height + 15) / 16) ||
-            context->enc_seq.intra_period > INT_MAX)
-            return VA_STATUS_ERROR_INVALID_PARAMETER;
+        if (context->coding == MPP_VIDEO_CodingAVC) {
+            if (bytes < sizeof(context->enc_seq))
+                return VA_STATUS_ERROR_INVALID_BUFFER;
+            memcpy(&context->enc_seq, buffer->data, sizeof(context->enc_seq));
+            if (!context->enc_seq.picture_width_in_mbs ||
+                !context->enc_seq.picture_height_in_mbs ||
+                context->enc_seq.picture_width_in_mbs !=
+                    (uint16_t)((context->width + 15) / 16) ||
+                context->enc_seq.picture_height_in_mbs !=
+                    (uint16_t)((context->height + 15) / 16) ||
+                context->enc_seq.intra_period > INT_MAX)
+                return VA_STATUS_ERROR_INVALID_PARAMETER;
+        } else {
+            if (bytes < sizeof(context->enc_hevc_seq))
+                return VA_STATUS_ERROR_INVALID_BUFFER;
+            memcpy(&context->enc_hevc_seq, buffer->data,
+                   sizeof(context->enc_hevc_seq));
+            const VAEncSequenceParameterBufferHEVC *seq =
+                &context->enc_hevc_seq;
+            if (seq->general_profile_idc != 1 ||
+                seq->pic_width_in_luma_samples != context->width ||
+                seq->pic_height_in_luma_samples != context->height ||
+                seq->seq_fields.bits.chroma_format_idc != 1 ||
+                seq->seq_fields.bits.separate_colour_plane_flag ||
+                seq->seq_fields.bits.bit_depth_luma_minus8 ||
+                seq->seq_fields.bits.bit_depth_chroma_minus8 ||
+                seq->seq_fields.bits.scaling_list_enabled_flag ||
+                seq->seq_fields.bits.pcm_enabled_flag ||
+                seq->ip_period > 1 || seq->intra_period > INT_MAX ||
+                !hevc_ctu_size(context))
+                return VA_STATUS_ERROR_INVALID_PARAMETER;
+            LOG("HEVC encoder sequence profile=%u level=%u %ux%u "
+                "va_ctu=%u gop=%u ip=%u bitrate=%u",
+                seq->general_profile_idc, seq->general_level_idc,
+                seq->pic_width_in_luma_samples,
+                seq->pic_height_in_luma_samples, hevc_ctu_size(context),
+                seq->intra_period, seq->ip_period, seq->bits_per_second);
+        }
         context->has_enc_seq = true;
         return VA_STATUS_SUCCESS;
     case VAEncPictureParameterBufferType:
-        if (bytes < sizeof(context->enc_pic))
-            return VA_STATUS_ERROR_INVALID_BUFFER;
-        memcpy(&context->enc_pic, buffer->data, sizeof(context->enc_pic));
+        if (context->coding == MPP_VIDEO_CodingAVC) {
+            if (bytes < sizeof(context->enc_pic))
+                return VA_STATUS_ERROR_INVALID_BUFFER;
+            memcpy(&context->enc_pic, buffer->data,
+                   sizeof(context->enc_pic));
+        } else {
+            if (bytes < sizeof(context->enc_hevc_pic))
+                return VA_STATUS_ERROR_INVALID_BUFFER;
+            memcpy(&context->enc_hevc_pic, buffer->data,
+                   sizeof(context->enc_hevc_pic));
+            const VAEncPictureParameterBufferHEVC *pic =
+                &context->enc_hevc_pic;
+            if (pic->num_tile_columns_minus1 ||
+                pic->num_tile_rows_minus1 ||
+                pic->pic_fields.bits.tiles_enabled_flag ||
+                pic->pic_fields.bits.scaling_list_data_present_flag ||
+                pic->pic_fields.bits.weighted_pred_flag ||
+                pic->pic_fields.bits.weighted_bipred_flag ||
+                pic->pic_fields.bits.coding_type < 1 ||
+                pic->pic_fields.bits.coding_type > 2 ||
+                pic->diff_cu_qp_delta_depth > 2)
+                return VA_STATUS_ERROR_INVALID_PARAMETER;
+            LOG("HEVC encoder picture qp=%u diff_cu_qp=%u coding=%u "
+                "idr=%u sao=%u weighted=%u/%u",
+                pic->pic_init_qp, pic->diff_cu_qp_delta_depth,
+                pic->pic_fields.bits.coding_type,
+                pic->pic_fields.bits.idr_pic_flag,
+                context->enc_hevc_seq.seq_fields.bits
+                    .sample_adaptive_offset_enabled_flag,
+                pic->pic_fields.bits.weighted_pred_flag,
+                pic->pic_fields.bits.weighted_bipred_flag);
+        }
         context->has_enc_pic = true;
         return VA_STATUS_SUCCESS;
     case VAEncSliceParameterBufferType:
-        if (buffer->num_elements != 1 || bytes < sizeof(context->enc_slice))
+        if (buffer->num_elements != 1)
             return VA_STATUS_ERROR_INVALID_BUFFER;
-        memcpy(&context->enc_slice, buffer->data, sizeof(context->enc_slice));
+        if (context->coding == MPP_VIDEO_CodingAVC) {
+            if (bytes < sizeof(context->enc_slice))
+                return VA_STATUS_ERROR_INVALID_BUFFER;
+            memcpy(&context->enc_slice, buffer->data,
+                   sizeof(context->enc_slice));
+        } else {
+            if (bytes < sizeof(context->enc_hevc_slice))
+                return VA_STATUS_ERROR_INVALID_BUFFER;
+            memcpy(&context->enc_hevc_slice, buffer->data,
+                   sizeof(context->enc_hevc_slice));
+            LOG("HEVC encoder slice address=%u ctus=%u type=%u last=%u "
+                "qp_delta=%d sao=%u/%u",
+                context->enc_hevc_slice.slice_segment_address,
+                context->enc_hevc_slice.num_ctu_in_slice,
+                context->enc_hevc_slice.slice_type,
+                context->enc_hevc_slice.slice_fields.bits
+                    .last_slice_of_pic_flag,
+                context->enc_hevc_slice.slice_qp_delta,
+                context->enc_hevc_slice.slice_fields.bits
+                    .slice_sao_luma_flag,
+                context->enc_hevc_slice.slice_fields.bits
+                    .slice_sao_chroma_flag);
+        }
         context->has_enc_slice = true;
         return VA_STATUS_SUCCESS;
     case VAEncMiscParameterBufferType: {
@@ -208,14 +358,32 @@ VAStatus rk_mpp_enc_encode(RKContext *context)
     if (!context->has_enc_seq || !context->has_enc_pic ||
         !context->has_enc_slice || !context->render_surface)
         return VA_STATUS_ERROR_INVALID_PARAMETER;
-    if (context->enc_slice.macroblock_address != 0 ||
-        context->enc_slice.num_macroblocks !=
-            (uint32_t)(((context->width + 15) / 16) *
-                       ((context->height + 15) / 16)))
-        return VA_STATUS_ERROR_INVALID_PARAMETER;
+    VABufferID coded_id;
+    bool request_idr;
+    if (context->coding == MPP_VIDEO_CodingAVC) {
+        if (context->enc_slice.macroblock_address != 0 ||
+            context->enc_slice.num_macroblocks !=
+                (uint32_t)(((context->width + 15) / 16) *
+                           ((context->height + 15) / 16)))
+            return VA_STATUS_ERROR_INVALID_PARAMETER;
+        coded_id = context->enc_pic.coded_buf;
+        request_idr = context->enc_pic.pic_fields.bits.idr_pic_flag;
+    } else {
+        uint32_t ctu = hevc_ctu_size(context);
+        if (!ctu)
+            return VA_STATUS_ERROR_INVALID_PARAMETER;
+        uint32_t ctu_count =
+            ((uint32_t)context->width + ctu - 1) / ctu *
+            (((uint32_t)context->height + ctu - 1) / ctu);
+        if (context->enc_hevc_slice.slice_segment_address != 0 ||
+            context->enc_hevc_slice.num_ctu_in_slice != ctu_count ||
+            !context->enc_hevc_slice.slice_fields.bits.last_slice_of_pic_flag)
+            return VA_STATUS_ERROR_INVALID_PARAMETER;
+        coded_id = context->enc_hevc_pic.coded_buf;
+        request_idr = context->enc_hevc_pic.pic_fields.bits.idr_pic_flag;
+    }
 
-    RKBuffer *coded = buffer_acquire(context->driver,
-                                     context->enc_pic.coded_buf);
+    RKBuffer *coded = buffer_acquire(context->driver, coded_id);
     if (!coded || coded->type != VAEncCodedBufferType) {
         if (coded)
             rk_object_unref(&coded->base);
@@ -244,7 +412,7 @@ VAStatus rk_mpp_enc_encode(RKContext *context)
     mpp_frame_set_buf_size(frame, mpp_buffer_get_size(input));
     mpp_frame_set_buffer(frame, input);
 
-    if (context->enc_pic.pic_fields.bits.idr_pic_flag &&
+    if (request_idr &&
         context->mpi->control(context->mpp, MPP_ENC_SET_IDR_FRAME, NULL) !=
             MPP_OK) {
         LOG("encoder failed to request IDR frame");
@@ -269,7 +437,7 @@ VAStatus rk_mpp_enc_encode(RKContext *context)
     }
     status = rk_buffer_store_coded(coded, position, length, 0);
     LOG("encoder produced %zu bytes for surface=0x%x coded=0x%x",
-        length, context->render_target, context->enc_pic.coded_buf);
+        length, context->render_target, coded_id);
 
 out:
     if (status != VA_STATUS_SUCCESS) {

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Run the H.264 encoder app gate concurrently with shipping decode workloads.
+# Run both encoder app gates concurrently with shipping decode workloads.
 
 set -eu
 
@@ -23,8 +23,15 @@ trap 'exit 1' HUP INT TERM
     ENCODE_FRAMES=${CONCURRENT_ENCODE_FRAMES:-96} \
     DRIVER_DIR=${DRIVER_DIR:-$REPO_ROOT} \
         "$SCRIPT_DIR/check-h264-encode.sh"
-) >"$WORK/encode.log" 2>&1 &
-encode_pid=$!
+) >"$WORK/h264-encode.log" 2>&1 &
+h264_encode_pid=$!
+
+(
+    ENCODE_FRAMES=${CONCURRENT_ENCODE_FRAMES:-96} \
+    DRIVER_DIR=${DRIVER_DIR:-$REPO_ROOT} \
+        "$SCRIPT_DIR/check-hevc-encode.sh"
+) >"$WORK/hevc-encode.log" 2>&1 &
+hevc_encode_pid=$!
 
 (
     TEST_SET=synthetic \
@@ -35,23 +42,29 @@ encode_pid=$!
 decode_pid=$!
 
 set +e
-wait "$encode_pid"
-encode_status=$?
+wait "$h264_encode_pid"
+h264_encode_status=$?
+wait "$hevc_encode_pid"
+hevc_encode_status=$?
 wait "$decode_pid"
 decode_status=$?
 set -e
 
-if [ "$encode_status" -ne 0 ] || [ "$decode_status" -ne 0 ]; then
-    echo "FAIL  concurrent encode/decode: encode=$encode_status decode=$decode_status" >&2
-    tail -80 "$WORK/encode.log" >&2
+if [ "$h264_encode_status" -ne 0 ] ||
+   [ "$hevc_encode_status" -ne 0 ] ||
+   [ "$decode_status" -ne 0 ]; then
+    echo "FAIL  concurrent encode/decode: h264=$h264_encode_status hevc=$hevc_encode_status decode=$decode_status" >&2
+    tail -80 "$WORK/h264-encode.log" >&2
+    tail -80 "$WORK/hevc-encode.log" >&2
     tail -80 "$WORK/decode.log" >&2
     exit 1
 fi
 
-if ! grep -q 'H.264 VA-API encode gate passed' "$WORK/encode.log" ||
+if ! grep -q 'H.264 VA-API encode gate passed' "$WORK/h264-encode.log" ||
+   ! grep -q 'HEVC VA-API encode gate passed' "$WORK/hevc-encode.log" ||
    ! grep -q 'ALL GREEN' "$WORK/decode.log"; then
     echo "FAIL  concurrent encode/decode logs lack completion markers" >&2
     exit 1
 fi
 
-echo "ok    concurrent H.264 encode and shipping-profile decode gates passed"
+echo "ok    concurrent H.264/HEVC encode and shipping-profile decode gates passed"

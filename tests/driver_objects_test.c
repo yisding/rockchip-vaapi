@@ -1,6 +1,7 @@
 #include <va/va.h>
 #include <va/va_backend.h>
 #include <va/va_drmcommon.h>
+#include <va/va_enc_hevc.h>
 
 #include <stdint.h>
 #include <stdio.h>
@@ -152,6 +153,80 @@ static void test_experimental_h264_encode(struct VADriverVTable *v,
                  VA_STATUS_SUCCESS);
 
     CHECK_STATUS(v->vaDestroyConfig(ctx, config), VA_STATUS_SUCCESS);
+    if (unsetenv("RK_VAAPI_EXPERIMENTAL_ENCODE") != 0) {
+        perror("unsetenv");
+        exit(1);
+    }
+}
+
+static void test_experimental_hevc_encode(struct VADriverVTable *v,
+                                          VADriverContextP ctx)
+{
+    VAEntrypoint entrypoints[2];
+    int count = 0;
+    CHECK_STATUS(v->vaQueryConfigEntrypoints(
+                     ctx, VAProfileHEVCMain, entrypoints, &count),
+                 VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
+
+    if (setenv("RK_VAAPI_EXPERIMENTAL_ENCODE", "hevc", 1) != 0) {
+        perror("setenv");
+        exit(1);
+    }
+    CHECK_STATUS(v->vaQueryConfigEntrypoints(
+                     ctx, VAProfileHEVCMain, entrypoints, &count),
+                 VA_STATUS_SUCCESS);
+    if (count != 1 || entrypoints[0] != VAEntrypointEncSlice) {
+        fputs("HEVC encode must not expose experimental decode\n", stderr);
+        exit(1);
+    }
+
+    VAConfigAttribValEncHEVCBlockSizes block_sizes;
+    VAConfigAttrib attrs[] = {
+        { .type = VAConfigAttribRTFormat },
+        { .type = VAConfigAttribRateControl },
+        { .type = VAConfigAttribEncHEVCFeatures },
+        { .type = VAConfigAttribEncHEVCBlockSizes },
+    };
+    CHECK_STATUS(v->vaGetConfigAttributes(
+                     ctx, VAProfileHEVCMain, VAEntrypointEncSlice,
+                     attrs, 4), VA_STATUS_SUCCESS);
+    block_sizes.value = attrs[3].value;
+    if (attrs[0].value != VA_RT_FORMAT_YUV420 ||
+        attrs[1].value != (VA_RC_CQP | VA_RC_CBR | VA_RC_VBR) ||
+        attrs[2].value != 0 ||
+        block_sizes.bits.log2_max_coding_tree_block_size_minus3 != 3 ||
+        block_sizes.bits.log2_min_coding_tree_block_size_minus3 != 3 ||
+        block_sizes.bits.log2_min_luma_coding_block_size_minus3 != 0) {
+        fputs("experimental HEVC encode attributes are invalid\n", stderr);
+        exit(1);
+    }
+
+    VAConfigAttrib selected[] = {
+        { .type = VAConfigAttribRTFormat,
+          .value = VA_RT_FORMAT_YUV420 },
+        { .type = VAConfigAttribRateControl, .value = VA_RC_CQP },
+    };
+    VAConfigID config;
+    CHECK_STATUS(v->vaCreateConfig(
+                     ctx, VAProfileHEVCMain, VAEntrypointEncSlice,
+                     selected, 2, &config), VA_STATUS_SUCCESS);
+    VAContextID context;
+    CHECK_STATUS(v->vaCreateContext(ctx, config, 64, 64, 0, NULL, 0,
+                                   &context), VA_STATUS_SUCCESS);
+    CHECK_STATUS(v->vaDestroyContext(ctx, context), VA_STATUS_SUCCESS);
+    CHECK_STATUS(v->vaDestroyConfig(ctx, config), VA_STATUS_SUCCESS);
+
+    if (setenv("RK_VAAPI_EXPERIMENTAL_ENCODE", "h264,hevc", 1) != 0) {
+        perror("setenv");
+        exit(1);
+    }
+    CHECK_STATUS(v->vaQueryConfigEntrypoints(
+                     ctx, VAProfileH264High, entrypoints, &count),
+                 VA_STATUS_SUCCESS);
+    if (count != 2 || entrypoints[1] != VAEntrypointEncSlice) {
+        fputs("combined encode opt-in did not retain H.264\n", stderr);
+        exit(1);
+    }
     if (unsetenv("RK_VAAPI_EXPERIMENTAL_ENCODE") != 0) {
         perror("unsetenv");
         exit(1);
@@ -460,6 +535,7 @@ int main(void)
 
     test_experimental_10bit_profiles(&vtable, &ctx);
     test_experimental_h264_encode(&vtable, &ctx);
+    test_experimental_hevc_encode(&vtable, &ctx);
     test_configs(&vtable, &ctx, configs);
     test_buffers(&vtable, &ctx, buffers);
     test_images(&vtable, &ctx, images);

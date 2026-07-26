@@ -102,6 +102,9 @@ FFMPEG=/usr/bin/ffmpeg make check-hevc-main10-experimental
 FFMPEG=/usr/bin/ffmpeg make check-hevc-main10-hdr-experimental
 FFMPEG=/usr/bin/ffmpeg make check-vp9-profile2-experimental
 FFMPEG=/usr/bin/ffmpeg make check-gstreamer-va
+FFMPEG=/usr/bin/ffmpeg make check-h264-encode-experimental
+FFMPEG=/usr/bin/ffmpeg make check-hevc-encode-experimental
+FFMPEG=/usr/bin/ffmpeg make check-encode-decode-concurrent
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-conformance
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-sanitize
 ```
@@ -172,10 +175,17 @@ GStreamer 1.28 `vah264enc` after a fresh plugin scan with
 `GST_VA_ALL_DRIVERS=1`, with the same frame/profile/PSNR checks. The sanitizer
 target loads the complete ASan/UBSan driver for all four app paths.
 
-`check-encode-decode-concurrent` runs a longer version of that encoder gate in
-parallel with the shipping synthetic decode matrix. It requires both processes
-to complete, providing a board-level overlap check between independent MPP
-encode and decode contexts.
+`check-hevc-encode-experimental` applies the same four-path gate to HEVC Main
+with `hevc_vaapi` and `vah265enc`. It additionally rejects decoder/parser
+warnings, verifies the advertised 64x64 CTU contract, and requires parser-clean
+standard HEVC decode. The measured CQP/CBR/VBR PSNR values are 45.19, 44.46,
+and 40.91 dB; GStreamer CQP measures 45.31 dB. Its sanitizer target loads the
+complete ASan/UBSan driver for all four paths.
+
+`check-encode-decode-concurrent` runs 96-frame versions of both encoder gates
+in parallel with the shipping synthetic decode matrix. It requires all three
+processes to complete, providing a board-level overlap check between two MPP
+encoder contexts and independent H.264/VP9 decode contexts.
 
 The object-lifecycle gate crosses every former fixed-array ceiling, validates
 all five typed handle namespaces and stale-handle rejection, and creates nine

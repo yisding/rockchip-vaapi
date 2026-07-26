@@ -13,6 +13,7 @@
 #include <va/va_backend.h>
 #include <va/va_dec_hevc.h>
 #include <va/va_enc_h264.h>
+#include <va/va_enc_hevc.h>
 
 #include "log.h"
 #include "object_heap.h"
@@ -118,6 +119,9 @@ typedef struct {
     VAEncSequenceParameterBufferH264 enc_seq;
     VAEncPictureParameterBufferH264 enc_pic;
     VAEncSliceParameterBufferH264 enc_slice;
+    VAEncSequenceParameterBufferHEVC enc_hevc_seq;
+    VAEncPictureParameterBufferHEVC enc_hevc_pic;
+    VAEncSliceParameterBufferHEVC enc_hevc_slice;
     bool has_enc_seq;
     bool has_enc_pic;
     bool has_enc_slice;
