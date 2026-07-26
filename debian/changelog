@@ -1,3 +1,19 @@
+rockchip-vaapi (1.0.11+ysp3) resolute; urgency=medium
+
+  * Complete the Phase 1 external-buffer decode architecture, generation
+    fences, concurrent-decoder gates, sanitizer coverage, and resource soak.
+  * Add experimental HEVC Main reconstruction with seven of eight pinned
+    vectors bit-exact; keep the profile hidden on MPP's TILES rejection.
+  * Add opt-in HEVC Main10 and VP9 Profile 2 AFBC-to-P010 paths through RGA,
+    with pinned conformance, HDR10 metadata, and format-aware surface gates.
+  * Add a byte-exact GStreamer va app gate for H.264, HEVC Main10, and VP9
+    Profiles 0 and 2.
+  * Link and package against librga for 10-bit conversion.
+  * Split safe system-wide driver selection into rockchip-vaapi-config and
+    remove the legacy global Firefox RDD sandbox disable during driver upgrade.
+
+ -- Yi Ding <yi.s.ding@gmail.com>  Sun, 26 Jul 2026 02:16:42 -0700
+
 rockchip-vaapi (1.0.11+ysp2) resolute; urgency=medium
 
   * Add a checksum-pinned ITU-T H.264 and libvpx VP9 conformance gate, with

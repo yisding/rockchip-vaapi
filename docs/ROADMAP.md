@@ -467,6 +467,14 @@ decode errors, buffer mismatch, or linear 10-bit fallback. DMABuf display-sink
 and HDR presentation remain open, so this closes one app/readback slice rather
 than the GStreamer matrix row.
 
+**Progress (2026-07-26, packaging slice):** Debian packaging now declares its
+RGA build dependency and produces separate `rockchip-vaapi` and
+`rockchip-vaapi-config` packages. The optional config package selects the
+driver and enables GStreamer's supported vendor override, but does not alter
+browser sandboxes or display backends. Upgrading the driver removes legacy
+ysp2 environment files that globally disabled Firefox's RDD sandbox. The
+Firefox policy patch and clean-image install test remain open.
+
 **Gate:** the app matrix passes on-device; conformance suite green; clean soak;
 `.deb` + config packages install and enable HW decode from a clean image.
 
@@ -557,8 +565,10 @@ concurrent with decode contexts are race-free.
   hidden on the direct-MPP TILES failure; both 10-bit profiles remain hidden
   while broader HEVC conformance and app/display validation are open.
 - Phase 3: in progress; the stock GStreamer 1.28 `va` plugin system-memory
-  gate is byte-exact for H.264, HEVC Main10, and VP9 Profiles 0/2. Display
-  sinks, the other desktop apps, sandbox policy, and packaging remain open.
+  gate is byte-exact for H.264, HEVC Main10, and VP9 Profiles 0/2. Split
+  driver/config Debian packaging no longer weakens Firefox's sandbox globally.
+  Display sinks, the other desktop apps, Firefox policy, and clean-image
+  package validation remain open.
 - Phases 4–5: planned.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement

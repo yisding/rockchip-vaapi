@@ -1,7 +1,0 @@
-#!/bin/sh
-set -e
-
-. /usr/share/debconf/confmodule
-
-db_input medium rockchip-vaapi/configure-environment || true
-db_go || true

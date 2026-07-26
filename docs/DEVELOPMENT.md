@@ -437,13 +437,15 @@ corrupt output. HEVC stays hidden until the pinned gate is bit-exact.
 ## Firefox process model
 
 Firefox decodes video in the **RDD (Remote Data Decoder)** sandboxed process.
-The VA-API driver runs inside RDD. By default, RDD's seccomp sandbox blocks
-`/dev/dri` device access, which prevents MPP from opening the VPU. The
-workaround is `MOZ_DISABLE_RDD_SANDBOX=1`.
+The VA-API driver runs inside RDD. Its seccomp policy can block the Rockchip
+MPP ioctl family and dma-heap allocation operations needed by this driver.
+`MOZ_DISABLE_RDD_SANDBOX=1` is useful only as a short per-process diagnostic;
+configuring it globally exposes untrusted media decoding without the RDD
+seccomp boundary.
 
-For a hardened deployment, the correct long-term fix is to add `/dev/dri` and
-Rockchip's `/dev/mpp_service` to Firefox's RDD sandbox allow-list (requires
-patching Firefox's sandbox policy).
+For a hardened deployment, a distribution Firefox sandbox policy must permit
+the required MPP and dma-heap operations in RDD. The driver and optional
+config package deliberately do not weaken that sandbox.
 
 ---
 

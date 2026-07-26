@@ -5,8 +5,9 @@ Maintainer: Eduardo García-Mádico Portabella <woodyst@gmail.com>
 Build-Depends: debhelper-compat (= 13),
                libva-dev (>= 2.0),
                librockchip-mpp-dev,
+               librga-dev,
                pkg-config,
-               po-debconf
+               gcc
 Standards-Version: 4.6.2
 Rules-Requires-Root: no
 
@@ -19,8 +20,17 @@ Description: VA-API driver for Rockchip RK3588 via MPP
  Hardware video acceleration driver that bridges the VA-API (libva)
  interface to Rockchip MPP (librockchip-mpp1) for the RK3588/RK3576 SoC.
  .
- Enables H.264 and VP9 hardware decode in applications like Firefox via
- DRM PRIME 2 DMA-BUF surface export.
+ Enables validated H.264 and VP9 hardware decode via DRM PRIME 2 DMA-BUF
+ surface export. Experimental HEVC and 10-bit profiles remain opt-in.
  .
- Install LIBVA_DRIVER_NAME=rockchip and point LIBVA_DRIVERS_PATH to
- /usr/lib/aarch64-linux-gnu/dri to use.
+ Install rockchip-vaapi-config or select the driver per application.
+
+Package: rockchip-vaapi-config
+Architecture: all
+Depends: rockchip-vaapi (= ${binary:Version}), ${misc:Depends}
+Description: system environment for the Rockchip VA-API driver
+ Optional system-wide environment files that select the Rockchip VA-API
+ driver and allow GStreamer's va plugin to probe its non-Intel vendor string.
+ .
+ This package does not disable browser sandboxes or force browser display
+ backends. Those settings must be handled per application.

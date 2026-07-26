@@ -35,19 +35,22 @@ grep CmaTotal /proc/meminfo                     # → CmaTotal: 524288 kB
 ## Option A: Install from Debian package (recommended)
 
 ```bash
-sudo dpkg -i rockchip-vaapi_1.0.1-1_arm64.deb
+sudo apt install ./rockchip-vaapi_1.0.11+ysp3_arm64.deb
 ```
 
 This installs `rockchip_drv_video.so` to
 `/usr/lib/aarch64-linux-gnu/dri/` and registers the package with `dpkg`.
-To uninstall: `sudo dpkg -r rockchip-vaapi`.
+Install `rockchip-vaapi-config_1.0.11+ysp3_all.deb` as well to select this
+driver and enable GStreamer's non-Intel vendor probe for all login sessions.
+The config package does not weaken browser sandboxes. To uninstall:
+`sudo apt remove rockchip-vaapi rockchip-vaapi-config`.
 
 ## Option B: Build and install from source
 
 ### 1. Install build dependencies
 
 ```bash
-sudo apt install gcc pkg-config libva-dev librockchip-mpp-dev
+sudo apt install gcc pkg-config libva-dev librockchip-mpp-dev librga-dev
 ```
 
 ### 2. Build
@@ -79,7 +82,7 @@ sudo install -m 755 rockchip_drv_video.so /your/path/rockchip_drv_video.so
 tar --exclude='rockchip-vaapi/debian' \
     --exclude='rockchip-vaapi/*.so' \
     --exclude='rockchip-vaapi/src/*.o' \
-    -czf rockchip-vaapi_1.0.1.orig.tar.gz rockchip-vaapi/
+    -czf rockchip-vaapi_1.0.11.orig.tar.gz rockchip-vaapi/
 
 # Build binary package
 cd rockchip-vaapi
@@ -111,19 +114,31 @@ libva info: Found init function __vaDriverInit_1_20
 ...
 VA profile VAProfileH264Main               : VAEntrypointVLD
 VA profile VAProfileH264High               : VAEntrypointVLD
-VA profile VAProfileHEVCMain               : VAEntrypointVLD
+VA profile VAProfileVP9Profile0             : VAEntrypointVLD
 ...
 ```
 
+HEVC and 10-bit profiles are intentionally hidden in normal operation while
+their remaining conformance and display gates are open.
+
 ## Configuring Firefox
 
-### Environment variables (required)
+### Environment variables
 
 | Variable | Value | Reason |
 |----------|-------|--------|
 | `LIBVA_DRIVER_NAME` | `rockchip` | Selects this driver |
 | `LIBVA_DRIVERS_PATH` | `/usr/lib/aarch64-linux-gnu/dri` | Driver search path |
-| `MOZ_DISABLE_RDD_SANDBOX=1` | `1` | Allows RDD process to open `/dev/dri` |
+
+`rockchip-vaapi-config` installs those variables system-wide and also sets
+`GST_VA_ALL_DRIVERS=1`. Otherwise, set them only for the application being
+tested.
+
+Firefox's RDD sandbox must permit the MPP and dma-heap device operations used
+by the driver. A distribution Firefox build needs an appropriate sandbox
+policy; this repository does not install one. `MOZ_DISABLE_RDD_SANDBOX=1`
+can be used for a short per-process diagnosis, but must not be configured
+globally or in a permanent launcher.
 
 ### about:config (required)
 
@@ -135,19 +150,6 @@ Open `about:config` in Firefox and set:
 | `media.ffmpeg.vaapi.enabled` | `true` |
 | `media.rdd-ffmpeg.enabled` | `true` |
 
-### Permanent launcher
-
-```bash
-sudo tee /usr/local/bin/firefox-hw > /dev/null <<'EOF'
-#!/bin/sh
-export LIBVA_DRIVER_NAME=rockchip
-export LIBVA_DRIVERS_PATH=/usr/lib/aarch64-linux-gnu/dri
-export MOZ_DISABLE_RDD_SANDBOX=1
-exec /usr/bin/firefox "$@"
-EOF
-sudo chmod +x /usr/local/bin/firefox-hw
-```
-
 ## Troubleshooting
 
 **`vainfo` reports "driver not found"**
@@ -157,7 +159,9 @@ Verify `LIBVA_DRIVER_NAME=rockchip` and that the `.so` exists at
 **Firefox still uses SWDEC**
 Check `about:support` → Media → Video Decoder. If it shows `FFmpegVideo`,
 hardware decode is active. If it shows `Softpipe` or similar, verify the three
-`about:config` keys and that `MOZ_DISABLE_RDD_SANDBOX=1` is set.
+`about:config` keys, the driver environment, and the distribution's RDD
+sandbox policy. Use a one-off run with `MOZ_DISABLE_RDD_SANDBOX=1` only to
+isolate a sandbox-policy failure.
 
 **`/dev/dri` permission denied in RDD process**
 Add your user to the `video` and `render` groups:
@@ -169,8 +173,11 @@ Then log out and back in (or use `newgrp video`).
 **No frames decoded / black screen**
 Enable verbose logging by setting `RK_VAAPI_LOG` to a file path:
 ```bash
-LIBVA_DRIVER_NAME=rockchip RK_VAAPI_LOG=/tmp/rk.log MOZ_DISABLE_RDD_SANDBOX=1 firefox
-tail -f /tmp/rk.log | grep -E "copied|TIMEOUT|ERROR|failed"
+mkdir -p "$HOME/.local/state"
+LIBVA_DRIVER_NAME=rockchip \
+RK_VAAPI_LOG="$HOME/.local/state/rockchip-vaapi.log" firefox
+tail -f "$HOME/.local/state/rockchip-vaapi.log" |
+    grep -E "assigned|TIMEOUT|ERROR|failed"
 ```
 Look for errors after `BeginPicture` or `EndPicture`. Missing SPS/PPS or
 MPP decode errors will appear there. Without `RK_VAAPI_LOG`, the driver

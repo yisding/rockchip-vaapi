@@ -121,10 +121,12 @@ not offered.
 Runtime:
 - `libva2` (>= 2.0)
 - `librockchip-mpp1`
+- `librga2`
 
 Build:
 - `libva-dev`
 - `librockchip-mpp-dev`
+- `librga-dev`
 - `pkg-config`, `gcc`
 
 ## Quick start
@@ -134,14 +136,22 @@ Build:
 make
 sudo make install
 
-# Launch Firefox with hardware decode
-LIBVA_DRIVER_NAME=rockchip \
-LIBVA_DRIVERS_PATH=/usr/lib/aarch64-linux-gnu/dri \
-MOZ_DISABLE_RDD_SANDBOX=1 \
-firefox
+# Select the driver for one process
+LIBVA_DRIVER_NAME=rockchip vainfo
+
+# GStreamer's va plugin also needs its non-Intel vendor override
+LIBVA_DRIVER_NAME=rockchip GST_VA_ALL_DRIVERS=1 gst-inspect-1.0 vah264dec
 ```
 
-In Firefox, also enable via `about:config`:
+The Debian build produces a driver package and a separate, optional
+`rockchip-vaapi-config` package. The config package selects the driver and sets
+`GST_VA_ALL_DRIVERS=1` system-wide; it does not change browser sandbox or
+display-backend settings.
+
+Firefox additionally needs a distribution sandbox policy that permits the RDD
+process to use Rockchip MPP and dma-heap devices. Disabling the RDD sandbox is
+only appropriate as a short, per-process diagnostic because it broadens the
+attack surface for untrusted media. With a suitable policy, enable:
 
 | Preference | Value |
 |-----------|-------|
@@ -154,8 +164,10 @@ In Firefox, also enable via `about:config`:
 After starting Firefox and playing a video, check the driver log:
 
 ```bash
-# Should show mpp_create OK, BeginPicture, EndPicture, ExportSurfaceHandle
-LIBVA_DRIVER_NAME=rockchip MOZ_DISABLE_RDD_SANDBOX=1 firefox 2>&1 | grep rk-vaapi
+mkdir -p "$HOME/.local/state"
+RK_VAAPI_LOG="$HOME/.local/state/rockchip-vaapi.log" \
+LIBVA_DRIVER_NAME=rockchip firefox
+tail -f "$HOME/.local/state/rockchip-vaapi.log"
 ```
 
 You can also check VPU activity:
@@ -164,21 +176,9 @@ You can also check VPU activity:
 cat /sys/class/devfreq/*/cur_freq   # VPU frequency rises under load
 ```
 
-## Permanent Firefox launcher
-
-Create `/usr/local/bin/firefox-hw`:
-
-```bash
-#!/bin/sh
-export LIBVA_DRIVER_NAME=rockchip
-export LIBVA_DRIVERS_PATH=/usr/lib/aarch64-linux-gnu/dri
-export MOZ_DISABLE_RDD_SANDBOX=1
-exec /usr/bin/firefox "$@"
-```
-
-```bash
-chmod +x /usr/local/bin/firefox-hw
-```
+For sandbox diagnosis only, `MOZ_DISABLE_RDD_SANDBOX=1` can establish whether
+policy is the blocker. Do not place it in `/etc/environment`,
+`/etc/profile.d`, or a permanent browser launcher.
 
 ## Development
 

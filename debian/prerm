@@ -1,9 +1,0 @@
-#!/bin/sh
-set -e
-
-if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
-    rm -f /etc/profile.d/rockchip-vaapi.sh
-    rm -f /etc/environment.d/60-rockchip-vaapi.conf
-fi
-
-#DEBHELPER#

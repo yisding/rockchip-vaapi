@@ -1,5 +1,7 @@
 #!/usr/bin/make -f
 
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
 include /usr/share/dpkg/architecture.mk
 
 %:
@@ -11,8 +13,13 @@ override_dh_auto_build:
 override_dh_auto_install:
 	install -D -m 755 rockchip_drv_video.so \
 		$(CURDIR)/debian/rockchip-vaapi/usr/lib/$(DEB_HOST_MULTIARCH)/dri/rockchip_drv_video.so
+	install -D -m 644 debian/rockchip-vaapi-config.sh \
+		$(CURDIR)/debian/rockchip-vaapi-config/etc/profile.d/rockchip-vaapi-config.sh
+	install -D -m 644 debian/61-rockchip-vaapi.conf \
+		$(CURDIR)/debian/rockchip-vaapi-config/etc/environment.d/61-rockchip-vaapi.conf
 
 override_dh_auto_clean:
 	$(MAKE) clean
 
 override_dh_auto_test:
+	$(MAKE) test

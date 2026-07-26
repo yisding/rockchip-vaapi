@@ -20,6 +20,7 @@ debian/debhelper-build-stamp
 debian/files
 debian/rockchip-vaapi/
 debian/rockchip-vaapi-dbgsym/
+debian/rockchip-vaapi-config/
 debian/*.substvars
 debian/*.debhelper
 

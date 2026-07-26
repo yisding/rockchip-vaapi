@@ -1,0 +1,9 @@
+#!/bin/sh
+set -e
+
+# ysp2 could create these unowned files with a global Firefox sandbox bypass.
+# The optional config package uses different paths and does not weaken sandboxes.
+rm -f /etc/profile.d/rockchip-vaapi.sh
+rm -f /etc/environment.d/60-rockchip-vaapi.conf
+
+#DEBHELPER#
