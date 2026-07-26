@@ -166,7 +166,9 @@ The Debian build produces a driver package and a separate, optional
 display-backend settings.
 
 Firefox additionally needs a distribution sandbox policy that permits the RDD
-process to use Rockchip MPP and dma-heap devices. Disabling the RDD sandbox is
+process to use Rockchip MPP, RGA, and dma-heap devices. A version-pinned
+Firefox 152.0.6 source patch and validator are provided in
+[`contrib/firefox`](contrib/firefox/README.md). Disabling the RDD sandbox is
 only appropriate as a short, per-process diagnostic because it broadens the
 attack surface for untrusted media. With a suitable policy, enable:
 

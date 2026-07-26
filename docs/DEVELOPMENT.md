@@ -507,8 +507,11 @@ configuring it globally exposes untrusted media decoding without the RDD
 seccomp boundary.
 
 For a hardened deployment, a distribution Firefox sandbox policy must permit
-the required MPP and dma-heap operations in RDD. The driver and optional
-config package deliberately do not weaken that sandbox.
+the required MPP, RGA, and dma-heap operations in RDD. The driver and optional
+config package deliberately do not weaken that sandbox. A source-package patch
+for Firefox 152.0.6 is pinned and validated under `contrib/firefox`; it adds
+the missing broker paths only on systems where those nodes exist and
+allowlists the four MPP/RGA requests measured on the audited stack.
 
 ---
 

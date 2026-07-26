@@ -441,9 +441,9 @@ mpv on-device.
 
 Make it real software on real apps.
 
-- **Firefox:** ship a proper **RDD sandbox policy patch** (whitelist the MPP
-  `'v'` ioctl family + dma-heap `'H'`) as a packaged, documented alternative to
-  `MOZ_DISABLE_RDD_SANDBOX=1`.
+- **Firefox:** ship a proper **RDD sandbox policy patch** for the MPP/RGA
+  requests and brokered Rockchip device paths as a packaged, documented
+  alternative to `MOZ_DISABLE_RDD_SANDBOX=1`.
 - **Chromium:** validate stock-build VA-API behind runtime flags; test the
   **`/dev/dri/` device-node aliasing** sidestep for the deb build (does not
   need a Chromium patch if the GPU sandbox allows the ioctl); document the snap
@@ -482,6 +482,17 @@ driver and enables GStreamer's supported vendor override, but does not alter
 browser sandboxes or display backends. Upgrading the driver removes legacy
 ysp2 environment files that globally disabled Firefox's RDD sandbox. The
 Firefox policy patch and clean-image install test remain open.
+
+**Progress (2026-07-26, Firefox RDD policy source slice):** The exact Firefox
+152.0.6 RDD policy was audited and a hash-pinned distribution source patch now
+adds broker access for existing `/dev/mpp_service`, `/dev/rga`, and
+`/dev/dma_heap` nodes while preserving the sandbox. Seccomp permits only the
+MPP v1 command and three RGA requests measured across the H.264 encode and
+HEVC Main10 decode/RGA gates. Firefox already allows DMA-BUF ioctls and, on
+arm64, dma-heap's `'H'` ioctl family through its Tegra policy; the missing
+piece was the dma-heap broker path. Patch application is checked against exact
+upstream source hashes. Building/installing the Firefox package and validating
+RDD playback in a real display session remain open.
 
 **Gate:** the app matrix passes on-device; conformance suite green; clean soak;
 `.deb` + config packages install and enable HW decode from a clean image.
@@ -605,8 +616,9 @@ concurrent with decode contexts are race-free.
   presentation remain open.
 - **Encode conformance:** encoders aren't spec-exact; the gate must be
   round-trip PSNR + interop, and depends on the kernel RKVENC2 hardening.
-- **Sandbox upstreamability:** the Firefox RDD policy patch is small but must be
-  re-verified per milestone; the Chromium aliasing sidestep depends on the GPU
+- **Sandbox upstreamability:** the Firefox 152.0.6 RDD source patch is
+  hash-pinned and request-specific but must be rebased and remeasured per
+  milestone; the Chromium aliasing sidestep depends on the GPU
   sandbox continuing to allow `ioctl` without arg inspection — verify against
   the shipping Chromium, don't assume.
 - **MPP threading contract:** the dedicated-worker model is validated for the
@@ -631,8 +643,10 @@ concurrent with decode contexts are race-free.
 - Phase 3: in progress; the stock GStreamer 1.28 `va` plugin system-memory
   gate is byte-exact for H.264, HEVC Main10, and VP9 Profiles 0/2. Split
   driver/config Debian packaging no longer weakens Firefox's sandbox globally.
-  Display sinks, the other desktop apps, Firefox policy, and clean-image
-  package validation remain open.
+  A hash-pinned Firefox 152.0.6 RDD source patch covers the measured Rockchip
+  broker and seccomp contract. The rebuilt Firefox package, live RDD playback,
+  display sinks, other desktop apps, and clean-image package validation remain
+  open.
 - Phase 4: in progress; experimental one-slice H.264 Main/High and HEVC Main
   encode pass FFmpeg and GStreamer CQP/CBR/VBR interoperability, parser, and
   PSNR gates normally and under ASan/UBSan. Both 96-frame encoder gates pass

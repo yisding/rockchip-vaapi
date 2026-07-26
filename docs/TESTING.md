@@ -14,6 +14,7 @@ make sanitize
 make test-tsan
 make test-valgrind
 make lint
+make check-firefox-rdd-patch
 shellcheck tests/check-concurrent-decode.sh tests/check-zero-copy.sh \
     tests/check-hevc-main10.sh tests/check-hevc-main10-hdr.sh \
     tests/check-soak.sh tests/fetch-vectors.sh tests/validate.sh
@@ -27,6 +28,14 @@ or UBSan finding. `make test-valgrind` runs the same unit tests with full leak
 checking and treats every reported leak kind or memory error as a failure. On
 AArch64, install both `valgrind` and the matching `libc6-dbg`; Valgrind needs
 the dynamic loader's symbols before it can start.
+
+`make check-firefox-rdd-patch` checks the committed policy contract without
+network access. Pass an unpacked exact Firefox 152.0.6 source tree to validate
+the two upstream source hashes and dry-run/apply the patch:
+
+```sh
+tests/check-firefox-rdd-patch.sh /path/to/firefox-152.0.6
+```
 
 `make test-tsan` stress-tests concurrent object insertion, lookup, removal,
 and refcounted destruction under ThreadSanitizer. The full two-decoder TSan

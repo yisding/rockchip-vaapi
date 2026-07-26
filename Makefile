@@ -103,6 +103,9 @@ install: $(TARGET)
 fetch-vectors:
 	tests/fetch-vectors.sh
 
+check-firefox-rdd-patch:
+	tests/check-firefox-rdd-patch.sh
+
 # Full hardware gates. The conformance gate remains non-green when a required
 # risky vector is quarantined; see docs/TESTING.md.
 check: $(TARGET) test

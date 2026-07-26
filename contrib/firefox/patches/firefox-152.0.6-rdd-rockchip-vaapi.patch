@@ -1,0 +1,52 @@
+Description: Allow Rockchip VA-API devices in the RDD sandbox
+ Firefox's RDD broker permits DRM devices but not the MPP, RGA, or dma-heap
+ paths used by Rockchip VA-API. Its seccomp policy likewise lacks the narrow
+ MPP and RGA ioctl requests used by the validated RK3588 stack.
+ .
+ Keep the RDD sandbox enabled. Add broker paths only when the corresponding
+ Rockchip nodes exist, and allow only the requests measured with
+ librockchip-mpp 1.5.0 and librga 2.2.0.
+Author: Yi Ding <yi.s.ding@gmail.com>
+Forwarded: not-yet
+Last-Update: 2026-07-26
+
+--- a/security/sandbox/linux/SandboxFilter.cpp
++++ b/security/sandbox/linux/SandboxFilter.cpp
+@@ -2063,2 +2063,9 @@
+             static_cast<unsigned long>('H') << _IOC_TYPESHIFT;
++
++        // Rockchip MPP and RGA requests used by the VA-API decode path.
++        static constexpr unsigned long kRockchipMppConfigV1 = 0x40047601;
++        static constexpr unsigned long kRockchipRgaGetDriverVersion =
++            0x801c7201;
++        static constexpr unsigned long kRockchipRgaGetHwVersion = 0x80907202;
++        static constexpr unsigned long kRockchipRgaBlitSync = 0x5017;
+ #endif  // defined(__aarch64__)
+@@ -2075,2 +2082,6 @@
+             .ElseIf(shifted_type == kNvidiaNvhostType, Allow())
++            .ElseIf(request == kRockchipMppConfigV1, Allow())
++            .ElseIf(request == kRockchipRgaGetDriverVersion, Allow())
++            .ElseIf(request == kRockchipRgaGetHwVersion, Allow())
++            .ElseIf(request == kRockchipRgaBlitSync, Allow())
+ #endif  // defined(__aarch64__)
+--- a/security/sandbox/linux/broker/SandboxBrokerPolicyFactory.cpp
++++ b/security/sandbox/linux/broker/SandboxBrokerPolicyFactory.cpp
+@@ -992,2 +992,18 @@
+   policy->AddPath(rdwr, "/dev/nvhost-vic");
++
++  // Rockchip MPP/RGA VA-API decode. Do not add absent device paths to the
++  // broker policy on other ARM64 systems.
++  struct stat rockchipDevice;
++  if (stat("/dev/mpp_service", &rockchipDevice) == 0 &&
++      S_ISCHR(rockchipDevice.st_mode)) {
++    policy->AddPath(rdwr, "/dev/mpp_service");
++  }
++  if (stat("/dev/rga", &rockchipDevice) == 0 &&
++      S_ISCHR(rockchipDevice.st_mode)) {
++    policy->AddPath(rdwr, "/dev/rga");
++  }
++  if (stat("/dev/dma_heap", &rockchipDevice) == 0 &&
++      S_ISDIR(rockchipDevice.st_mode)) {
++    policy->AddTree(rdwr, "/dev/dma_heap");
++  }
+ #endif  // defined(__aarch64__)
