@@ -42,8 +42,118 @@ static void test_configs(struct VADriverVTable *v, VADriverContextP ctx,
                                             &attributes),
                  VA_STATUS_SUCCESS);
     if (profile != VAProfileH264Main || entrypoint != VAEntrypointVLD ||
-        attributes != 0) {
+        attributes != 1) {
         fputs("config attributes changed unexpectedly\n", stderr);
+        exit(1);
+    }
+}
+
+static void test_experimental_h264_encode(struct VADriverVTable *v,
+                                          VADriverContextP ctx)
+{
+    VAEntrypoint entrypoints[2];
+    int count = 0;
+    CHECK_STATUS(v->vaQueryConfigEntrypoints(
+                     ctx, VAProfileH264High, entrypoints, &count),
+                 VA_STATUS_SUCCESS);
+    if (count != 1 || entrypoints[0] != VAEntrypointVLD) {
+        fputs("H.264 encode must be hidden by default\n", stderr);
+        exit(1);
+    }
+
+    if (setenv("RK_VAAPI_EXPERIMENTAL_ENCODE", "h264", 1) != 0) {
+        perror("setenv");
+        exit(1);
+    }
+    CHECK_STATUS(v->vaQueryConfigEntrypoints(
+                     ctx, VAProfileH264High, entrypoints, &count),
+                 VA_STATUS_SUCCESS);
+    if (count != 2 || entrypoints[0] != VAEntrypointVLD ||
+        entrypoints[1] != VAEntrypointEncSlice) {
+        fputs("experimental H.264 encode entrypoint is invalid\n", stderr);
+        exit(1);
+    }
+
+    VAConfigAttrib attrs[] = {
+        { .type = VAConfigAttribRTFormat },
+        { .type = VAConfigAttribRateControl },
+        { .type = VAConfigAttribEncPackedHeaders },
+        { .type = VAConfigAttribEncMaxSlices },
+    };
+    CHECK_STATUS(v->vaGetConfigAttributes(
+                     ctx, VAProfileH264High, VAEntrypointEncSlice,
+                     attrs, 4), VA_STATUS_SUCCESS);
+    if (attrs[0].value != VA_RT_FORMAT_YUV420 ||
+        attrs[1].value != (VA_RC_CQP | VA_RC_CBR | VA_RC_VBR) ||
+        attrs[2].value != VA_ENC_PACKED_HEADER_NONE ||
+        attrs[3].value != 1) {
+        fputs("experimental H.264 encode attributes are invalid\n", stderr);
+        exit(1);
+    }
+
+    VAConfigAttrib selected[] = {
+        { .type = VAConfigAttribRTFormat,
+          .value = VA_RT_FORMAT_YUV420 },
+        { .type = VAConfigAttribRateControl, .value = VA_RC_CQP },
+    };
+    VAConfigID config;
+    CHECK_STATUS(v->vaCreateConfig(
+                     ctx, VAProfileH264High, VAEntrypointEncSlice,
+                     selected, 2, &config), VA_STATUS_SUCCESS);
+    unsigned int surface_attr_count = 0;
+    CHECK_STATUS(v->vaQuerySurfaceAttributes(
+                     ctx, config, NULL, &surface_attr_count),
+                 VA_STATUS_SUCCESS);
+    if (surface_attr_count != 4) {
+        fputs("experimental encode surface attribute count is invalid\n",
+              stderr);
+        exit(1);
+    }
+    VASurfaceAttrib surface_attrs[4];
+    CHECK_STATUS(v->vaQuerySurfaceAttributes(
+                     ctx, config, surface_attrs, &surface_attr_count),
+                 VA_STATUS_SUCCESS);
+    if (surface_attrs[0].type != VASurfaceAttribPixelFormat ||
+        surface_attrs[0].value.value.i != VA_FOURCC_NV12) {
+        fputs("H.264 encode must expose only NV12 surfaces\n", stderr);
+        exit(1);
+    }
+    VAProfile profile;
+    VAEntrypoint entrypoint;
+    VAConfigAttrib queried[2];
+    int queried_count = 0;
+    CHECK_STATUS(v->vaQueryConfigAttributes(
+                     ctx, config, &profile, &entrypoint, queried,
+                     &queried_count), VA_STATUS_SUCCESS);
+    if (profile != VAProfileH264High ||
+        entrypoint != VAEntrypointEncSlice || queried_count != 2 ||
+        queried[0].value != VA_RT_FORMAT_YUV420 ||
+        queried[1].value != VA_RC_CQP) {
+        fputs("experimental H.264 encode config changed unexpectedly\n", stderr);
+        exit(1);
+    }
+
+    VAContextID invalid_context;
+    CHECK_STATUS(v->vaCreateContext(ctx, config, 7681, 16, 0,
+                                   NULL, 0, &invalid_context),
+                 VA_STATUS_ERROR_RESOLUTION_NOT_SUPPORTED);
+
+    VASurfaceID mismatched_surface;
+    CHECK_STATUS(v->vaCreateSurfaces2(ctx, VA_RT_FORMAT_YUV420, 32, 16,
+                                     &mismatched_surface, 1, NULL, 0),
+                 VA_STATUS_SUCCESS);
+    VAContextID encode_context;
+    CHECK_STATUS(v->vaCreateContext(ctx, config, 16, 16, 0, NULL, 0,
+                                   &encode_context), VA_STATUS_SUCCESS);
+    CHECK_STATUS(v->vaBeginPicture(ctx, encode_context, mismatched_surface),
+                 VA_STATUS_ERROR_INVALID_SURFACE);
+    CHECK_STATUS(v->vaDestroyContext(ctx, encode_context), VA_STATUS_SUCCESS);
+    CHECK_STATUS(v->vaDestroySurfaces(ctx, &mismatched_surface, 1),
+                 VA_STATUS_SUCCESS);
+
+    CHECK_STATUS(v->vaDestroyConfig(ctx, config), VA_STATUS_SUCCESS);
+    if (unsetenv("RK_VAAPI_EXPERIMENTAL_ENCODE") != 0) {
+        perror("unsetenv");
         exit(1);
     }
 }
@@ -136,6 +246,20 @@ static void test_buffers(struct VADriverVTable *v, VADriverContextP ctx,
         fputs("resized buffer metadata changed unexpectedly\n", stderr);
         exit(1);
     }
+
+    VABufferID coded;
+    CHECK_STATUS(v->vaCreateBuffer(ctx, VA_INVALID_ID,
+                                   VAEncCodedBufferType, 4096, 1, NULL,
+                                   &coded), VA_STATUS_SUCCESS);
+    VACodedBufferSegment *segment = NULL;
+    CHECK_STATUS(v->vaMapBuffer(ctx, coded, (void **)&segment),
+                 VA_STATUS_SUCCESS);
+    if (!segment || segment->size != 0 || !segment->buf || segment->next) {
+        fputs("coded buffer mapping does not expose a VA segment\n", stderr);
+        exit(1);
+    }
+    CHECK_STATUS(v->vaUnmapBuffer(ctx, coded), VA_STATUS_SUCCESS);
+    CHECK_STATUS(v->vaDestroyBuffer(ctx, coded), VA_STATUS_SUCCESS);
 }
 
 static void test_images(struct VADriverVTable *v, VADriverContextP ctx,
@@ -169,14 +293,42 @@ static void test_images(struct VADriverVTable *v, VADriverContextP ctx,
 }
 
 static void test_surfaces(struct VADriverVTable *v, VADriverContextP ctx,
-                          VASurfaceID surfaces[SURFACE_COUNT])
+                          VASurfaceID surfaces[SURFACE_COUNT],
+                          VAImage images[IMAGE_COUNT])
 {
     CHECK_STATUS(v->vaCreateSurfaces2(ctx, VA_RT_FORMAT_YUV420, 16, 16,
                                      surfaces, SURFACE_COUNT, NULL, 0),
                  VA_STATUS_SUCCESS);
+
+    uint8_t *upload = NULL;
+    uint8_t *download = NULL;
+    CHECK_STATUS(v->vaMapBuffer(ctx, images[0].buf, (void **)&upload),
+                 VA_STATUS_SUCCESS);
+    for (unsigned int i = 0; i < images[0].data_size; i++)
+        upload[i] = (uint8_t)(i * 29u + 7u);
+    CHECK_STATUS(v->vaUnmapBuffer(ctx, images[0].buf), VA_STATUS_SUCCESS);
+    CHECK_STATUS(v->vaPutImage(ctx, surfaces[0], images[0].image_id,
+                              0, 0, 16, 16, 0, 0, 16, 16),
+                 VA_STATUS_SUCCESS);
+    CHECK_STATUS(v->vaGetImage(ctx, surfaces[0], 0, 0, 16, 16,
+                              images[2].image_id), VA_STATUS_SUCCESS);
+    CHECK_STATUS(v->vaMapBuffer(ctx, images[0].buf, (void **)&upload),
+                 VA_STATUS_SUCCESS);
+    CHECK_STATUS(v->vaMapBuffer(ctx, images[2].buf, (void **)&download),
+                 VA_STATUS_SUCCESS);
+    if (memcmp(upload, download, images[0].data_size) != 0) {
+        fputs("NV12 PutImage/GetImage round trip changed bytes\n", stderr);
+        exit(1);
+    }
+    CHECK_STATUS(v->vaUnmapBuffer(ctx, images[2].buf), VA_STATUS_SUCCESS);
+    CHECK_STATUS(v->vaUnmapBuffer(ctx, images[0].buf), VA_STATUS_SUCCESS);
     VASurfaceStatus status;
     CHECK_STATUS(v->vaQuerySurfaceStatus(ctx, surfaces[SURFACE_COUNT - 1],
                                         &status), VA_STATUS_SUCCESS);
+    if (status != VASurfaceReady) {
+        fputs("unowned surface must report ready\n", stderr);
+        exit(1);
+    }
 
     VADRMPRIMESurfaceDescriptor descriptor = {0};
     CHECK_STATUS(v->vaExportSurfaceHandle(
@@ -282,6 +434,13 @@ static void test_contexts(struct VADriverVTable *v, VADriverContextP ctx,
                  VA_STATUS_SUCCESS);
     CHECK_STATUS(v->vaBeginPicture(ctx, contexts[0], surfaces[1]),
                  VA_STATUS_SUCCESS);
+    VASurfaceStatus status;
+    CHECK_STATUS(v->vaQuerySurfaceStatus(ctx, surfaces[1], &status),
+                 VA_STATUS_SUCCESS);
+    if (status != VASurfaceRendering) {
+        fputs("in-flight surface must report rendering\n", stderr);
+        exit(1);
+    }
     CHECK_STATUS(v->vaSyncSurface2(ctx, surfaces[1], 0),
                  VA_STATUS_ERROR_TIMEDOUT);
 }
@@ -300,10 +459,11 @@ int main(void)
     VAImage images[IMAGE_COUNT];
 
     test_experimental_10bit_profiles(&vtable, &ctx);
+    test_experimental_h264_encode(&vtable, &ctx);
     test_configs(&vtable, &ctx, configs);
     test_buffers(&vtable, &ctx, buffers);
     test_images(&vtable, &ctx, images);
-    test_surfaces(&vtable, &ctx, surfaces);
+    test_surfaces(&vtable, &ctx, surfaces, images);
     test_contexts(&vtable, &ctx, configs[0], surfaces, contexts);
 
     CHECK_STATUS(vtable.vaDestroyBuffer(&ctx, configs[0]),

@@ -12,10 +12,14 @@
 #include "convert.h"
 #include "driver_internal.h"
 #include "mpp_dec.h"
+#include "mpp_enc.h"
 
 static void context_destroy(void *opaque) {
     RKContext *context = opaque;
-    rk_mpp_dec_stop(context);
+    if (!context->is_encoder)
+        rk_mpp_dec_stop(context);
+    if (context->enc_cfg)
+        mpp_enc_cfg_deinit(context->enc_cfg);
     if (context->mpp)
         mpp_destroy(context->mpp);
     if (context->decode_pool)
@@ -26,6 +30,8 @@ static void context_destroy(void *opaque) {
     }
     free(context->targets);
     free(context->hevc_sequence_headers);
+    if (context->render_surface)
+        rk_object_unref(&context->render_surface->base);
     if (context->sync_initialized) {
         pthread_cond_destroy(&context->work_cond);
         pthread_mutex_destroy(&context->work_lock);
@@ -60,15 +66,20 @@ VAStatus rk_CreateContext(VADriverContextP ctx,
     RKDriver *d = drv_from_ctx(ctx);
     (void)flag;
 
-    if (width <= 0 || height <= 0 || n_targets < 0 ||
+    if (width <= 0 || height <= 0 ||
+        width > RK_MAX_WIDTH || height > RK_MAX_HEIGHT || n_targets < 0 ||
         (n_targets > 0 && !targets) || !out_id)
-        return VA_STATUS_ERROR_INVALID_PARAMETER;
+        return width > RK_MAX_WIDTH || height > RK_MAX_HEIGHT
+             ? VA_STATUS_ERROR_RESOLUTION_NOT_SUPPORTED
+             : VA_STATUS_ERROR_INVALID_PARAMETER;
 
     RKConfig *cfg = config_acquire(d, config_id);
     if (!cfg) return VA_STATUS_ERROR_INVALID_CONFIG;
 
     MppCodingType coding = profile_to_coding(cfg->profile);
     VAProfile profile = cfg->profile;
+    VAEntrypoint entrypoint = cfg->entrypoint;
+    uint32_t rate_control = cfg->rate_control;
     rk_object_unref(&cfg->base);
     if (coding == MPP_VIDEO_CodingUnused)
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
@@ -78,6 +89,14 @@ VAStatus rk_CreateContext(VADriverContextP ctx,
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
     rk_object_init(&c->base, context_destroy);
     c->driver = d;
+    c->profile = profile;
+    c->entrypoint = entrypoint;
+    c->rate_control = rate_control;
+    c->is_encoder = entrypoint == VAEntrypointEncSlice;
+    c->width = width;
+    c->height = height;
+    c->coding = coding;
+    c->render_target = VA_INVALID_SURFACE;
 
     if (pthread_mutex_init(&c->picture_lock, NULL) != 0) {
         free(c);
@@ -124,7 +143,8 @@ VAStatus rk_CreateContext(VADriverContextP ctx,
     }
     LOG("CreateContext: mpp_create OK");
 
-    ret = mpp_init(c->mpp, MPP_CTX_DEC, coding);
+    ret = mpp_init(c->mpp, c->is_encoder ? MPP_CTX_ENC : MPP_CTX_DEC,
+                   coding);
     if (ret != MPP_OK) {
         LOG("mpp_init FAILED: %d (coding=%d)", ret, (int)coding);
         rk_object_unref(&c->base);
@@ -132,75 +152,67 @@ VAStatus rk_CreateContext(VADriverContextP ctx,
     }
     LOG("CreateContext: mpp_init OK");
 
-    bool output_10bit = profile == VAProfileHEVCMain10 ||
-                        profile == VAProfileVP9Profile2;
-    if (output_10bit) {
-        RK_U32 output_format = MPP_FRAME_FBC_AFBC_V2;
-        if (!rk_rga_available() ||
-            c->mpi->control(c->mpp, MPP_DEC_SET_OUTPUT_FORMAT,
-                            &output_format) != MPP_OK) {
-            LOG("CreateContext: 10-bit AFBC output configuration failed "
-                "profile=%d", profile);
+    if (c->is_encoder) {
+        VAStatus enc_status = rk_mpp_enc_init(c);
+        if (enc_status != VA_STATUS_SUCCESS) {
             rk_object_unref(&c->base);
-            return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
+            return enc_status;
         }
-        LOG("CreateContext: 10-bit output mode=AFBC_V2 profile=%d", profile);
-    }
+    } else {
+        bool output_10bit = profile == VAProfileHEVCMain10 ||
+                            profile == VAProfileVP9Profile2;
+        if (output_10bit) {
+            RK_U32 output_format = MPP_FRAME_FBC_AFBC_V2;
+            if (!rk_rga_available() ||
+                c->mpi->control(c->mpp, MPP_DEC_SET_OUTPUT_FORMAT,
+                                &output_format) != MPP_OK) {
+                LOG("CreateContext: 10-bit AFBC output configuration failed "
+                    "profile=%d", profile);
+                rk_object_unref(&c->base);
+                return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
+            }
+            LOG("CreateContext: 10-bit output mode=AFBC_V2 profile=%d", profile);
+        }
 
-    /* Must be set after mpp_init: split_parse=0 means we send complete
-     * access units. The worker uses a bounded blocking output wait so it can
-     * drain efficiently while still observing shutdown and newly queued work. */
-    MppDecCfg dec_cfg = NULL;
-    if (mpp_dec_cfg_init(&dec_cfg) != MPP_OK ||
-        mpp_dec_cfg_set_u32(dec_cfg, "base:split_parse", 0) != MPP_OK ||
-        c->mpi->control(c->mpp, MPP_DEC_SET_CFG, dec_cfg) != MPP_OK) {
-        if (dec_cfg)
-            mpp_dec_cfg_deinit(dec_cfg);
-        LOG("CreateContext: decoder configuration failed");
-        rk_object_unref(&c->base);
-        return VA_STATUS_ERROR_ALLOCATION_FAILED;
-    }
-    mpp_dec_cfg_deinit(dec_cfg);
-
-    RK_S64 input_timeout_ms = 0;
-    if (c->mpi->control(c->mpp, MPP_SET_INPUT_TIMEOUT,
-                        (MppParam)&input_timeout_ms) != MPP_OK) {
-        LOG("CreateContext: input timeout configuration failed");
-        rk_object_unref(&c->base);
-        return VA_STATUS_ERROR_ALLOCATION_FAILED;
-    }
-
-    RK_S64 output_timeout_ms = 20;
-    if (c->mpi->control(c->mpp, MPP_SET_OUTPUT_TIMEOUT,
-                        (MppParam)&output_timeout_ms) != MPP_OK) {
-        LOG("CreateContext: output timeout configuration failed");
-        rk_object_unref(&c->base);
-        return VA_STATUS_ERROR_ALLOCATION_FAILED;
-    }
-
-    if (coding == MPP_VIDEO_CodingHEVC) {
-        RK_U32 immediate_out = 1;
-        if (c->mpi->control(c->mpp, MPP_DEC_SET_IMMEDIATE_OUT,
-                            (MppParam)&immediate_out) != MPP_OK) {
-            LOG("CreateContext: HEVC immediate-output configuration failed");
+        MppDecCfg dec_cfg = NULL;
+        if (mpp_dec_cfg_init(&dec_cfg) != MPP_OK ||
+            mpp_dec_cfg_set_u32(dec_cfg, "base:split_parse", 0) != MPP_OK ||
+            c->mpi->control(c->mpp, MPP_DEC_SET_CFG, dec_cfg) != MPP_OK) {
+            if (dec_cfg)
+                mpp_dec_cfg_deinit(dec_cfg);
+            LOG("CreateContext: decoder configuration failed");
             rk_object_unref(&c->base);
             return VA_STATUS_ERROR_ALLOCATION_FAILED;
         }
-    }
+        mpp_dec_cfg_deinit(dec_cfg);
 
-    c->profile  = profile;
-    c->width    = width;
-    c->height   = height;
-    c->coding   = coding;
-    c->sps_sent = false;
-    c->render_target = VA_INVALID_SURFACE;
-
-    if (pthread_create(&c->worker, NULL, rk_mpp_dec_worker_main, c) != 0) {
-        LOG("CreateContext: decode worker creation failed");
-        rk_object_unref(&c->base);
-        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+        RK_S64 input_timeout_ms = 0;
+        RK_S64 output_timeout_ms = 20;
+        if (c->mpi->control(c->mpp, MPP_SET_INPUT_TIMEOUT,
+                            &input_timeout_ms) != MPP_OK ||
+            c->mpi->control(c->mpp, MPP_SET_OUTPUT_TIMEOUT,
+                            &output_timeout_ms) != MPP_OK) {
+            LOG("CreateContext: decoder timeout configuration failed");
+            rk_object_unref(&c->base);
+            return VA_STATUS_ERROR_ALLOCATION_FAILED;
+        }
+        if (coding == MPP_VIDEO_CodingHEVC) {
+            RK_U32 immediate_out = 1;
+            if (c->mpi->control(c->mpp, MPP_DEC_SET_IMMEDIATE_OUT,
+                                &immediate_out) != MPP_OK) {
+                LOG("CreateContext: HEVC immediate-output configuration failed");
+                rk_object_unref(&c->base);
+                return VA_STATUS_ERROR_ALLOCATION_FAILED;
+            }
+        }
+        c->sps_sent = false;
+        if (pthread_create(&c->worker, NULL, rk_mpp_dec_worker_main, c) != 0) {
+            LOG("CreateContext: decode worker creation failed");
+            rk_object_unref(&c->base);
+            return VA_STATUS_ERROR_ALLOCATION_FAILED;
+        }
+        c->worker_started = true;
     }
-    c->worker_started = true;
 
     uint32_t id;
     pthread_mutex_lock(&d->object_lock);
@@ -241,6 +253,29 @@ VAStatus rk_BeginPicture(VADriverContextP ctx,
     if (!s) {
         rk_object_unref(&c->base);
         return VA_STATUS_ERROR_INVALID_SURFACE;
+    }
+
+    if (c->is_encoder) {
+        if (s->width != c->width || s->height != c->height ||
+            MPP_FRAME_FMT_IS_YUV_10BIT(s->fmt)) {
+            rk_object_unref(&s->base);
+            rk_object_unref(&c->base);
+            return VA_STATUS_ERROR_INVALID_SURFACE;
+        }
+        pthread_mutex_lock(&c->picture_lock);
+        if (c->render_surface) {
+            pthread_mutex_unlock(&c->picture_lock);
+            rk_object_unref(&s->base);
+            rk_object_unref(&c->base);
+            return VA_STATUS_ERROR_OPERATION_FAILED;
+        }
+        c->render_target = render_target;
+        c->render_surface = s;
+        c->has_enc_pic = false;
+        c->has_enc_slice = false;
+        pthread_mutex_unlock(&c->picture_lock);
+        rk_object_unref(&c->base);
+        return VA_STATUS_SUCCESS;
     }
 
     pthread_mutex_lock(&c->picture_lock);
@@ -304,6 +339,25 @@ VAStatus rk_RenderPicture(VADriverContextP ctx,
         return VA_STATUS_ERROR_INVALID_PARAMETER;
     }
 
+    if (c->is_encoder) {
+        VAStatus status = VA_STATUS_SUCCESS;
+        pthread_mutex_lock(&c->picture_lock);
+        if (!c->render_surface)
+            status = VA_STATUS_ERROR_OPERATION_FAILED;
+        for (int i = 0; status == VA_STATUS_SUCCESS && i < n; i++) {
+            RKBuffer *buffer = buffer_acquire(d, buffers[i]);
+            if (!buffer) {
+                status = VA_STATUS_ERROR_INVALID_BUFFER;
+                break;
+            }
+            status = rk_mpp_enc_render_buffer(c, buffer);
+            rk_object_unref(&buffer->base);
+        }
+        pthread_mutex_unlock(&c->picture_lock);
+        rk_object_unref(&c->base);
+        return status;
+    }
+
     pthread_mutex_lock(&c->picture_lock);
     if (n > 64 - c->n_pending) {
         pthread_mutex_unlock(&c->picture_lock);
@@ -356,6 +410,25 @@ VAStatus rk_EndPicture(VADriverContextP ctx, VAContextID ctx_id) {
     RKDriver  *d = drv_from_ctx(ctx);
     RKContext *c = context_acquire(d, ctx_id);
     if (!c) return VA_STATUS_ERROR_INVALID_CONTEXT;
+
+    if (c->is_encoder) {
+        pthread_mutex_lock(&c->picture_lock);
+        if (c->render_target == VA_INVALID_SURFACE || !c->render_surface) {
+            pthread_mutex_unlock(&c->picture_lock);
+            rk_object_unref(&c->base);
+            return VA_STATUS_ERROR_OPERATION_FAILED;
+        }
+        VAStatus status = rk_mpp_enc_encode(c);
+        RKSurface *render_surface = c->render_surface;
+        c->render_target = VA_INVALID_SURFACE;
+        c->render_surface = NULL;
+        c->has_enc_pic = false;
+        c->has_enc_slice = false;
+        pthread_mutex_unlock(&c->picture_lock);
+        rk_object_unref(&render_surface->base);
+        rk_object_unref(&c->base);
+        return status;
+    }
 
     RKDecodeJob *job = NULL;
     VAStatus st;

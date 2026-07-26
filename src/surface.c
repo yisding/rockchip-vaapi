@@ -48,7 +48,7 @@ static VAStatus create_surfaces(VADriverContextP ctx, int width, int height,
 
     if (width <= 0 || height <= 0 || n < 0 || (n > 0 && !ids))
         return VA_STATUS_ERROR_INVALID_PARAMETER;
-    if (width > 7680 || height > 4320)
+    if (width > RK_MAX_WIDTH || height > RK_MAX_HEIGHT)
         return VA_STATUS_ERROR_RESOLUTION_NOT_SUPPORTED;
 
     int allocated = 0;
@@ -278,7 +278,8 @@ VAStatus rk_QuerySurfaceStatus(VADriverContextP ctx,
     RKSurface *s = surface_acquire(d, id);
     if (!s) return VA_STATUS_ERROR_INVALID_SURFACE;
     pthread_mutex_lock(&s->lock);
-    *status = s->decoded ? VASurfaceReady : VASurfaceRendering;
+    *status = (s->decoded || s->ctx_id == 0)
+            ? VASurfaceReady : VASurfaceRendering;
     pthread_mutex_unlock(&s->lock);
     LOG("QuerySurfaceStatus: surface=0x%x status=%s", id,
         (*status == VASurfaceReady) ? "Ready" : "Rendering");

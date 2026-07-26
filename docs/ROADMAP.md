@@ -494,6 +494,19 @@ A second subsystem over MPP's rkvenc2.
   overflow** hardening (a known forward-port finding) before advertising
   low-delay/multi-slice encode.
 
+**Progress (2026-07-26, H.264 frame encode):** A hidden
+`RK_VAAPI_EXPERIMENTAL_ENCODE=h264` path now exposes H.264 Main/High
+`VAEntrypointEncSlice`, accepts checked NV12 uploads, maps VA
+sequence/picture/slice plus frame-rate/rate-control state to MPP, and returns
+MPP-generated Annex B through `VACodedBufferSegment`. Stock FFmpeg
+`h264_vaapi` produces 48/48 interoperable High-profile frames in CQP, CBR, and
+VBR modes at 48.50, 46.26, and 45.16 dB average PSNR. GStreamer 1.28 registers
+`vah264enc` and passes the same 48-frame High-profile round trip. Normal and
+ASan/UBSan app gates pass. A 96-frame encoder run also passes while the complete
+shipping synthetic decode matrix runs in parallel. The implementation
+intentionally exposes one full-frame slice only; HEVC, additional input formats,
+and WebRTC remain open.
+
 **Gate:** encode → standard-decoder round-trip within a PSNR bound;
 interoperable bitstreams (ffmpeg/browsers decode them); GStreamer `vah264enc` /
 `ffmpeg -c:v h264_vaapi` / a WebRTC send path work on-device; encode contexts
@@ -569,7 +582,11 @@ concurrent with decode contexts are race-free.
   driver/config Debian packaging no longer weakens Firefox's sandbox globally.
   Display sinks, the other desktop apps, Firefox policy, and clean-image
   package validation remain open.
-- Phases 4–5: planned.
+- Phase 4: in progress; experimental one-slice H.264 Main/High encode passes
+  FFmpeg and GStreamer CQP/CBR/VBR interoperability and PSNR gates normally and
+  under ASan/UBSan, plus the concurrent encode/shipping-decode gate. HEVC,
+  broader inputs, and WebRTC remain open.
+- Phase 5: planned.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement
 map and driver-review finding as the decision/evidence record.

@@ -1,7 +1,11 @@
 #ifndef RK_VAAPI_BUFFER_H
 #define RK_VAAPI_BUFFER_H
 
+#include <stddef.h>
+#include <stdint.h>
 #include <va/va_backend.h>
+
+typedef struct RKBuffer RKBuffer;
 
 VAStatus rk_CreateBuffer(VADriverContextP context, VAContextID context_id,
                          VABufferType type, unsigned int size,
@@ -12,6 +16,8 @@ VAStatus rk_BufferSetNumElements(VADriverContextP context, VABufferID id,
 VAStatus rk_MapBuffer(VADriverContextP context, VABufferID id, void **data);
 VAStatus rk_UnmapBuffer(VADriverContextP context, VABufferID id);
 VAStatus rk_DestroyBuffer(VADriverContextP context, VABufferID id);
+VAStatus rk_buffer_store_coded(RKBuffer *buffer, const void *data, size_t size,
+                               uint32_t status);
 VAStatus rk_BufferInfo(VADriverContextP context, VABufferID id,
                        VABufferType *type, unsigned int *size,
                        unsigned int *num_elements);

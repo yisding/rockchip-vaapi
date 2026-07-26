@@ -88,6 +88,13 @@ static bool experimental_profile_enabled(const char *profile)
            !strcmp(enabled, profile);
 }
 
+static bool experimental_h264_encode_enabled(void)
+{
+    const char *enabled = getenv("RK_VAAPI_EXPERIMENTAL_ENCODE");
+    return enabled && (!strcmp(enabled, "1") || !strcmp(enabled, "all") ||
+                       !strcmp(enabled, "h264"));
+}
+
 static bool profile_supported(VAProfile p) {
     switch (p) {
     case VAProfileH264Main:
@@ -128,8 +135,12 @@ static VAStatus rk_QueryConfigEntrypoints(VADriverContextP ctx,
     (void)ctx;
     if (!profile_supported(profile))
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
-    list[0] = VAEntrypointVLD;
-    *n = 1;
+    int count = 0;
+    list[count++] = VAEntrypointVLD;
+    if ((profile == VAProfileH264Main || profile == VAProfileH264High) &&
+        experimental_h264_encode_enabled())
+        list[count++] = VAEntrypointEncSlice;
+    *n = count;
     return VA_STATUS_SUCCESS;
 }
 
@@ -137,18 +148,56 @@ static VAStatus rk_GetConfigAttributes(VADriverContextP ctx,
                                        VAProfile profile,
                                        VAEntrypoint entrypoint,
                                        VAConfigAttrib *list, int n) {
-    (void)ctx; (void)entrypoint;
+    (void)ctx;
+    bool encode = entrypoint == VAEntrypointEncSlice;
+    if (encode && (!experimental_h264_encode_enabled() ||
+                   (profile != VAProfileH264Main &&
+                    profile != VAProfileH264High)))
+        return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
     for (int i = 0; i < n; i++) {
         LOG("GetConfigAttributes: type=%d", list[i].type);
         switch (list[i].type) {
         case VAConfigAttribRTFormat:
-            list[i].value = profile == VAProfileHEVCMain10 ||
-                            profile == VAProfileVP9Profile2
+            list[i].value = !encode &&
+                            (profile == VAProfileHEVCMain10 ||
+                             profile == VAProfileVP9Profile2)
                           ? VA_RT_FORMAT_YUV420_10
                           : VA_RT_FORMAT_YUV420;
             break;
+        case VAConfigAttribRateControl:
+            list[i].value = encode ? VA_RC_CQP | VA_RC_CBR | VA_RC_VBR
+                                   : VA_ATTRIB_NOT_SUPPORTED;
+            break;
+        case VAConfigAttribEncPackedHeaders:
+            list[i].value = encode ? VA_ENC_PACKED_HEADER_NONE
+                                   : VA_ATTRIB_NOT_SUPPORTED;
+            break;
+        case VAConfigAttribEncInterlaced:
+            list[i].value = encode ? VA_ENC_INTERLACED_NONE
+                                   : VA_ATTRIB_NOT_SUPPORTED;
+            break;
+        case VAConfigAttribEncMaxRefFrames:
+            list[i].value = encode ? 1u : VA_ATTRIB_NOT_SUPPORTED;
+            break;
+        case VAConfigAttribEncMaxSlices:
+            list[i].value = encode ? 1u : VA_ATTRIB_NOT_SUPPORTED;
+            break;
+        case VAConfigAttribEncSliceStructure:
+            list[i].value = encode ? VA_ENC_SLICE_STRUCTURE_ARBITRARY_MACROBLOCKS
+                                   : VA_ATTRIB_NOT_SUPPORTED;
+            break;
+        case VAConfigAttribEncQualityRange:
+            list[i].value = encode ? 1u : VA_ATTRIB_NOT_SUPPORTED;
+            break;
+        case VAConfigAttribMaxPictureWidth:
+            list[i].value = encode ? RK_MAX_WIDTH : VA_ATTRIB_NOT_SUPPORTED;
+            break;
+        case VAConfigAttribMaxPictureHeight:
+            list[i].value = encode ? RK_MAX_HEIGHT : VA_ATTRIB_NOT_SUPPORTED;
+            break;
         case VAConfigAttribDecSliceMode:
-            list[i].value = VA_DEC_SLICE_MODE_NORMAL;
+            list[i].value = encode ? VA_ATTRIB_NOT_SUPPORTED
+                                   : VA_DEC_SLICE_MODE_NORMAL;
             break;
         case VAConfigAttribEncryption:
             list[i].value = VA_ATTRIB_NOT_SUPPORTED;
@@ -173,11 +222,51 @@ static VAStatus rk_CreateConfig(VADriverContextP ctx,
         LOG("CreateConfig: unsupported profile %d", profile);
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
     }
-    if (entrypoint != VAEntrypointVLD) {
+    bool encode = entrypoint == VAEntrypointEncSlice;
+    if (entrypoint != VAEntrypointVLD && !encode) {
         LOG("CreateConfig: unsupported entrypoint %d", entrypoint);
         return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
     }
-    (void)attribs; (void)n_attribs;
+    if (encode && (!experimental_h264_encode_enabled() ||
+                   (profile != VAProfileH264Main &&
+                    profile != VAProfileH264High)))
+        return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
+    if (n_attribs < 0 || (n_attribs > 0 && !attribs))
+        return VA_STATUS_ERROR_INVALID_PARAMETER;
+
+    uint32_t expected_rt_format = !encode &&
+                                  (profile == VAProfileHEVCMain10 ||
+                                   profile == VAProfileVP9Profile2)
+                                ? VA_RT_FORMAT_YUV420_10
+                                : VA_RT_FORMAT_YUV420;
+    uint32_t rt_format = expected_rt_format;
+    uint32_t rate_control = VA_RC_CQP;
+    for (int i = 0; i < n_attribs; i++) {
+        switch (attribs[i].type) {
+        case VAConfigAttribRTFormat:
+            if (attribs[i].value != expected_rt_format)
+                return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
+            rt_format = attribs[i].value;
+            break;
+        case VAConfigAttribRateControl:
+            if (!encode || (attribs[i].value != VA_RC_CQP &&
+                            attribs[i].value != VA_RC_CBR &&
+                            attribs[i].value != VA_RC_VBR))
+                return VA_STATUS_ERROR_ATTR_NOT_SUPPORTED;
+            rate_control = attribs[i].value;
+            break;
+        case VAConfigAttribEncPackedHeaders:
+            if (!encode || attribs[i].value != VA_ENC_PACKED_HEADER_NONE)
+                return VA_STATUS_ERROR_ATTR_NOT_SUPPORTED;
+            break;
+        case VAConfigAttribDecSliceMode:
+            if (encode || attribs[i].value != VA_DEC_SLICE_MODE_NORMAL)
+                return VA_STATUS_ERROR_ATTR_NOT_SUPPORTED;
+            break;
+        default:
+            return VA_STATUS_ERROR_ATTR_NOT_SUPPORTED;
+        }
+    }
 
     RKConfig *config = calloc(1, sizeof(*config));
     if (!config)
@@ -185,6 +274,8 @@ static VAStatus rk_CreateConfig(VADriverContextP ctx,
     rk_object_init(&config->base, free);
     config->profile = profile;
     config->entrypoint = entrypoint;
+    config->rt_format = rt_format;
+    config->rate_control = rate_control;
 
     uint32_t id;
     pthread_mutex_lock(&d->object_lock);
@@ -218,10 +309,22 @@ static VAStatus rk_QueryConfigAttributes(VADriverContextP ctx,
     RKDriver *d = drv_from_ctx(ctx);
     RKConfig *c = config_acquire(d, id);
     if (!c) return VA_STATUS_ERROR_INVALID_CONFIG;
-    (void)attribs;
     *profile = c->profile;
     *entrypoint = c->entrypoint;
-    *n = 0;
+    int count = c->entrypoint == VAEntrypointEncSlice ? 2 : 1;
+    if (attribs) {
+        attribs[0] = (VAConfigAttrib) {
+            .type = VAConfigAttribRTFormat,
+            .value = c->rt_format,
+        };
+        if (c->entrypoint == VAEntrypointEncSlice) {
+            attribs[1] = (VAConfigAttrib) {
+                .type = VAConfigAttribRateControl,
+                .value = c->rate_control,
+            };
+        }
+    }
+    *n = count;
     rk_object_unref(&c->base);
     return VA_STATUS_SUCCESS;
 }
@@ -311,47 +414,56 @@ static VAStatus rk_QuerySurfaceAttrs(VADriverContextP ctx, VAConfigID config,
     LOG("QuerySurfaceAttributes: config=0x%x list=%s",
         config, attrib_list ? "provided" : "NULL (query count)");
 
+    RKDriver *driver = drv_from_ctx(ctx);
+    RKConfig *cfg = config_acquire(driver, config);
+    if (!cfg)
+        return VA_STATUS_ERROR_INVALID_CONFIG;
+
     /* Firefox calls this twice: first with NULL to get count, then with buffer */
     const unsigned int n = 4;
     if (!attrib_list) {
         *num_attribs = n;
+        rk_object_unref(&cfg->base);
         return VA_STATUS_SUCCESS;
     }
     if (*num_attribs < n) {
         *num_attribs = n;
+        rk_object_unref(&cfg->base);
         return VA_STATUS_ERROR_MAX_NUM_EXCEEDED;
     }
 
-    /* Pixel format: NV12 (8-bit) */
+    bool is_10bit = cfg->rt_format == VA_RT_FORMAT_YUV420_10;
+    rk_object_unref(&cfg->base);
+
+    /* A config has one RT format; do not expose P010 to 8-bit encoders. */
     attrib_list[0].type              = VASurfaceAttribPixelFormat;
     attrib_list[0].flags             = VA_SURFACE_ATTRIB_GETTABLE |
                                        VA_SURFACE_ATTRIB_SETTABLE;
     attrib_list[0].value.type        = VAGenericValueTypeInteger;
-    attrib_list[0].value.value.i     = VA_FOURCC_NV12;
+    attrib_list[0].value.value.i     = is_10bit ? VA_FOURCC_P010
+                                                : VA_FOURCC_NV12;
 
-    /* Pixel format: P010 (10-bit) */
-    attrib_list[1].type              = VASurfaceAttribPixelFormat;
+    /* Memory type: VA-managed + DRM PRIME 2 */
+    attrib_list[1].type              = VASurfaceAttribMemoryType;
     attrib_list[1].flags             = VA_SURFACE_ATTRIB_GETTABLE |
                                        VA_SURFACE_ATTRIB_SETTABLE;
     attrib_list[1].value.type        = VAGenericValueTypeInteger;
-    attrib_list[1].value.value.i     = VA_FOURCC_P010;
-
-    /* Memory type: VA-managed + DRM PRIME 2 */
-    attrib_list[2].type              = VASurfaceAttribMemoryType;
-    attrib_list[2].flags             = VA_SURFACE_ATTRIB_GETTABLE |
-                                       VA_SURFACE_ATTRIB_SETTABLE;
-    attrib_list[2].value.type        = VAGenericValueTypeInteger;
-    attrib_list[2].value.value.i     = (int)(VA_SURFACE_ATTRIB_MEM_TYPE_VA |
+    attrib_list[1].value.value.i     = (int)(VA_SURFACE_ATTRIB_MEM_TYPE_VA |
                                        VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2);
 
     /* Max resolution */
-    attrib_list[3].type              = VASurfaceAttribMaxWidth;
+    attrib_list[2].type              = VASurfaceAttribMaxWidth;
+    attrib_list[2].flags             = VA_SURFACE_ATTRIB_GETTABLE;
+    attrib_list[2].value.type        = VAGenericValueTypeInteger;
+    attrib_list[2].value.value.i     = RK_MAX_WIDTH;
+    attrib_list[3].type              = VASurfaceAttribMaxHeight;
     attrib_list[3].flags             = VA_SURFACE_ATTRIB_GETTABLE;
     attrib_list[3].value.type        = VAGenericValueTypeInteger;
-    attrib_list[3].value.value.i     = 7680;
+    attrib_list[3].value.value.i     = RK_MAX_HEIGHT;
 
     *num_attribs = n;
-    LOG("QuerySurfaceAttributes: returned %u attribs (NV12, P010, DRM_PRIME_2)", n);
+    LOG("QuerySurfaceAttributes: returned %u attribs (%s, DRM_PRIME_2)",
+        n, is_10bit ? "P010" : "NV12");
     return VA_STATUS_SUCCESS;
 }
 
@@ -386,7 +498,21 @@ static VAStatus rk_QueryProcessingRate(VADriverContextP ctx,
 
 static VAStatus rk_SyncBuffer(VADriverContextP ctx, VABufferID buf_id,
                                uint64_t timeout_ns)
-{ return VA_STATUS_SUCCESS; }
+{
+    (void)timeout_ns;
+    RKBuffer *buffer = buffer_acquire(drv_from_ctx(ctx), buf_id);
+    if (!buffer)
+        return VA_STATUS_ERROR_INVALID_BUFFER;
+    VAStatus status = VA_STATUS_SUCCESS;
+    if (buffer->type == VAEncCodedBufferType) {
+        if (buffer->coded_failed)
+            status = VA_STATUS_ERROR_ENCODING_ERROR;
+        else if (!buffer->coded_ready)
+            status = VA_STATUS_ERROR_TIMEDOUT;
+    }
+    rk_object_unref(&buffer->base);
+    return status;
+}
 
 static VAStatus rk_Copy(VADriverContextP ctx, VACopyObject *dst,
                          VACopyObject *src, VACopyOption option)

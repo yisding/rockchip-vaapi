@@ -163,13 +163,28 @@ GStreamer's VA plugin rejects unrecognized vendor strings by default, so this
 gate sets its supported `GST_VA_ALL_DRIVERS=1` override. This is an app/plugin
 and readback result, not yet a DMABuf display-sink or HDR-presentation result.
 
+`check-h264-encode-experimental` generates 48 deterministic 320x240 frames and
+forces stock FFmpeg `h264_vaapi` through the hidden H.264 encoder in CQP, CBR,
+and VBR modes. Every output must be High profile, contain exactly 48 frames,
+decode with the standard H.264 decoder, exceed 35 dB average PSNR, and have one
+audited MPP packet per input frame. The same source then passes through
+GStreamer 1.28 `vah264enc` after a fresh plugin scan with
+`GST_VA_ALL_DRIVERS=1`, with the same frame/profile/PSNR checks. The sanitizer
+target loads the complete ASan/UBSan driver for all four app paths.
+
+`check-encode-decode-concurrent` runs a longer version of that encoder gate in
+parallel with the shipping synthetic decode matrix. It requires both processes
+to complete, providing a board-level overlap check between independent MPP
+encode and decode contexts.
+
 The object-lifecycle gate crosses every former fixed-array ceiling, validates
 all five typed handle namespaces and stale-handle rejection, and creates nine
 simultaneous MPP decode contexts. It also checks immediate success for NV12
 and P010 placeholder surfaces, validates composed P010 and split R16/GR1616
-descriptors before decode, rejects inconsistent RT/pixel formats, checks
-zero-timeout behavior for a pending fence, and checks failure signaling when
-that fence's context is destroyed. Its sanitized and TSan variants apply
+descriptors before decode, verifies NV12 `PutImage`/`GetImage` byte equality
+and coded-buffer segment mapping, rejects inconsistent RT/pixel formats,
+checks zero-timeout behavior for a pending fence, and checks failure signaling
+when that fence's context is destroyed. Its sanitized and TSan variants apply
 ASan/UBSan and thread-race checking to the complete lifecycle.
 
 The zero-copy gate runs the synthetic H.264 reference/B-frame matrix, 4K

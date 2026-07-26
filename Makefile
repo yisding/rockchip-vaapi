@@ -27,7 +27,7 @@ endif
 
 TARGET := rockchip_drv_video.so
 SRCS   := src/rockchip_drv_video.c src/buffer.c src/context.c src/convert.c \
-	src/export.c src/log.c src/mpp_dec.c src/object_heap.c src/surface.c \
+	src/export.c src/log.c src/mpp_dec.c src/mpp_enc.c src/object_heap.c src/surface.c \
 	src/h264.c src/frame_layout.c src/hevc.c src/vp9.c
 OBJS   := $(SRCS:.c=.o)
 
@@ -85,6 +85,7 @@ src/convert.o: src/convert.h src/frame_layout.h src/log.h
 src/mpp_dec.o: src/convert.h src/driver_internal.h src/frame_layout.h \
 	src/h264.h src/log.h src/hevc.h src/mpp_dec.h src/object_heap.h \
 	src/vp9.h
+src/mpp_enc.o: src/buffer.h src/driver_internal.h src/log.h src/mpp_enc.h
 src/object_heap.o: src/object_heap.h
 src/surface.o: src/driver_internal.h src/frame_layout.h src/log.h \
 	src/object_heap.h src/surface.h
@@ -123,6 +124,18 @@ check-vp9-profile2-experimental: $(TARGET) test
 check-gstreamer-va: $(TARGET) test
 	tests/check-gstreamer-va.sh
 
+check-h264-encode-experimental: $(TARGET) test
+	tests/check-h264-encode.sh
+
+check-h264-encode-experimental-sanitize: sanitize
+	LD_PRELOAD="$(shell $(CC) -print-file-name=libasan.so)" \
+	ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
+	UBSAN_OPTIONS=halt_on_error=1 \
+	DRIVER_DIR="$(abspath $(SAN_DIR))" tests/check-h264-encode.sh
+
+check-encode-decode-concurrent: $(TARGET) test
+	tests/check-encode-decode-concurrent.sh
+
 check-synthetic: $(TARGET) test
 	TEST_SET=synthetic tests/validate.sh
 
@@ -160,7 +173,7 @@ check-safe: $(TARGET) test
 tests/driver_objects_test: tests/driver_objects_test.c $(SRCS) \
 		src/buffer.h src/context.h src/convert.h src/driver_internal.h \
 		src/export.h src/object_heap.h src/frame_layout.h src/h264.h \
-		src/log.h src/hevc.h src/mpp_dec.h src/surface.h src/vp9.h
+		src/log.h src/hevc.h src/mpp_dec.h src/mpp_enc.h src/surface.h src/vp9.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(VA_CFLAGS) $(MPP_CFLAGS) \
 		$(RGA_CFLAGS) -Isrc tests/driver_objects_test.c $(SRCS) \
 		$(LDLIBS) -o $@
@@ -171,7 +184,7 @@ check-driver-objects: $(HARDWARE_TESTS)
 tests/driver_objects_test.san: tests/driver_objects_test.c $(SRCS) \
 		src/buffer.h src/context.h src/convert.h src/driver_internal.h \
 		src/export.h src/object_heap.h src/frame_layout.h src/h264.h \
-		src/log.h src/hevc.h src/mpp_dec.h src/surface.h src/vp9.h
+		src/log.h src/hevc.h src/mpp_dec.h src/mpp_enc.h src/surface.h src/vp9.h
 	$(CC) $(CPPFLAGS) $(SAN_CFLAGS) $(WARNINGS) $(VA_CFLAGS) $(MPP_CFLAGS) \
 		$(RGA_CFLAGS) -Isrc tests/driver_objects_test.c $(SRCS) $(SAN_LDFLAGS) \
 		$(LDLIBS) -o $@
@@ -326,6 +339,8 @@ clean:
 	check-hevc-experimental check-hevc-experimental-sanitize \
 	check-hevc-main10-experimental check-hevc-main10-hdr-experimental \
 	check-vp9-profile2-experimental check-gstreamer-va \
+	check-h264-encode-experimental check-h264-encode-experimental-sanitize \
+	check-encode-decode-concurrent \
 	check-safe check-zero-copy check-zero-copy-sanitize \
 	check-concurrent-decode check-concurrent-decode-sanitize \
 	check-concurrent-decode-tsan check-soak test test-valgrind test-sanitize sanitize \

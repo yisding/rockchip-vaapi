@@ -5,6 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <errno.h>
+#include <linux/dma-buf.h>
+#include <sys/ioctl.h>
+
 #include "driver_internal.h"
 #include "frame_layout.h"
 
@@ -13,6 +17,16 @@ static void buffer_destroy(void *opaque)
     RKBuffer *buffer = opaque;
     free(buffer->data);
     free(buffer);
+}
+
+static bool dmabuf_cpu_sync(int fd, uint64_t flags)
+{
+    struct dma_buf_sync sync = { .flags = flags };
+    int ret;
+    do {
+        ret = ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
+    } while (ret < 0 && errno == EINTR);
+    return ret == 0;
 }
 
 static void image_destroy(void *opaque)
@@ -52,6 +66,10 @@ VAStatus rk_CreateBuffer(VADriverContextP context, VAContextID context_id,
         memcpy(buffer->data, data, bytes);
     else
         memset(buffer->data, 0, bytes);
+    if (type == VAEncCodedBufferType) {
+        buffer->coded_segment.buf = buffer->data;
+        buffer->coded_segment.next = NULL;
+    }
 
     uint32_t id;
     pthread_mutex_lock(&driver->object_lock);
@@ -90,6 +108,12 @@ VAStatus rk_BufferSetNumElements(VADriverContextP context, VABufferID id,
     buffer->data = resized;
     buffer->capacity = bytes;
     buffer->num_elements = num_elements;
+    if (buffer->type == VAEncCodedBufferType) {
+        buffer->coded_segment.buf = resized;
+        buffer->coded_segment.size = 0;
+        buffer->coded_ready = false;
+        buffer->coded_failed = false;
+    }
     rk_object_unref(&buffer->base);
     return VA_STATUS_SUCCESS;
 }
@@ -100,8 +124,32 @@ VAStatus rk_MapBuffer(VADriverContextP context, VABufferID id, void **data)
     RKBuffer *buffer = buffer_acquire(driver, id);
     if (!buffer)
         return VA_STATUS_ERROR_INVALID_BUFFER;
-    *data = buffer->data;
+    *data = buffer->type == VAEncCodedBufferType
+          ? (void *)&buffer->coded_segment : buffer->data;
     rk_object_unref(&buffer->base);
+    return VA_STATUS_SUCCESS;
+}
+
+VAStatus rk_buffer_store_coded(RKBuffer *buffer, const void *data, size_t size,
+                               uint32_t status)
+{
+    if (!buffer || buffer->type != VAEncCodedBufferType || !data)
+        return VA_STATUS_ERROR_INVALID_BUFFER;
+    if (size > buffer->capacity) {
+        buffer->coded_segment.size = 0;
+        buffer->coded_segment.status = VA_CODED_BUF_STATUS_FRAME_SIZE_OVERFLOW;
+        buffer->coded_ready = true;
+        buffer->coded_failed = true;
+        return VA_STATUS_ERROR_NOT_ENOUGH_BUFFER;
+    }
+
+    memcpy(buffer->data, data, size);
+    memset(&buffer->coded_segment, 0, sizeof(buffer->coded_segment));
+    buffer->coded_segment.size = (uint32_t)size;
+    buffer->coded_segment.status = status;
+    buffer->coded_segment.buf = buffer->data;
+    buffer->coded_ready = true;
+    buffer->coded_failed = false;
     return VA_STATUS_SUCCESS;
 }
 
@@ -294,16 +342,79 @@ VAStatus rk_PutImage(VADriverContextP context, VASurfaceID surface,
                      int dest_x, int dest_y, unsigned int dest_width,
                      unsigned int dest_height)
 {
-    (void)context;
-    (void)surface;
-    (void)image;
-    (void)src_x;
-    (void)src_y;
-    (void)src_width;
-    (void)src_height;
-    (void)dest_x;
-    (void)dest_y;
-    (void)dest_width;
-    (void)dest_height;
-    return VA_STATUS_SUCCESS;
+    RKDriver *driver = drv_from_ctx(context);
+    RKSurface *target = surface_acquire(driver, surface);
+    RKImage *source = image_acquire(driver, image);
+    RKBuffer *source_buffer = source ? source->buffer : NULL;
+    if (!target) {
+        if (source)
+            rk_object_unref(&source->base);
+        return VA_STATUS_ERROR_INVALID_SURFACE;
+    }
+    if (!source || !source_buffer || !source_buffer->data) {
+        rk_object_unref(&target->base);
+        if (source)
+            rk_object_unref(&source->base);
+        return VA_STATUS_ERROR_INVALID_IMAGE;
+    }
+
+    bool full_frame = src_x == 0 && src_y == 0 && dest_x == 0 && dest_y == 0 &&
+                      src_width == source->width &&
+                      src_height == source->height &&
+                      dest_width == (unsigned int)target->width &&
+                      dest_height == (unsigned int)target->height &&
+                      src_width == dest_width && src_height == dest_height;
+    bool is_10bit = MPP_FRAME_FMT_IS_YUV_10BIT(target->fmt);
+    uint32_t expected_fourcc = is_10bit ? VA_FOURCC_P010 : VA_FOURCC_NV12;
+    unsigned int bytes_per_sample = is_10bit ? 2u : 1u;
+    if (!full_frame || source->fourcc != expected_fourcc) {
+        rk_object_unref(&source->base);
+        rk_object_unref(&target->base);
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+
+    pthread_mutex_lock(&target->lock);
+    MppBuffer destination = target->priv_buf;
+    size_t destination_pitch = (size_t)target->hstride * bytes_per_sample;
+    size_t destination_size;
+    size_t source_size;
+    if (!destination || destination_pitch < source->pitch ||
+        !rk_nv12_layout_size(destination_pitch, (size_t)target->vstride,
+                             &destination_size) ||
+        !rk_nv12_layout_size(source->pitch, source->height, &source_size) ||
+        destination_size > mpp_buffer_get_size(destination) ||
+        source_size > source_buffer->capacity) {
+        pthread_mutex_unlock(&target->lock);
+        rk_object_unref(&source->base);
+        rk_object_unref(&target->base);
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+
+    int fd = mpp_buffer_get_fd(destination);
+    uint8_t *dst = mpp_buffer_get_ptr(destination);
+    const uint8_t *src = source_buffer->data;
+    if (fd < 0 || !dst ||
+        !dmabuf_cpu_sync(fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE)) {
+        pthread_mutex_unlock(&target->lock);
+        rk_object_unref(&source->base);
+        rk_object_unref(&target->base);
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+
+    memset(dst, 0, destination_size);
+    size_t row_bytes = (size_t)target->width * bytes_per_sample;
+    for (int row = 0; row < target->height; row++)
+        memcpy(dst + (size_t)row * destination_pitch,
+               src + (size_t)row * source->pitch, row_bytes);
+    uint8_t *dst_uv = dst + destination_pitch * (size_t)target->vstride;
+    const uint8_t *src_uv = src + (size_t)source->pitch * source->height;
+    for (int row = 0; row < target->height / 2; row++)
+        memcpy(dst_uv + (size_t)row * destination_pitch,
+               src_uv + (size_t)row * source->pitch, row_bytes);
+
+    bool sync_ok = dmabuf_cpu_sync(fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE);
+    pthread_mutex_unlock(&target->lock);
+    rk_object_unref(&source->base);
+    rk_object_unref(&target->base);
+    return sync_ok ? VA_STATUS_SUCCESS : VA_STATUS_ERROR_OPERATION_FAILED;
 }

@@ -9,16 +9,23 @@
 #include <rockchip/mpp_buffer.h>
 #include <rockchip/mpp_frame.h>
 #include <rockchip/rk_mpi.h>
+#include <rockchip/rk_venc_cfg.h>
 #include <va/va_backend.h>
 #include <va/va_dec_hevc.h>
+#include <va/va_enc_h264.h>
 
 #include "log.h"
 #include "object_heap.h"
+
+#define RK_MAX_WIDTH 7680
+#define RK_MAX_HEIGHT 4320
 
 typedef struct {
     RKObjectBase base;
     VAProfile profile;
     VAEntrypoint entrypoint;
+    uint32_t rt_format;
+    uint32_t rate_control;
 } RKConfig;
 
 typedef struct RKSurface RKSurface;
@@ -65,6 +72,9 @@ typedef struct {
     MppCtx mpp;
     MppApi *mpi;
     MppCodingType coding;
+    VAEntrypoint entrypoint;
+    uint32_t rate_control;
+    bool is_encoder;
 
     RKSurface **targets;
     int n_targets;
@@ -103,6 +113,17 @@ typedef struct {
     bool has_hevc_iq;
     uint8_t *hevc_sequence_headers;
     size_t hevc_sequence_headers_size;
+
+    MppEncCfg enc_cfg;
+    VAEncSequenceParameterBufferH264 enc_seq;
+    VAEncPictureParameterBufferH264 enc_pic;
+    VAEncSliceParameterBufferH264 enc_slice;
+    bool has_enc_seq;
+    bool has_enc_pic;
+    bool has_enc_slice;
+    uint32_t enc_bitrate;
+    uint32_t enc_fps_num;
+    uint32_t enc_fps_den;
 } RKContext;
 
 struct RKSurface {
@@ -129,13 +150,16 @@ struct RKSurface {
     pthread_cond_t cond;
 };
 
-typedef struct {
+typedef struct RKBuffer {
     RKObjectBase base;
     VABufferType type;
     unsigned int size;
     unsigned int num_elements;
     size_t capacity;
     void *data;
+    VACodedBufferSegment coded_segment;
+    bool coded_ready;
+    bool coded_failed;
 } RKBuffer;
 
 typedef struct {

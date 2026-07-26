@@ -44,6 +44,8 @@ rockchip-vaapi/
 │   ├── log.h
 │   ├── mpp_dec.c              # MPP pool, packet, routing, and worker backend
 │   ├── mpp_dec.h
+│   ├── mpp_enc.c              # Experimental synchronous MPP encode backend
+│   ├── mpp_enc.h
 │   ├── surface.c              # Surface lifecycle, fence waits, and readback
 │   ├── surface.h
 │   ├── h264.c                 # H.264 SPS/PPS Annex B reconstruction
@@ -434,6 +436,28 @@ corrupt output. HEVC stays hidden until the pinned gate is bit-exact.
 
 ---
 
+## H.264 encode pipeline (experimental)
+
+`RK_VAAPI_EXPERIMENTAL_ENCODE=h264` adds `VAEntrypointEncSlice` to H.264
+Main/High without changing default capabilities. The encoder config stores the
+selected CQP, CBR, or VBR mode. `vaRenderPicture` snapshots sequence, picture,
+slice, and supported misc parameters before applications can destroy those VA
+buffers; `mpp_enc.c` maps them to MPP prep/rate-control/H.264 keys.
+
+System-memory upload uses `vaCreateImage` plus `vaPutImage`. The latter now
+performs a checked NV12 copy into the surface DMA-BUF with explicit CPU
+synchronization. `vaEndPicture` submits that buffer to rkvenc2, waits for one
+MPP packet, and publishes it through a `VACodedBufferSegment`. MPP emits
+SPS/PPS on each IDR. Coded-buffer overflow fails closed.
+
+The current boundary is deliberately narrow: progressive NV12, one complete
+frame-level slice, MPP-managed references, and synchronous completion. P010,
+RGA input conversion, packed application headers, B-frames, multi-slice,
+HEVC, and WebRTC integration are not advertised. This also avoids exercising
+the kernel's historically vulnerable multi-slice FIFO path.
+
+---
+
 ## Firefox process model
 
 Firefox decodes video in the **RDD (Remote Data Decoder)** sandboxed process.
@@ -462,6 +486,8 @@ config package deliberately do not weaken that sandbox.
   VP9 Profile 2 has a separate bit-exact 48-frame gate through the same
   conversion path. Both remain unadvertised until broader conformance and HDR
   gates pass. VP8 and AV1 are also unadvertised.
+- H.264 encode is experimental and restricted to full-frame NV12 with one
+  slice. It is not exposed unless `RK_VAAPI_EXPERIMENTAL_ENCODE=h264` is set.
 
 ---
 

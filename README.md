@@ -88,6 +88,8 @@ Key features:
 - DRM PRIME 2 surface export directly from retained MPP external-pool DMA-BUFs
 - GStreamer `va` app gate with byte-exact H.264, HEVC Main10, and VP9
   Profile 0/2 system-memory output
+- Experimental H.264 High encode through `h264_vaapi` and GStreamer
+  `vah264enc`, with CQP/CBR/VBR round-trip PSNR gates
 - Compatible with Firefox 128+ (VA-API PDM path, RDD process)
 - Implements the full VA-API 1.20 vtable (`__vaDriverInit_1_20`)
 
@@ -115,6 +117,13 @@ Key features:
 
 Applications fall back to their software decoders for the codecs that are
 not offered.
+
+Experimental encode is hidden by default. Setting
+`RK_VAAPI_EXPERIMENTAL_ENCODE=h264` exposes frame-level H.264 Main/High
+`VAEntrypointEncSlice` for NV12 input. The current gate covers one slice per
+frame, MPP-generated headers, CQP/CBR/VBR, FFmpeg interoperability, and
+GStreamer `vah264enc`; broader input formats, HEVC, WebRTC, and multi-slice
+encoding remain open.
 
 ## Dependencies
 
