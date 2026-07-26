@@ -35,6 +35,8 @@ typedef struct RKDecodeJob {
     bool h264_field;
     bool is_hidden;
     uint8_t repeat_slot;
+    uint8_t *hevc_sequence_headers;
+    size_t hevc_sequence_headers_size;
 } RKDecodeJob;
 
 typedef struct RKFrameRoute {
@@ -99,6 +101,8 @@ typedef struct {
     VAIQMatrixBufferHEVC last_hevc_iq;
     bool has_hevc_pp;
     bool has_hevc_iq;
+    uint8_t *hevc_sequence_headers;
+    size_t hevc_sequence_headers_size;
 } RKContext;
 
 struct RKSurface {

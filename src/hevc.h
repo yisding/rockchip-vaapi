@@ -39,6 +39,10 @@ int rk_hevc_write_parameter_sets(uint8_t *buf, size_t buf_size,
                                  const VAPictureParameterBufferHEVC *pp,
                                  const VAIQMatrixBufferHEVC *iq,
                                  uint8_t pps_id, int profile_idc);
+int rk_hevc_write_sequence_parameter_sets(
+    uint8_t *buf, size_t buf_size,
+    const VAPictureParameterBufferHEVC *pp,
+    const VAIQMatrixBufferHEVC *iq, int profile_idc);
 int rk_hevc_write_picture_parameter_set(uint8_t *buf, size_t buf_size,
                                         const VAPictureParameterBufferHEVC *pp,
                                         const VAIQMatrixBufferHEVC *iq,

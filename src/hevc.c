@@ -417,13 +417,6 @@ static bool validate_picture_parameters(const VAPictureParameterBufferHEVC *pp,
         (pp->pic_fields.bits.scaling_list_enabled_flag && !iq))
         return false;
 
-    if (pp->pic_fields.bits.scaling_list_enabled_flag &&
-        pp->num_short_term_ref_pic_sets > 0)
-        return false;
-    if (pp->slice_parsing_fields.bits.long_term_ref_pics_present_flag &&
-        pp->num_long_term_ref_pic_sps > 0)
-        return false;
-
     unsigned int min_cb_log2 =
         pp->log2_min_luma_coding_block_size_minus3 + 3;
     unsigned int ctb_log2 = min_cb_log2 +
@@ -878,8 +871,7 @@ fail:
 
 static int write_sps(uint8_t *buf, size_t buf_size,
                      const VAPictureParameterBufferHEVC *pp,
-                     const VAIQMatrixBufferHEVC *iq, int profile_idc,
-                     const HEVCRPS *rps)
+                     int profile_idc)
 {
     uint8_t raw[HEVC_RAW_NAL_CAPACITY];
     BSWriter bs;
@@ -912,11 +904,8 @@ static int write_sps(uint8_t *buf, size_t buf_size,
     bs_write_ue(&bs, pp->max_transform_hierarchy_depth_inter);
     bs_write_ue(&bs, pp->max_transform_hierarchy_depth_intra);
     bs_write(&bs, pp->pic_fields.bits.scaling_list_enabled_flag, 1);
-    if (pp->pic_fields.bits.scaling_list_enabled_flag) {
-        bs_write(&bs, 1, 1);       /* sps_scaling_list_data_present_flag */
-        if (!write_scaling_lists(&bs, iq))
-            return -1;
-    }
+    if (pp->pic_fields.bits.scaling_list_enabled_flag)
+        bs_write(&bs, 0, 1);       /* matrices are picture/PPS state */
     bs_write(&bs, pp->pic_fields.bits.amp_enabled_flag, 1);
     bs_write(&bs, pp->slice_parsing_fields.bits.sample_adaptive_offset_enabled_flag, 1);
     bs_write(&bs, pp->pic_fields.bits.pcm_enabled_flag, 1);
@@ -927,7 +916,6 @@ static int write_sps(uint8_t *buf, size_t buf_size,
         bs_write_ue(&bs, pp->log2_diff_max_min_pcm_luma_coding_block_size);
         bs_write(&bs, pp->pic_fields.bits.pcm_loop_filter_disabled_flag, 1);
     }
-    (void)rps;
     bs_write_ue(&bs, 0);          /* rewritten slices carry explicit RPS */
 
     bool has_long_term = pp->slice_parsing_fields.bits.long_term_ref_pics_present_flag;
@@ -944,9 +932,10 @@ static int write_sps(uint8_t *buf, size_t buf_size,
 }
 
 static int write_pps(uint8_t *buf, size_t buf_size,
-                     const VAPictureParameterBufferHEVC *pp, uint8_t pps_id)
+                     const VAPictureParameterBufferHEVC *pp,
+                     const VAIQMatrixBufferHEVC *iq, uint8_t pps_id)
 {
-    uint8_t raw[4096];
+    uint8_t raw[HEVC_RAW_NAL_CAPACITY];
     BSWriter bs;
     bs_init(&bs, raw, sizeof(raw));
     bool deblock_present =
@@ -1001,7 +990,10 @@ static int write_pps(uint8_t *buf, size_t buf_size,
             bs_write_se(&bs, pp->pps_tc_offset_div2);
         }
     }
-    bs_write(&bs, 0, 1);           /* pps_scaling_list_data_present_flag */
+    bs_write(&bs, pp->pic_fields.bits.scaling_list_enabled_flag, 1);
+    if (pp->pic_fields.bits.scaling_list_enabled_flag &&
+        !write_scaling_lists(&bs, iq))
+        return -1;
     bs_write(&bs, pp->slice_parsing_fields.bits.lists_modification_present_flag, 1);
     bs_write_ue(&bs, pp->log2_parallel_merge_level_minus2);
     bs_write(&bs, pp->slice_parsing_fields.bits.slice_segment_header_extension_present_flag, 1);
@@ -1010,29 +1002,52 @@ static int write_pps(uint8_t *buf, size_t buf_size,
     return finish_nal(buf, buf_size, raw, bs_bytes(&bs));
 }
 
-int rk_hevc_write_parameter_sets(uint8_t *buf, size_t buf_size,
-                                 const VAPictureParameterBufferHEVC *pp,
-                                 const VAIQMatrixBufferHEVC *iq,
-                                 uint8_t pps_id, int profile_idc)
+static int write_sequence_parameter_sets(
+    uint8_t *buf, size_t buf_size,
+    const VAPictureParameterBufferHEVC *pp, int profile_idc)
 {
-    HEVCRPS rps;
     size_t used = 0;
-
-    if (!buf || pps_id > 63 ||
-        !validate_picture_parameters(pp, iq, profile_idc, &rps))
-        return -1;
 
     int size = write_vps(buf + used, buf_size - used, pp, profile_idc);
     if (size < 0)
         return -1;
     used += (size_t)size;
 
-    size = write_sps(buf + used, buf_size - used, pp, iq, profile_idc, &rps);
+    size = write_sps(buf + used, buf_size - used, pp, profile_idc);
     if (size < 0)
         return -1;
     used += (size_t)size;
+    return used <= INT_MAX ? (int)used : -1;
+}
 
-    size = write_pps(buf + used, buf_size - used, pp, pps_id);
+int rk_hevc_write_sequence_parameter_sets(
+    uint8_t *buf, size_t buf_size,
+    const VAPictureParameterBufferHEVC *pp,
+    const VAIQMatrixBufferHEVC *iq, int profile_idc)
+{
+    HEVCRPS rps;
+
+    if (!buf || !validate_picture_parameters(pp, iq, profile_idc, &rps))
+        return -1;
+    return write_sequence_parameter_sets(buf, buf_size, pp, profile_idc);
+}
+
+int rk_hevc_write_parameter_sets(uint8_t *buf, size_t buf_size,
+                                 const VAPictureParameterBufferHEVC *pp,
+                                 const VAIQMatrixBufferHEVC *iq,
+                                 uint8_t pps_id, int profile_idc)
+{
+    HEVCRPS rps;
+
+    if (!buf || pps_id > 63 ||
+        !validate_picture_parameters(pp, iq, profile_idc, &rps))
+        return -1;
+
+    int size = write_sequence_parameter_sets(buf, buf_size, pp, profile_idc);
+    if (size < 0)
+        return -1;
+    size_t used = (size_t)size;
+    size = write_pps(buf + used, buf_size - used, pp, iq, pps_id);
     if (size < 0 || used > (size_t)INT_MAX - (size_t)size)
         return -1;
     used += (size_t)size;
@@ -1049,5 +1064,5 @@ int rk_hevc_write_picture_parameter_set(uint8_t *buf, size_t buf_size,
     if (!buf || pps_id > 63 ||
         !validate_picture_parameters(pp, iq, profile_idc, &rps))
         return -1;
-    return write_pps(buf, buf_size, pp, pps_id);
+    return write_pps(buf, buf_size, pp, iq, pps_id);
 }

@@ -349,20 +349,30 @@ validation path without advertising HEVC by default:
 with fail-fast FFmpeg timeouts. The RPS rewrite now keeps valid
 `ReferenceFrames[]` entries that are not current-picture refs as follow
 references (`used_by_curr_pic=0`), preserving DPB state needed by later pictures.
-Together with PPS emission before every access unit, the forced hardware sweep
-now has five bit-exact HEVC Main vectors:
+Together with PPS emission before every access unit, the initial forced
+hardware sweep had five bit-exact HEVC Main vectors:
 `PPS_A_qualcomm_7.bit`, `RPS_A_docomo_4.bit`, `VPSID_A_VIDYO_2.bit`,
 `WPP_A_ericsson_MAIN_2.bit`, and `WP_A_Toshiba_3.bit`.
 
-The gate is intentionally still non-green. `LTRPSPS_A_Qualcomm_1.bit` rejects
-with `unsupported HEVC SPS long-term refs count=8` because VA-API exposes only
-`num_long_term_ref_pic_sps`, not the `lt_ref_pic_poc_lsb_sps[]` or
-`used_by_curr_pic_lt_sps_flag[]` table needed to reconstruct the stream.
-`SLIST_A_Sony_4.bit` rejects with
-`unsupported HEVC scaling-list stream with SPS RPS tables count=11` until that
-SPS-RPS/scaling-list class can be reconstructed without timeouts or corruption.
-`TILES_A_Cisco_2.bit` reaches MPP, but direct MPP decode of the original Annex B
-stream reports `errinfo=1` from frame 1 onward; the driver now maps
+**Progress (2026-07-26, HEVC 7/8):** SPS-backed short- and long-term references
+are now supported without reconstructing VA-hidden SPS tables. The slice
+rewriter consumes the original table-selection syntax using the VA-provided
+counts, then materializes the current DPB reference state from
+`ReferenceFrames[]` as an explicit slice RPS. `LTRPSPS_A_Qualcomm_1.bit` is
+bit-exact for all 500 frames.
+
+Scaling matrices now live in the reconstructed PPS, matching the
+picture-scoped `VAIQMatrixBufferHEVC`, while the SPS only enables their use.
+The PPS is emitted before every access unit. VPS/SPS bytes are regenerated and
+compared with the last successfully queued sequence state, so genuine sequence
+changes are propagated without resetting MPP's DPB at every CRA.
+`SLIST_A_Sony_4.bit` is consequently bit-exact for all 65 frames, including its
+post-CRA RASL pictures.
+
+The complete forced-hardware sweep is now 7/8 bit-exact. The gate remains
+non-green only for `TILES_A_Cisco_2.bit`: direct MPP decode of the original
+Annex B stream reports `errinfo=1` from frame 1 onward, and the reconstructed
+VA-API path reports the same backend error. The driver maps
 errored/discarded MPP frames to `VA_STATUS_ERROR_DECODING_ERROR` and resets the
 decoder during teardown so in-flight MPP buffers are not leaked. The safe
 advertised hardware subset (`check-safe`) still passes with HEVC software
@@ -473,8 +483,9 @@ concurrent with decode contexts are race-free.
   decoders, sanitizer gates, and the multi-hour 4K resource soak are green.
 - Phase 2: in progress; the first host reconstruction/routing slice is green,
   the NV15->P010 plumbing builds cleanly, and a fail-fast experimental HEVC
-  hardware gate exists. HEVC Main still fails that gate, while 10-bit profile
-  advertisement and HDR validation remain open.
+  hardware gate is 7/8 bit-exact. HEVC Main remains hidden on the direct-MPP
+  TILES failure, while 10-bit profile advertisement and HDR validation remain
+  open.
 - Phases 3–5: planned.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement

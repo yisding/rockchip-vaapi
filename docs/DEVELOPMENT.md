@@ -385,14 +385,22 @@ val++ → find bit length k of val → write k zeros → write val in k+1 bits
 
 `hevc.c` reconstructs Annex B VPS/SPS/PPS units from the picture and IQ
 buffers, including Main/Main10 profile-tier-level syntax, scaling-list scan
-order, tiles, and the current short/long-term reference set. Slice NALs are
-parsed far enough to recover their PPS ID and rewrite explicit RPS state from
-the VA picture buffer. Malformed and unsupported state fails before a worker
-job is queued. `mpp_dec.c` emits a full parameter bundle at the first
-picture/IRAP, emits a PPS before every later access unit so redefined PPS state
-is visible to MPP, preserves already-prefixed slices, and adds a start code to
-bare NALs. HEVC shares H.264's token-based output routing because both codecs
-may reorder display output.
+order, tiles, and the current short/long-term reference set. Scaling matrices
+are emitted in the PPS because `VAIQMatrixBufferHEVC` is picture state; the SPS
+enables scaling lists without freezing one picture's matrices as sequence
+state. Slice NALs are parsed far enough to recover their PPS ID, consume any
+SPS-table selection syntax using the VA-provided table counts, and rewrite
+explicit RPS state from the current `ReferenceFrames[]` DPB view. Malformed and
+unsupported state fails before a worker job is queued.
+
+`mpp_dec.c` emits a PPS before every access unit so redefined picture state is
+visible to MPP. It regenerates VPS/SPS bytes for each picture, but only prepends
+them when they differ from the last successfully queued sequence bundle. This
+propagates genuine sequence changes without resetting MPP's DPB at every CRA,
+where following RASL pictures may still need pre-CRA references. The assembler
+preserves already-prefixed slices and adds a start code to bare NALs. HEVC
+shares H.264's token-based output routing because both codecs may reorder
+display output.
 
 This path is intentionally not advertised yet. Adding a profile requires
 changing `profile_supported`, its surface attributes, and the conformance
@@ -402,16 +410,15 @@ manifest together only after the on-device bit-exact gate passes. VP9 Profile
 For Phase 2 debugging, `RK_VAAPI_EXPERIMENTAL_PROFILES=hevc-main` temporarily
 enables `VAProfileHEVCMain` so `make check-hevc-experimental` can force the
 pinned HEVC vectors through hardware. The switch is intentionally narrow and
-must not be used as release evidence by itself. The current boundary is:
-unflagged `ReferenceFrames[]` entries are preserved as follow references in the
-rewritten explicit RPS, which makes `PPS_A_qualcomm_7.bit` and
-`RPS_A_docomo_4.bit` bit-exact alongside the VPSID, WPP, and weighted-prediction
-vectors. SPS-stored long-term reference streams remain fail-closed because
-VA-API provides only `num_long_term_ref_pic_sps`, not the corresponding SPS POC
-and used flags; scaling-list streams with SPS RPS tables are also fail-closed
-until that class is proven. MPP reports `errinfo` on the TILES vector, and the
-driver now treats errored/discarded MPP frames as decode failures instead of
-binding corrupt output. HEVC stays hidden until the pinned gate is bit-exact.
+must not be used as release evidence by itself. The current boundary is 7/8
+bit-exact. Unflagged `ReferenceFrames[]` entries are preserved as follow
+references, while current short- and long-term references are explicitly
+materialized after the original SPS-table syntax is consumed.
+`LTRPSPS_A_Qualcomm_1.bit` and `SLIST_A_Sony_4.bit` now pass alongside PPS,
+RPS, VPSID, WPP, and weighted-prediction vectors. MPP reports `errinfo` on the
+TILES vector even when decoding its original Annex B stream, and the driver
+treats errored/discarded MPP frames as decode failures instead of binding
+corrupt output. HEVC stays hidden until the pinned gate is bit-exact.
 
 ---
 
@@ -434,9 +441,8 @@ patching Firefox's sandbox policy).
   the lowest Annex A level supported by the available frame/DPB constraints.
   Bitrate and frame-rate distinctions cannot be recovered from this buffer.
 - HEVC reconstruction is host-validated but unadvertised pending the pinned
-  on-device Main conformance gate. The current fail-closed classes are
-  SPS-stored long-term reference POC tables, scaling-list streams with SPS RPS
-  tables, and MPP-reported errored TILES output.
+  on-device Main conformance gate. Seven of eight pinned vectors are bit-exact;
+  MPP-reported errored TILES output is the remaining fail-closed class.
 - HEVC Main10 and VP9 Profile 2 have NV15-to-P010 plumbing. The standalone
   P010/librga blocker is fixed on the tested kernel/librga stack, but these
   profiles remain unadvertised until the on-device 10-bit conformance/HDR

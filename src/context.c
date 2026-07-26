@@ -24,6 +24,7 @@ static void context_destroy(void *opaque) {
             rk_object_unref(&context->targets[i]->base);
     }
     free(context->targets);
+    free(context->hevc_sequence_headers);
     if (context->sync_initialized) {
         pthread_cond_destroy(&context->work_cond);
         pthread_mutex_destroy(&context->work_lock);

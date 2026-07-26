@@ -105,15 +105,16 @@ FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-sanitize
 the pinned HEVC vectors, and fails fast with a bounded FFmpeg timeout. It is a
 Phase 2 development gate, not a release gate: HEVC remains unadvertised until
 this target is bit-exact. On 2026-07-26 the current forced-hardware boundary is
-five bit-exact vectors (`PPS_A_qualcomm_7.bit`, `RPS_A_docomo_4.bit`,
+seven bit-exact vectors: `LTRPSPS_A_Qualcomm_1.bit`,
+`PPS_A_qualcomm_7.bit`, `RPS_A_docomo_4.bit`, `SLIST_A_Sony_4.bit`,
 `VPSID_A_VIDYO_2.bit`, `WPP_A_ericsson_MAIN_2.bit`, and
-`WP_A_Toshiba_3.bit`) and three fail-closed vectors. `LTRPSPS_A_Qualcomm_1.bit`
-rejects with `unsupported HEVC SPS long-term refs count=8` because VA-API omits
-the SPS long-term reference POC table that this stream uses. `SLIST_A_Sony_4.bit`
-rejects for the scaling-list + SPS-RPS combination. `TILES_A_Cisco_2.bit`
-reaches MPP, but direct MPP decode of the original Annex B stream reports
-`errinfo=1` from frame 1 onward, so the driver maps errored/discarded MPP frames
-to `VA_STATUS_ERROR_DECODING_ERROR` instead of returning corrupt output.
+`WP_A_Toshiba_3.bit`. SPS-backed references are consumed from the original
+slice syntax and rematerialized from the current VA DPB state; scaling matrices
+are carried in the per-access-unit PPS. `TILES_A_Cisco_2.bit` is the sole
+failure. Direct MPP decode of the original Annex B stream and the reconstructed
+VA-API path both report `errinfo=1` from frame 1 onward, so the driver maps
+errored/discarded MPP frames to `VA_STATUS_ERROR_DECODING_ERROR` instead of
+returning corrupt output.
 
 For the 10-bit Phase 2 gate, the board must run a kernel/librga pair whose
 standalone RGA NV15/P010 probes pass; the prior standalone P010/librga blocker

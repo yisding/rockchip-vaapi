@@ -702,8 +702,12 @@ static bool has_annex_b_prefix(const uint8_t *data, size_t size)
 static VAStatus build_hevc_job(RKContext *c, RKDriver *d,
                                RKDecodeJob **job_out)
 {
-    enum { HEVC_HEADER_CAPACITY = 65536 };
+    enum {
+        HEVC_HEADER_CAPACITY = 65536,
+        HEVC_SEQUENCE_HEADER_CAPACITY = 4096,
+    };
     static const uint8_t start_code[4] = { 0, 0, 0, 1 };
+    uint8_t sequence_headers[HEVC_SEQUENCE_HEADER_CAPACITY];
     RKHEVCSliceInfo slice_info;
     bool found_slice = false;
 
@@ -734,47 +738,49 @@ static VAStatus build_hevc_job(RKContext *c, RKDriver *d,
     size_t packet_capacity = 0;
     VAStatus status = VA_STATUS_SUCCESS;
 
-    bool is_irap = slice_info.nal_unit_type >= 16 && slice_info.nal_unit_type <= 23;
-    bool need_full_headers = is_irap || !c->sps_sent;
     uint8_t *headers = malloc(HEVC_HEADER_CAPACITY);
     if (!headers)
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
     int profile_idc = c->profile == VAProfileHEVCMain10 ? 2 : 1;
-    int header_size = need_full_headers ?
-        rk_hevc_write_parameter_sets(
-            headers, HEVC_HEADER_CAPACITY, &c->last_hevc_pp,
-            c->has_hevc_iq ? &c->last_hevc_iq : NULL,
-            slice_info.pps_id, profile_idc) :
-        rk_hevc_write_picture_parameter_set(
-            headers, HEVC_HEADER_CAPACITY, &c->last_hevc_pp,
-            c->has_hevc_iq ? &c->last_hevc_iq : NULL,
-            slice_info.pps_id, profile_idc);
-    if (header_size <= 0) {
-        if (c->last_hevc_pp.slice_parsing_fields.bits.long_term_ref_pics_present_flag &&
-            c->last_hevc_pp.num_long_term_ref_pic_sps > 0) {
-            LOG("build_hevc_job: unsupported HEVC SPS long-term refs count=%u",
-                c->last_hevc_pp.num_long_term_ref_pic_sps);
-        } else if (c->last_hevc_pp.pic_fields.bits.scaling_list_enabled_flag &&
-                   c->last_hevc_pp.num_short_term_ref_pic_sets > 0) {
-            LOG("build_hevc_job: unsupported HEVC scaling-list stream with SPS RPS tables count=%u",
-                c->last_hevc_pp.num_short_term_ref_pic_sets);
-        } else {
-            LOG("build_hevc_job: parameter-set reconstruction failed");
-        }
+    const VAIQMatrixBufferHEVC *iq =
+        c->has_hevc_iq ? &c->last_hevc_iq : NULL;
+    int sequence_size = rk_hevc_write_sequence_parameter_sets(
+        sequence_headers, sizeof(sequence_headers), &c->last_hevc_pp,
+        iq, profile_idc);
+    if (sequence_size <= 0) {
+        LOG("build_hevc_job: sequence parameter-set reconstruction failed");
         free(headers);
         return VA_STATUS_ERROR_DECODING_ERROR;
     }
+    pthread_mutex_lock(&c->work_lock);
+    bool sequence_changed =
+        c->hevc_sequence_headers_size != (size_t)sequence_size ||
+        !c->hevc_sequence_headers ||
+        memcmp(c->hevc_sequence_headers, sequence_headers,
+               (size_t)sequence_size) != 0;
+    pthread_mutex_unlock(&c->work_lock);
+    size_t header_size = 0;
+    if (sequence_changed) {
+        memcpy(headers, sequence_headers, (size_t)sequence_size);
+        header_size = (size_t)sequence_size;
+    }
+    int pps_size = rk_hevc_write_picture_parameter_set(
+        headers + header_size, HEVC_HEADER_CAPACITY - header_size,
+        &c->last_hevc_pp, iq, slice_info.pps_id, profile_idc);
+    if (pps_size <= 0) {
+        LOG("build_hevc_job: picture parameter-set reconstruction failed");
+        free(headers);
+        return VA_STATUS_ERROR_DECODING_ERROR;
+    }
+    header_size += (size_t)pps_size;
 
     status = packet_append(&packet, &packet_size, &packet_capacity,
-                           headers, (size_t)header_size);
+                           headers, header_size);
     free(headers);
     if (status != VA_STATUS_SUCCESS) {
         free(packet);
         return status;
     }
-    if (need_full_headers)
-        c->sps_sent = true;
-
     unsigned int slice_count = 0;
     VASliceParameterBufferHEVC last_slice_param;
     bool have_slice_param = false;
@@ -793,8 +799,6 @@ static VAStatus build_hevc_job(RKContext *c, RKDriver *d,
             rk_object_unref(&b->base);
             continue;
         }
-        size_t data_size = b->capacity;
-        const uint8_t *data = b->data;
         uint8_t *rewritten = malloc(b->capacity + 4096);
         if (!rewritten) {
             rk_object_unref(&b->base);
@@ -811,8 +815,8 @@ static VAStatus build_hevc_job(RKContext *c, RKDriver *d,
             free(packet);
             return VA_STATUS_ERROR_DECODING_ERROR;
         }
-        data = rewritten;
-        data_size = (size_t)rewritten_size;
+        const uint8_t *data = rewritten;
+        size_t data_size = (size_t)rewritten_size;
         if (!has_annex_b_prefix(data, data_size))
             status = packet_append(&packet, &packet_size, &packet_capacity,
                                    start_code, sizeof(start_code));
@@ -835,6 +839,16 @@ static VAStatus build_hevc_job(RKContext *c, RKDriver *d,
     if (!job) {
         free(packet);
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
+    if (sequence_changed) {
+        uint8_t *cached = malloc((size_t)sequence_size);
+        if (!cached) {
+            rk_mpp_dec_job_destroy(job);
+            return VA_STATUS_ERROR_ALLOCATION_FAILED;
+        }
+        memcpy(cached, sequence_headers, (size_t)sequence_size);
+        job->hevc_sequence_headers = cached;
+        job->hevc_sequence_headers_size = (size_t)sequence_size;
     }
     LOG("build_hevc_job: queued %zu bytes in %u slice(s) target=0x%x fence=%llu",
         packet_size, slice_count, (unsigned)job->target,
@@ -908,6 +922,7 @@ void rk_mpp_dec_job_destroy(RKDecodeJob *job)
     if (!job)
         return;
     free(job->data);
+    free(job->hevc_sequence_headers);
     if (job->surface)
         rk_object_unref(&job->surface->base);
     free(job);
@@ -1094,6 +1109,13 @@ bool rk_mpp_dec_enqueue_job(RKContext *c, RKDecodeJob *job)
     if (c->worker_stop) {
         pthread_mutex_unlock(&c->work_lock);
         return false;
+    }
+    if (job->hevc_sequence_headers) {
+        free(c->hevc_sequence_headers);
+        c->hevc_sequence_headers = job->hevc_sequence_headers;
+        c->hevc_sequence_headers_size = job->hevc_sequence_headers_size;
+        job->hevc_sequence_headers = NULL;
+        job->hevc_sequence_headers_size = 0;
     }
     c->next_token++;
     if (c->next_token == 0 || c->next_token > INT64_MAX)
