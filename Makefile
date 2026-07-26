@@ -151,6 +151,15 @@ check-webrtc-rtp-experimental-sanitize: sanitize
 	UBSAN_OPTIONS=halt_on_error=1 \
 	DRIVER_DIR="$(abspath $(SAN_DIR))" tests/check-webrtc-rtp.sh
 
+check-encode-soak-experimental: $(TARGET) test
+	tests/check-encode-soak.sh
+
+check-encode-soak-experimental-sanitize: sanitize
+	LD_PRELOAD="$(shell $(CC) -print-file-name=libasan.so)" \
+	ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
+	UBSAN_OPTIONS=halt_on_error=1 \
+	DRIVER_DIR="$(abspath $(SAN_DIR))" tests/check-encode-soak.sh
+
 check-encode-decode-concurrent: $(TARGET) test
 	tests/check-encode-decode-concurrent.sh
 
@@ -360,6 +369,7 @@ clean:
 	check-h264-encode-experimental check-h264-encode-experimental-sanitize \
 	check-hevc-encode-experimental check-hevc-encode-experimental-sanitize \
 	check-webrtc-rtp-experimental check-webrtc-rtp-experimental-sanitize \
+	check-encode-soak-experimental check-encode-soak-experimental-sanitize \
 	check-encode-decode-concurrent \
 	check-safe check-zero-copy check-zero-copy-sanitize \
 	check-concurrent-decode check-concurrent-decode-sanitize \

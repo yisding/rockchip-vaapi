@@ -256,7 +256,13 @@ VAStatus rk_BeginPicture(VADriverContextP ctx,
     }
 
     if (c->is_encoder) {
-        if (s->width != c->width || s->height != c->height ||
+        bool exact_dimensions = s->width == c->width &&
+                                s->height == c->height;
+        bool aligned_hevc_dimensions =
+            c->coding == MPP_VIDEO_CodingHEVC &&
+            ((s->width + 15) & ~15) == c->width &&
+            ((s->height + 15) & ~15) == c->height;
+        if ((!exact_dimensions && !aligned_hevc_dimensions) ||
             MPP_FRAME_FMT_IS_YUV_10BIT(s->fmt)) {
             rk_object_unref(&s->base);
             rk_object_unref(&c->base);

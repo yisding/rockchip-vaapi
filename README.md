@@ -127,7 +127,9 @@ CQP/CBR/VBR, FFmpeg interoperability, direct-I420 GStreamer
 `vah264enc`/`vah265enc`, ASan/UBSan, and concurrent encode/decode. Imported
 RGB/DMABUF conversion, full WebRTC peer negotiation, multi-slice, and long
 encode soak remain open. A WebRTC-compatible H.264 RTP pay/depay gate already
-passes with 1,200-byte MTU enforcement.
+passes with 1,200-byte MTU enforcement. Paced dual-codec encode smoke runs
+also pass with flat post-warmup RSS/fd counts; the two-hour qualification run
+remains open.
 
 ## Dependencies
 

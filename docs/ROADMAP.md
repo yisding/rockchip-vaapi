@@ -530,6 +530,16 @@ with the full ASan/UBSan driver. The installed image has `webrtcbin`, but lacks
 the higher-level sink/source pair and `GstWebRTC` introspection typelib; full
 SDP/ICE/DTLS/SRTP peer negotiation remains open.
 
+**Progress (2026-07-26, encode soak smoke):** The new paced soak exposed and
+closed a GStreamer HEVC geometry mismatch: a 640x360 visible I420 surface is
+paired with a 640x368 aligned VA context/sequence. The driver now accepts only
+that exact 16-pixel ceiling and configures MPP prep/frame geometry from the
+visible surface. A targeted 640x360 five-path HEVC gate passes afterward.
+Concurrent live H.264+HEVC smoke then completed 1,800 frames per codec over 60
+seconds with post-warmup RSS fixed at 58,792 KiB and fds fixed at 60. A
+30-second full-driver ASan/UBSan run completed 900 frames per codec. The
+default two-hour qualification run remains open.
+
 **Gate:** encode → standard-decoder round-trip within a PSNR bound;
 interoperable bitstreams (ffmpeg/browsers decode them); GStreamer `vah264enc` /
 `ffmpeg -c:v h264_vaapi` / a WebRTC send path work on-device; encode contexts
@@ -611,7 +621,8 @@ concurrent with decode contexts are race-free.
   together with the shipping decode matrix. Checked I420/YV12 uploads are
   normalized to native NV12 and pass direct FFmpeg/GStreamer gates. Imported
   RGB/DMABUF conversion, full WebRTC peer negotiation, multi-slice, and long
-  encode soak remain open; H.264 WebRTC-compatible RTP packetization is green.
+  encode qualification remain open; H.264 WebRTC-compatible RTP packetization
+  and paced dual-codec soak smoke are green.
 - Phase 5: planned.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement

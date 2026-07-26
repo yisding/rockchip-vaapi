@@ -105,6 +105,7 @@ FFMPEG=/usr/bin/ffmpeg make check-gstreamer-va
 FFMPEG=/usr/bin/ffmpeg make check-h264-encode-experimental
 FFMPEG=/usr/bin/ffmpeg make check-hevc-encode-experimental
 FFMPEG=/usr/bin/ffmpeg make check-webrtc-rtp-experimental
+make check-encode-soak-experimental
 FFMPEG=/usr/bin/ffmpeg make check-encode-decode-concurrent
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-conformance
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-sanitize
@@ -200,6 +201,17 @@ upload per encoded frame. The measured run produces 604 RTP packets at
 41.061795 dB. Its sanitizer target loads the full ASan/UBSan driver. This is a
 WebRTC-compatible media-path gate; signaling and secure peer transport are
 outside its claim.
+
+`check-encode-soak-experimental` launches simultaneous live H.264 and HEVC
+GStreamer pipelines at 30 fps for two hours by default. It samples combined
+RSS/fd counts from the actual pipeline processes after warmup, requires bounded
+span and no sustained growth, and audits exactly one MPP packet plus at least
+one I420-to-NV12 upload per frame for both codecs. Shorter
+`ENCODE_SOAK_SECONDS` values are explicitly smoke-only. The measured 60-second
+normal smoke completed 1,800 frames per codec with 0 KiB post-warmup RSS span
+and zero fd growth; a 30-second ASan/UBSan smoke completed 900 frames per
+codec. The gate also covers HEVC's visible 640x360 surface with an aligned
+640x368 VA context.
 
 `check-encode-decode-concurrent` runs 96-frame versions of both encoder gates
 in parallel with the shipping synthetic decode matrix. It requires all three

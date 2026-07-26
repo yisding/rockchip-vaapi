@@ -74,10 +74,28 @@ static uint32_t hevc_ctu_size(const RKContext *context)
     return log2_size <= 6 ? 1u << log2_size : 0;
 }
 
+static int32_t encoder_width(const RKContext *context)
+{
+    return context->render_surface ? context->render_surface->width
+                                   : context->width;
+}
+
+static int32_t encoder_height(const RKContext *context)
+{
+    return context->render_surface ? context->render_surface->height
+                                   : context->height;
+}
+
 static bool configure_encoder(RKContext *context)
 {
-    int32_t hstride = (context->width + 15) & ~15;
-    int32_t vstride = (context->height + 15) & ~15;
+    int32_t width = encoder_width(context);
+    int32_t height = encoder_height(context);
+    int32_t hstride = context->render_surface
+                    ? context->render_surface->hstride
+                    : (width + 15) & ~15;
+    int32_t vstride = context->render_surface
+                    ? context->render_surface->vstride
+                    : (height + 15) & ~15;
     uint32_t requested_bitrate = encoder_bitrate(context);
     int32_t bitrate = bounded_bitrate(requested_bitrate
                                    ? requested_bitrate : 2000000);
@@ -87,8 +105,8 @@ static bool configure_encoder(RKContext *context)
     uint32_t fps_num = context->enc_fps_num ? context->enc_fps_num : 30;
     uint32_t fps_den = context->enc_fps_den ? context->enc_fps_den : 1;
 
-    if (!enc_set_s32(context->enc_cfg, "prep:width", context->width) ||
-        !enc_set_s32(context->enc_cfg, "prep:height", context->height) ||
+    if (!enc_set_s32(context->enc_cfg, "prep:width", width) ||
+        !enc_set_s32(context->enc_cfg, "prep:height", height) ||
         !enc_set_s32(context->enc_cfg, "prep:hor_stride", hstride) ||
         !enc_set_s32(context->enc_cfg, "prep:ver_stride", vstride) ||
         !enc_set_s32(context->enc_cfg, "prep:format", MPP_FMT_YUV420SP) ||
@@ -238,9 +256,24 @@ VAStatus rk_mpp_enc_render_buffer(RKContext *context, RKBuffer *buffer)
                    sizeof(context->enc_hevc_seq));
             const VAEncSequenceParameterBufferHEVC *seq =
                 &context->enc_hevc_seq;
+            bool visible_dimensions =
+                context->render_surface &&
+                seq->pic_width_in_luma_samples ==
+                    (uint16_t)context->render_surface->width &&
+                seq->pic_height_in_luma_samples ==
+                    (uint16_t)context->render_surface->height;
+            bool aligned_context_dimensions =
+                context->render_surface &&
+                ((context->render_surface->width + 15) & ~15) ==
+                    context->width &&
+                ((context->render_surface->height + 15) & ~15) ==
+                    context->height &&
+                seq->pic_width_in_luma_samples ==
+                    (uint16_t)context->width &&
+                seq->pic_height_in_luma_samples ==
+                    (uint16_t)context->height;
             if (seq->general_profile_idc != 1 ||
-                seq->pic_width_in_luma_samples != context->width ||
-                seq->pic_height_in_luma_samples != context->height ||
+                (!visible_dimensions && !aligned_context_dimensions) ||
                 seq->seq_fields.bits.chroma_format_idc != 1 ||
                 seq->seq_fields.bits.separate_colour_plane_flag ||
                 seq->seq_fields.bits.bit_depth_luma_minus8 ||
@@ -373,8 +406,8 @@ VAStatus rk_mpp_enc_encode(RKContext *context)
         if (!ctu)
             return VA_STATUS_ERROR_INVALID_PARAMETER;
         uint32_t ctu_count =
-            ((uint32_t)context->width + ctu - 1) / ctu *
-            (((uint32_t)context->height + ctu - 1) / ctu);
+            ((uint32_t)context->render_surface->width + ctu - 1) / ctu *
+            (((uint32_t)context->render_surface->height + ctu - 1) / ctu);
         if (context->enc_hevc_slice.slice_segment_address != 0 ||
             context->enc_hevc_slice.num_ctu_in_slice != ctu_count ||
             !context->enc_hevc_slice.slice_fields.bits.last_slice_of_pic_flag)
@@ -404,8 +437,8 @@ VAStatus rk_mpp_enc_encode(RKContext *context)
         goto out;
     }
 
-    mpp_frame_set_width(frame, (RK_U32)context->width);
-    mpp_frame_set_height(frame, (RK_U32)context->height);
+    mpp_frame_set_width(frame, (RK_U32)surface->width);
+    mpp_frame_set_height(frame, (RK_U32)surface->height);
     mpp_frame_set_hor_stride(frame, (RK_U32)surface->hstride);
     mpp_frame_set_ver_stride(frame, (RK_U32)surface->vstride);
     mpp_frame_set_fmt(frame, MPP_FMT_YUV420SP);

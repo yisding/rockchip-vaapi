@@ -215,9 +215,25 @@ static void test_experimental_hevc_encode(struct VADriverVTable *v,
                      ctx, VAProfileHEVCMain, VAEntrypointEncSlice,
                      selected, 2, &config), VA_STATUS_SUCCESS);
     VAContextID context;
-    CHECK_STATUS(v->vaCreateContext(ctx, config, 64, 64, 0, NULL, 0,
+    CHECK_STATUS(v->vaCreateContext(ctx, config, 64, 80, 0, NULL, 0,
                                    &context), VA_STATUS_SUCCESS);
+    VASurfaceAttrib i420 = {
+        .type = VASurfaceAttribPixelFormat,
+        .flags = VA_SURFACE_ATTRIB_SETTABLE,
+        .value = {
+            .type = VAGenericValueTypeInteger,
+            .value.i = VA_FOURCC_I420,
+        },
+    };
+    VASurfaceID visible_surface;
+    CHECK_STATUS(v->vaCreateSurfaces2(
+                     ctx, VA_RT_FORMAT_YUV420, 64, 72,
+                     &visible_surface, 1, &i420, 1), VA_STATUS_SUCCESS);
+    CHECK_STATUS(v->vaBeginPicture(ctx, context, visible_surface),
+                 VA_STATUS_SUCCESS);
     CHECK_STATUS(v->vaDestroyContext(ctx, context), VA_STATUS_SUCCESS);
+    CHECK_STATUS(v->vaDestroySurfaces(ctx, &visible_surface, 1),
+                 VA_STATUS_SUCCESS);
     CHECK_STATUS(v->vaDestroyConfig(ctx, config), VA_STATUS_SUCCESS);
 
     if (setenv("RK_VAAPI_EXPERIMENTAL_ENCODE", "h264,hevc", 1) != 0) {

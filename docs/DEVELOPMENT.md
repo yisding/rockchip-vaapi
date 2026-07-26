@@ -446,6 +446,10 @@ supported misc parameters before applications can destroy those VA buffers;
 `mpp_enc.c` maps them to common MPP prep/rate-control plus H.264 or HEVC keys.
 HEVC advertises RK3588 MPP's native 64x64 CTU, 8x8 minimum coding-block, and
 4x4-to-32x32 transform contract so applications do not guess 32x32 CTUs.
+GStreamer may create a HEVC context rounded up to 16 pixels while retaining a
+smaller visible input surface. That pairing is accepted only when the context
+is the exact 16-pixel ceiling; MPP prep/frame dimensions use the visible
+surface, while the VA sequence may use either visible or aligned dimensions.
 
 System-memory upload uses `vaCreateImage` plus `vaPutImage`. The latter performs
 a checked NV12/P010 copy, or interleaves I420/YV12 chroma into native NV12,
@@ -469,6 +473,12 @@ through `h264parse`, `rtph264pay`, and `rtph264depay`, captures every RTP
 packet, and standard-decodes the resulting Annex B stream. This verifies the
 WebRTC-compatible H.264 payload boundary and MTU behavior, but it does not
 perform SDP/ICE/DTLS/SRTP negotiation with a peer.
+
+`check-encode-soak-experimental` holds live H.264 and HEVC GStreamer encoder
+contexts open together at 30 fps. It samples the actual `gst-launch` process
+RSS/fd counts and audits exact MPP packet counts plus checked I420 uploads. The
+default two-hour run is the qualification gate; shorter durations are reported
+only as smoke coverage.
 
 ---
 
