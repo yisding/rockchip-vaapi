@@ -104,6 +104,7 @@ FFMPEG=/usr/bin/ffmpeg make check-vp9-profile2-experimental
 FFMPEG=/usr/bin/ffmpeg make check-gstreamer-va
 FFMPEG=/usr/bin/ffmpeg make check-h264-encode-experimental
 FFMPEG=/usr/bin/ffmpeg make check-hevc-encode-experimental
+FFMPEG=/usr/bin/ffmpeg make check-webrtc-rtp-experimental
 FFMPEG=/usr/bin/ffmpeg make check-encode-decode-concurrent
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-conformance
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-sanitize
@@ -173,7 +174,7 @@ decode with the standard H.264 decoder, exceed 35 dB average PSNR, and have one
 audited MPP packet per input frame. The same source then passes through
 GStreamer 1.28 `vah264enc` after a fresh plugin scan with
 `GST_VA_ALL_DRIVERS=1`, with the same frame/profile/PSNR checks. The sanitizer
-target loads the complete ASan/UBSan driver for all four app paths.
+target loads the complete ASan/UBSan driver for all five app paths.
 
 `check-hevc-encode-experimental` applies the same five-path gate to HEVC Main
 with `hevc_vaapi` and `vah265enc`. It additionally rejects decoder/parser
@@ -189,6 +190,16 @@ planar stream matches the native-NV12 CQP PSNR exactly: 48.495713 dB for H.264
 and 45.191850 dB for HEVC. The object gate separately verifies byte-exact I420
 and YV12 `vaPutImage`/`vaGetImage` round trips, plane layouts, odd-size
 rejection, and conflicting-format rejection.
+
+`check-webrtc-rtp-experimental` runs 120 direct-I420 H.264 frames through
+`vah264enc`, `h264parse`, RTP payload/depay, and standard software decode. It
+captures each RTP buffer, requires more than one packet per frame, enforces a
+1,200-byte maximum packet size, checks exact frame count and High profile,
+requires at least 35 dB PSNR, and audits one MPP packet plus one checked planar
+upload per encoded frame. The measured run produces 604 RTP packets at
+41.061795 dB. Its sanitizer target loads the full ASan/UBSan driver. This is a
+WebRTC-compatible media-path gate; signaling and secure peer transport are
+outside its claim.
 
 `check-encode-decode-concurrent` runs 96-frame versions of both encoder gates
 in parallel with the shipping synthetic decode matrix. It requires all three

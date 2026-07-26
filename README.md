@@ -125,7 +125,9 @@ the native MPP input; checked I420 and YV12 image uploads are converted into
 that storage. Both paths cover one complete frame slice, MPP-generated headers,
 CQP/CBR/VBR, FFmpeg interoperability, direct-I420 GStreamer
 `vah264enc`/`vah265enc`, ASan/UBSan, and concurrent encode/decode. Imported
-RGB/DMABUF conversion, WebRTC, multi-slice, and long encode soak remain open.
+RGB/DMABUF conversion, full WebRTC peer negotiation, multi-slice, and long
+encode soak remain open. A WebRTC-compatible H.264 RTP pay/depay gate already
+passes with 1,200-byte MTU enforcement.
 
 ## Dependencies
 

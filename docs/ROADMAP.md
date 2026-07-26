@@ -521,6 +521,15 @@ directly to `vah264enc`/`vah265enc` without `videoconvert`; normal,
 ASan/UBSan, and expanded 96-frame concurrent encode/decode gates pass.
 Imported RGB/DMABUF surfaces still require a separate RGA conversion path.
 
+**Progress (2026-07-26, WebRTC-compatible RTP):** A 120-frame direct-I420
+GStreamer path now carries `vah264enc` output through `h264parse`,
+`rtph264pay`, `application/x-rtp`, `rtph264depay`, and a standard H.264
+decoder. It produces 604 packets at a strict 1,200-byte maximum, round-trips
+all 120 High-profile frames at 41.06 dB average PSNR, and passes normally and
+with the full ASan/UBSan driver. The installed image has `webrtcbin`, but lacks
+the higher-level sink/source pair and `GstWebRTC` introspection typelib; full
+SDP/ICE/DTLS/SRTP peer negotiation remains open.
+
 **Gate:** encode → standard-decoder round-trip within a PSNR bound;
 interoperable bitstreams (ffmpeg/browsers decode them); GStreamer `vah264enc` /
 `ffmpeg -c:v h264_vaapi` / a WebRTC send path work on-device; encode contexts
@@ -601,7 +610,8 @@ concurrent with decode contexts are race-free.
   PSNR gates normally and under ASan/UBSan. Both 96-frame encoder gates pass
   together with the shipping decode matrix. Checked I420/YV12 uploads are
   normalized to native NV12 and pass direct FFmpeg/GStreamer gates. Imported
-  RGB/DMABUF conversion, WebRTC, multi-slice, and long encode soak remain open.
+  RGB/DMABUF conversion, full WebRTC peer negotiation, multi-slice, and long
+  encode soak remain open; H.264 WebRTC-compatible RTP packetization is green.
 - Phase 5: planned.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement

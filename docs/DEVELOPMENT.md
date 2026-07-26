@@ -464,6 +464,12 @@ headers, B-frames, multi-slice, and WebRTC integration are not advertised.
 This also avoids exercising the kernel's historically vulnerable multi-slice
 FIFO path.
 
+`check-webrtc-rtp-experimental` carries a direct-I420 `vah264enc` stream
+through `h264parse`, `rtph264pay`, and `rtph264depay`, captures every RTP
+packet, and standard-decodes the resulting Annex B stream. This verifies the
+WebRTC-compatible H.264 payload boundary and MTU behavior, but it does not
+perform SDP/ICE/DTLS/SRTP negotiation with a peer.
+
 ---
 
 ## Firefox process model
