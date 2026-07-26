@@ -389,10 +389,10 @@ order, tiles, and the current short/long-term reference set. Slice NALs are
 parsed far enough to recover their PPS ID and rewrite explicit RPS state from
 the VA picture buffer. Malformed and unsupported state fails before a worker
 job is queued. `mpp_dec.c` emits a full parameter bundle at the first
-picture/IRAP, emits PPS-only headers when a new PPS ID appears, preserves
-already-prefixed slices, and adds a start code to bare NALs. HEVC shares
-H.264's token-based output routing because both codecs may reorder display
-output.
+picture/IRAP, emits a PPS before every later access unit so redefined PPS state
+is visible to MPP, preserves already-prefixed slices, and adds a start code to
+bare NALs. HEVC shares H.264's token-based output routing because both codecs
+may reorder display output.
 
 This path is intentionally not advertised yet. Adding a profile requires
 changing `profile_supported`, its surface attributes, and the conformance
@@ -403,12 +403,15 @@ For Phase 2 debugging, `RK_VAAPI_EXPERIMENTAL_PROFILES=hevc-main` temporarily
 enables `VAProfileHEVCMain` so `make check-hevc-experimental` can force the
 pinned HEVC vectors through hardware. The switch is intentionally narrow and
 must not be used as release evidence by itself. The current boundary is:
-SPS-stored long-term reference streams are fail-closed because VA-API provides
-only `num_long_term_ref_pic_sps`, not the corresponding SPS POC and used
-flags; scaling-list streams with SPS RPS tables are also fail-closed until that
-class is proven; and forced hardware runs for the PPS_A/RPS_A vectors still
-complete with frame mismatches. HEVC stays hidden until the pinned gate is
-bit-exact.
+unflagged `ReferenceFrames[]` entries are preserved as follow references in the
+rewritten explicit RPS, which makes `PPS_A_qualcomm_7.bit` and
+`RPS_A_docomo_4.bit` bit-exact alongside the VPSID, WPP, and weighted-prediction
+vectors. SPS-stored long-term reference streams remain fail-closed because
+VA-API provides only `num_long_term_ref_pic_sps`, not the corresponding SPS POC
+and used flags; scaling-list streams with SPS RPS tables are also fail-closed
+until that class is proven. MPP reports `errinfo` on the TILES vector, and the
+driver now treats errored/discarded MPP frames as decode failures instead of
+binding corrupt output. HEVC stays hidden until the pinned gate is bit-exact.
 
 ---
 
@@ -431,9 +434,9 @@ patching Firefox's sandbox policy).
   the lowest Annex A level supported by the available frame/DPB constraints.
   Bitrate and frame-rate distinctions cannot be recovered from this buffer.
 - HEVC reconstruction is host-validated but unadvertised pending the pinned
-  on-device Main conformance gate and external-buffer parity audit. Streams
-  requiring SPS-stored long-term reference POC tables are fail-closed because
-  VA-API does not carry enough data to reconstruct them.
+  on-device Main conformance gate. The current fail-closed classes are
+  SPS-stored long-term reference POC tables, scaling-list streams with SPS RPS
+  tables, and MPP-reported errored TILES output.
 - HEVC Main10 and VP9 Profile 2 have NV15-to-P010 plumbing. The standalone
   P010/librga blocker is fixed on the tested kernel/librga stack, but these
   profiles remain unadvertised until the on-device 10-bit conformance/HDR

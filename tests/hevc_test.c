@@ -321,6 +321,7 @@ static void test_slice_rps_rewrite(void)
     add_reference(&pp, 0, 2, 9, VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE);
     add_reference(&pp, 1, 3, 7, VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE);
     add_reference(&pp, 2, 4, 12, VA_PICTURE_HEVC_RPS_ST_CURR_AFTER);
+    add_reference(&pp, 3, 5, 8, 0);
     sp.RefPicList[0][0] = 0;
     sp.RefPicList[0][1] = 2;
 
@@ -350,10 +351,11 @@ static void test_slice_rps_rewrite(void)
     assert(read_ue(&br) == 1);
     assert(read_bits(&br, 8) == 10);
     assert(read_bit(&br) == 0);
-    assert(read_ue(&br) == 2);
+    assert(read_ue(&br) == 3);
     assert(read_ue(&br) == 1);
     assert(read_ue(&br) == 0 && read_bit(&br) == 1);
-    assert(read_ue(&br) == 1 && read_bit(&br) == 1);
+    assert(read_ue(&br) == 0 && read_bit(&br) == 0);
+    assert(read_ue(&br) == 0 && read_bit(&br) == 1);
     assert(read_ue(&br) == 1 && read_bit(&br) == 1);
     assert(read_bit(&br) == 1);
 }

@@ -306,8 +306,6 @@ static bool collect_rps(const VAPictureParameterBufferHEVC *pp, HEVCRPS *rps)
             (VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE |
              VA_PICTURE_HEVC_RPS_ST_CURR_AFTER |
              VA_PICTURE_HEVC_RPS_LT_CURR);
-        if (!rps_flags)
-            continue;
         if ((rps_flags & (rps_flags - 1)) != 0)
             return false;
 
@@ -319,10 +317,11 @@ static bool collect_rps(const VAPictureParameterBufferHEVC *pp, HEVCRPS *rps)
         int64_t delta = (int64_t)ref->pic_order_cnt - current_poc;
         bool is_long_term = (ref->flags & VA_PICTURE_HEVC_LONG_TERM_REFERENCE) ||
                             rps_flags == VA_PICTURE_HEVC_RPS_LT_CURR;
+        bool used_by_curr = rps_flags != 0;
         if (is_long_term) {
             rps->long_term[rps->long_term_count++] = (HEVCRPSEntry) {
                 .poc = (uint32_t)ref->pic_order_cnt,
-                .used = true,
+                .used = rps_flags == VA_PICTURE_HEVC_RPS_LT_CURR,
             };
         } else if (delta < 0) {
             if (delta >= 0 || -delta > UINT16_MAX)
@@ -330,7 +329,7 @@ static bool collect_rps(const VAPictureParameterBufferHEVC *pp, HEVCRPS *rps)
             rps->negative[rps->negative_count++] = (HEVCRPSEntry) {
                 .delta = (uint32_t)-delta,
                 .poc = (uint32_t)ref->pic_order_cnt,
-                .used = true,
+                .used = used_by_curr,
             };
         } else if (delta > 0) {
             if (delta <= 0 || delta > UINT16_MAX)
@@ -338,8 +337,10 @@ static bool collect_rps(const VAPictureParameterBufferHEVC *pp, HEVCRPS *rps)
             rps->positive[rps->positive_count++] = (HEVCRPSEntry) {
                 .delta = (uint32_t)delta,
                 .poc = (uint32_t)ref->pic_order_cnt,
-                .used = true,
+                .used = used_by_curr,
             };
+        } else {
+            return false;
         }
     }
 

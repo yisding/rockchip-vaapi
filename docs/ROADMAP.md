@@ -346,21 +346,27 @@ unadvertised until the full on-device 10-bit conformance/HDR gate passes.
 validation path without advertising HEVC by default:
 `RK_VAAPI_EXPERIMENTAL_PROFILES=hevc-main` enables `VAProfileHEVCMain`, and
 `make check-hevc-experimental` runs only the pinned HEVC conformance vectors
-with fail-fast FFmpeg timeouts. The gate is intentionally still non-green:
-`LTRPSPS_A_Qualcomm_1.bit` now rejects immediately with
-`unsupported HEVC SPS long-term refs count=8` because VA-API exposes only
+with fail-fast FFmpeg timeouts. The RPS rewrite now keeps valid
+`ReferenceFrames[]` entries that are not current-picture refs as follow
+references (`used_by_curr_pic=0`), preserving DPB state needed by later pictures.
+Together with PPS emission before every access unit, the forced hardware sweep
+now has five bit-exact HEVC Main vectors:
+`PPS_A_qualcomm_7.bit`, `RPS_A_docomo_4.bit`, `VPSID_A_VIDYO_2.bit`,
+`WPP_A_ericsson_MAIN_2.bit`, and `WP_A_Toshiba_3.bit`.
+
+The gate is intentionally still non-green. `LTRPSPS_A_Qualcomm_1.bit` rejects
+with `unsupported HEVC SPS long-term refs count=8` because VA-API exposes only
 `num_long_term_ref_pic_sps`, not the `lt_ref_pic_poc_lsb_sps[]` or
 `used_by_curr_pic_lt_sps_flag[]` table needed to reconstruct the stream.
 `SLIST_A_Sony_4.bit` rejects with
 `unsupported HEVC scaling-list stream with SPS RPS tables count=11` until that
 SPS-RPS/scaling-list class can be reconstructed without timeouts or corruption.
-Forced hardware runs for `PPS_A_qualcomm_7.bit` and `RPS_A_docomo_4.bit`
-complete but are not bit-exact yet: 14/81 and 7/44 frames differ respectively.
-A diagnostic PPS_A access-unit reconstruction software-decoded bit-exact after
-the uniform tile syntax fix, so the remaining mismatch is in the MPP submission
-cadence/parameter interaction rather than the P010/RGA path. The safe advertised
-hardware subset (`check-safe`) still passes with HEVC software fallback and the
-risky VP9 vector blocked. HEVC Main stays hidden.
+`TILES_A_Cisco_2.bit` reaches MPP, but direct MPP decode of the original Annex B
+stream reports `errinfo=1` from frame 1 onward; the driver now maps
+errored/discarded MPP frames to `VA_STATUS_ERROR_DECODING_ERROR` and resets the
+decoder during teardown so in-flight MPP buffers are not leaked. The safe
+advertised hardware subset (`check-safe`) still passes with HEVC software
+fallback and the risky VP9 vector blocked. HEVC Main stays hidden.
 
 **Gate:** HEVC Main bit-exact vs software on conformance vectors; HEVC Main10 /
 VP9 P2 validated (PSNR-bounded, since RGA P010 conversion is not

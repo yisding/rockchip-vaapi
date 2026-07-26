@@ -64,8 +64,9 @@ static VAStatus rk_Terminate(VADriverContextP ctx) {
  *     software-exact. Fall back instead of returning corrupt frames.
  *   - HEVC: reconstruction and worker routing exist, and a narrow
  *     RK_VAAPI_EXPERIMENTAL_PROFILES=hevc-main gate can expose Main for
- *     validation, but the profile remains hidden by default until the pinned
- *     Main vectors pass the on-device bit-exact gate.
+ *     validation. Five pinned Main vectors are bit-exact as of 2026-07-26,
+ *     but the profile remains hidden by default until the full pinned gate is
+ *     bit-exact rather than partially fail-closed.
  *   - VP8: verified segfault in the generic path.
  *   - H.264 High10 / VP9 Profile 2 (10-bit): compact NV15-to-P010 conversion
  *     is implemented, but these profiles remain hidden until the fixed

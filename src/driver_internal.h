@@ -99,7 +99,6 @@ typedef struct {
     VAIQMatrixBufferHEVC last_hevc_iq;
     bool has_hevc_pp;
     bool has_hevc_iq;
-    bool hevc_pps_sent[64];
 } RKContext;
 
 struct RKSurface {

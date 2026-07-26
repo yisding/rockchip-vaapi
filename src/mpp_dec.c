@@ -359,6 +359,17 @@ static bool assign_mpp_frame(MppFrame frame, RKContext *c)
         return true;
     }
 
+    uint32_t errinfo = mpp_frame_get_errinfo(frame);
+    uint32_t discard = mpp_frame_get_discard(frame);
+    if (errinfo || discard) {
+        LOG("assign_mpp_frame: surface=0x%x MPP reported err=0x%x discard=0x%x; decode failed",
+            (unsigned)sid, errinfo, discard);
+        mpp_frame_deinit(&frame);
+        complete_surface_ref(s, route->fence, false);
+        frame_route_destroy(route);
+        return true;
+    }
+
     MppBuffer      buf    = mpp_frame_get_buffer(frame);
     int            fwidth = (int)mpp_frame_get_width(frame);
     int            fheight= (int)mpp_frame_get_height(frame);
@@ -725,51 +736,44 @@ static VAStatus build_hevc_job(RKContext *c, RKDriver *d,
 
     bool is_irap = slice_info.nal_unit_type >= 16 && slice_info.nal_unit_type <= 23;
     bool need_full_headers = is_irap || !c->sps_sent;
-    bool need_pps_header = need_full_headers ||
-                           !c->hevc_pps_sent[slice_info.pps_id];
-    if (need_pps_header) {
-        uint8_t *headers = malloc(HEVC_HEADER_CAPACITY);
-        if (!headers)
-            return VA_STATUS_ERROR_ALLOCATION_FAILED;
-        int profile_idc = c->profile == VAProfileHEVCMain10 ? 2 : 1;
-        int header_size = need_full_headers ?
-            rk_hevc_write_parameter_sets(
-                headers, HEVC_HEADER_CAPACITY, &c->last_hevc_pp,
-                c->has_hevc_iq ? &c->last_hevc_iq : NULL,
-                slice_info.pps_id, profile_idc) :
-            rk_hevc_write_picture_parameter_set(
-                headers, HEVC_HEADER_CAPACITY, &c->last_hevc_pp,
-                c->has_hevc_iq ? &c->last_hevc_iq : NULL,
-                slice_info.pps_id, profile_idc);
-        if (header_size <= 0) {
-            if (c->last_hevc_pp.slice_parsing_fields.bits.long_term_ref_pics_present_flag &&
-                c->last_hevc_pp.num_long_term_ref_pic_sps > 0) {
-                LOG("build_hevc_job: unsupported HEVC SPS long-term refs count=%u",
-                    c->last_hevc_pp.num_long_term_ref_pic_sps);
-            } else if (c->last_hevc_pp.pic_fields.bits.scaling_list_enabled_flag &&
-                       c->last_hevc_pp.num_short_term_ref_pic_sets > 0) {
-                LOG("build_hevc_job: unsupported HEVC scaling-list stream with SPS RPS tables count=%u",
-                    c->last_hevc_pp.num_short_term_ref_pic_sets);
-            } else {
-                LOG("build_hevc_job: parameter-set reconstruction failed");
-            }
-            free(headers);
-            return VA_STATUS_ERROR_DECODING_ERROR;
+    uint8_t *headers = malloc(HEVC_HEADER_CAPACITY);
+    if (!headers)
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    int profile_idc = c->profile == VAProfileHEVCMain10 ? 2 : 1;
+    int header_size = need_full_headers ?
+        rk_hevc_write_parameter_sets(
+            headers, HEVC_HEADER_CAPACITY, &c->last_hevc_pp,
+            c->has_hevc_iq ? &c->last_hevc_iq : NULL,
+            slice_info.pps_id, profile_idc) :
+        rk_hevc_write_picture_parameter_set(
+            headers, HEVC_HEADER_CAPACITY, &c->last_hevc_pp,
+            c->has_hevc_iq ? &c->last_hevc_iq : NULL,
+            slice_info.pps_id, profile_idc);
+    if (header_size <= 0) {
+        if (c->last_hevc_pp.slice_parsing_fields.bits.long_term_ref_pics_present_flag &&
+            c->last_hevc_pp.num_long_term_ref_pic_sps > 0) {
+            LOG("build_hevc_job: unsupported HEVC SPS long-term refs count=%u",
+                c->last_hevc_pp.num_long_term_ref_pic_sps);
+        } else if (c->last_hevc_pp.pic_fields.bits.scaling_list_enabled_flag &&
+                   c->last_hevc_pp.num_short_term_ref_pic_sets > 0) {
+            LOG("build_hevc_job: unsupported HEVC scaling-list stream with SPS RPS tables count=%u",
+                c->last_hevc_pp.num_short_term_ref_pic_sets);
+        } else {
+            LOG("build_hevc_job: parameter-set reconstruction failed");
         }
-
-        status = packet_append(&packet, &packet_size, &packet_capacity,
-                               headers, (size_t)header_size);
         free(headers);
-        if (status != VA_STATUS_SUCCESS) {
-            free(packet);
-            return status;
-        }
-        if (need_full_headers) {
-            memset(c->hevc_pps_sent, 0, sizeof(c->hevc_pps_sent));
-            c->sps_sent = true;
-        }
-        c->hevc_pps_sent[slice_info.pps_id] = true;
+        return VA_STATUS_ERROR_DECODING_ERROR;
     }
+
+    status = packet_append(&packet, &packet_size, &packet_capacity,
+                           headers, (size_t)header_size);
+    free(headers);
+    if (status != VA_STATUS_SUCCESS) {
+        free(packet);
+        return status;
+    }
+    if (need_full_headers)
+        c->sps_sent = true;
 
     unsigned int slice_count = 0;
     VASliceParameterBufferHEVC last_slice_param;
@@ -1123,6 +1127,7 @@ void rk_mpp_dec_stop(RKContext *c)
     if (!c->sync_initialized)
         return;
 
+    bool had_worker = c->worker_started;
     if (c->worker_started) {
         pthread_mutex_lock(&c->work_lock);
         c->worker_stop = true;
@@ -1171,6 +1176,12 @@ void rk_mpp_dec_stop(RKContext *c)
     if (render_surface) {
         rk_mpp_dec_fail_surface(render_surface, fence);
         rk_object_unref(&render_surface->base);
+    }
+
+    if (had_worker && c->mpp && c->mpi && c->mpi->reset) {
+        MPP_RET ret = c->mpi->reset(c->mpp);
+        if (ret != MPP_OK)
+            LOG("decode worker: mpp reset during stop failed: %d", ret);
     }
 }
 
