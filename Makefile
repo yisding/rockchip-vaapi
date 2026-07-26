@@ -120,6 +120,9 @@ check-hevc-main10-hdr-experimental: $(TARGET) test
 check-vp9-profile2-experimental: $(TARGET) test
 	tests/check-vp9-profile2.sh
 
+check-gstreamer-va: $(TARGET) test
+	tests/check-gstreamer-va.sh
+
 check-synthetic: $(TARGET) test
 	TEST_SET=synthetic tests/validate.sh
 

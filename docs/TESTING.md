@@ -101,6 +101,7 @@ FFMPEG=/usr/bin/ffmpeg make check-hevc-experimental
 FFMPEG=/usr/bin/ffmpeg make check-hevc-main10-experimental
 FFMPEG=/usr/bin/ffmpeg make check-hevc-main10-hdr-experimental
 FFMPEG=/usr/bin/ffmpeg make check-vp9-profile2-experimental
+FFMPEG=/usr/bin/ffmpeg make check-gstreamer-va
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-conformance
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-sanitize
 ```
@@ -151,6 +152,16 @@ The official vector additionally audits its 11 decoded frames, including one
 hidden/reference output. This validates the VP9 uncompressed-header parser and
 profile-matched hidden-reference handling in addition to the shared 10-bit
 conversion/export path. The profile remains hidden pending app validation.
+
+`check-gstreamer-va` rescans GStreamer 1.28's `va` plugin against the local
+driver, requires registration of `vah264dec`, `vah265dec`, and `vavp9dec`,
+then negotiates system-memory raw output for four pinned cases. H.264 High,
+VP9 Profile 0, VP9 Profile 2, and HEVC Main10 output is byte-identical to
+FFmpeg software decode; driver logs additionally require every expected MPP
+frame and every 10-bit AFBC-to-RGA conversion with no stale route or fallback.
+GStreamer's VA plugin rejects unrecognized vendor strings by default, so this
+gate sets its supported `GST_VA_ALL_DRIVERS=1` override. This is an app/plugin
+and readback result, not yet a DMABuf display-sink or HDR-presentation result.
 
 The object-lifecycle gate crosses every former fixed-array ceiling, validates
 all five typed handle namespaces and stale-handle rejection, and creates nine

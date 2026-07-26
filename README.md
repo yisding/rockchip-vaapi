@@ -86,6 +86,8 @@ Key features:
 
 - H.264 and VP9 hardware decode with byte-exact regression checking
 - DRM PRIME 2 surface export directly from retained MPP external-pool DMA-BUFs
+- GStreamer `va` app gate with byte-exact H.264, HEVC Main10, and VP9
+  Profile 0/2 system-memory output
 - Compatible with Firefox 128+ (VA-API PDM path, RDD process)
 - Implements the full VA-API 1.20 vtable (`__vaDriverInit_1_20`)
 

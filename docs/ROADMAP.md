@@ -456,6 +456,17 @@ Make it real software on real apps.
 - **Packaging:** versioned release + PPA; a small config package for the
   per-app enablement (flags/env/policy).
 
+**Progress (2026-07-26, GStreamer app slice):** Stock GStreamer 1.28's `va`
+plugin loads the local driver and registers `vah264dec`, `vah265dec`, and
+`vavp9dec` when its supported `GST_VA_ALL_DRIVERS=1` override permits the
+Rockchip vendor string. `make check-gstreamer-va` negotiates system-memory
+NV12/P010 output and is byte-identical to software for pinned H.264 High
+(10 frames), VP9 Profile 0 (1 frame), VP9 Profile 2 (10 displayed/11 decoded
+frames), and HEVC Main10 (256 frames). Driver audits show no stale routes,
+decode errors, buffer mismatch, or linear 10-bit fallback. DMABuf display-sink
+and HDR presentation remain open, so this closes one app/readback slice rather
+than the GStreamer matrix row.
+
 **Gate:** the app matrix passes on-device; conformance suite green; clean soak;
 `.deb` + config packages install and enable HW decode from a clean image.
 
@@ -545,7 +556,10 @@ concurrent with decode contexts are race-free.
   bit-exact. Static BT.2020/PQ HDR metadata is preserved. HEVC Main remains
   hidden on the direct-MPP TILES failure; both 10-bit profiles remain hidden
   while broader HEVC conformance and app/display validation are open.
-- Phases 3–5: planned.
+- Phase 3: in progress; the stock GStreamer 1.28 `va` plugin system-memory
+  gate is byte-exact for H.264, HEVC Main10, and VP9 Profiles 0/2. Display
+  sinks, the other desktop apps, sandbox policy, and packaging remain open.
+- Phases 4–5: planned.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement
 map and driver-review finding as the decision/evidence record.
