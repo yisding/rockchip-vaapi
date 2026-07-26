@@ -76,8 +76,8 @@ src/rockchip_drv_video.o: src/buffer.h src/context.h src/driver_internal.h \
 	src/export.h src/log.h src/object_heap.h src/surface.h
 src/buffer.o: src/buffer.h src/driver_internal.h src/frame_layout.h \
 	src/log.h src/object_heap.h
-src/context.o: src/context.h src/driver_internal.h src/log.h src/mpp_dec.h \
-	src/object_heap.h
+src/context.o: src/context.h src/convert.h src/driver_internal.h src/log.h \
+	src/mpp_dec.h src/object_heap.h
 src/export.o: src/driver_internal.h src/export.h src/log.h src/object_heap.h \
 	src/surface.h
 src/log.o: src/log.h
@@ -110,6 +110,9 @@ check-conformance: $(TARGET) test
 check-hevc-experimental: $(TARGET) test
 	TEST_SET=hevc EXPERIMENTAL_HEVC=1 FAIL_FAST=1 FFMPEG_TIMEOUT=60 \
 		tests/validate.sh
+
+check-hevc-main10-experimental: $(TARGET) test
+	tests/check-hevc-main10.sh
 
 check-synthetic: $(TARGET) test
 	TEST_SET=synthetic tests/validate.sh
@@ -228,7 +231,7 @@ src/rockchip_drv_video.san.o: src/buffer.h src/context.h \
 	src/surface.h
 src/buffer.san.o: src/buffer.h src/driver_internal.h src/frame_layout.h \
 	src/log.h src/object_heap.h
-src/context.san.o: src/context.h src/driver_internal.h src/log.h \
+src/context.san.o: src/context.h src/convert.h src/driver_internal.h src/log.h \
 	src/mpp_dec.h src/object_heap.h
 src/export.san.o: src/driver_internal.h src/export.h src/log.h \
 	src/object_heap.h src/surface.h

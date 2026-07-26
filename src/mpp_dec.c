@@ -376,6 +376,9 @@ static bool assign_mpp_frame(MppFrame frame, RKContext *c)
     int            fhs    = (int)mpp_frame_get_hor_stride(frame);
     int            fvs    = (int)mpp_frame_get_ver_stride(frame);
     int            fhs_pix= (int)mpp_frame_get_hor_stride_pixel(frame);
+    int            fbc_hs = (int)mpp_frame_get_fbc_hdr_stride(frame);
+    int            offset_x = (int)mpp_frame_get_offset_x(frame);
+    int            offset_y = (int)mpp_frame_get_offset_y(frame);
     MppFrameFormat ffmt   = mpp_frame_get_fmt(frame);
 
     int  frame_w = fwidth  > 0 ? fwidth  : surface_width;
@@ -384,17 +387,30 @@ static bool assign_mpp_frame(MppFrame frame, RKContext *c)
     int  src_vs = fvs > 0 ? fvs : frame_h;
     size_t src_size = buf ? mpp_buffer_get_size(buf) : 0;
     size_t layout_size = 0;
-    bool linear_nv12 = (ffmt & MPP_FRAME_FMT_MASK) == MPP_FMT_YUV420SP;
-    bool linear_nv15 = (ffmt & MPP_FRAME_FMT_MASK) == MPP_FMT_YUV420SP_10BIT;
-    int  src_hs_pixels = fhs_pix > 0 ? fhs_pix : frame_w;
-    if (linear_nv15 && fhs_pix <= 0)
-        src_hs_pixels = src_hs > 0 && (src_hs % 5) == 0
-                      ? src_hs / 5 * 4 : 0;
-    bool supported_layout = linear_nv12 || linear_nv15;
-    bool layout_valid = supported_layout && src_hs > 0 && src_vs > 0 &&
-        (!linear_nv15 || src_hs_pixels > 0) &&
+    bool is_afbc = MPP_FRAME_FMT_IS_AFBC(ffmt);
+    bool nv12 = (ffmt & MPP_FRAME_FMT_MASK) == MPP_FMT_YUV420SP;
+    bool nv15 = (ffmt & MPP_FRAME_FMT_MASK) == MPP_FMT_YUV420SP_10BIT;
+    bool linear_nv12 = nv12 && !is_afbc;
+    bool linear_nv15 = nv15 && !is_afbc;
+    bool afbc_nv15 = nv15 && is_afbc;
+    int src_hs_pixels = afbc_nv15 && fbc_hs > 0 ? fbc_hs : fhs_pix;
+    if (linear_nv15 && src_hs > 0 && (src_hs % 5) == 0)
+        src_hs_pixels = src_hs / 5 * 4;
+
+    bool linear_layout_valid = (linear_nv12 || linear_nv15) &&
+        src_hs > 0 && src_vs >= frame_h &&
         rk_nv12_layout_size((size_t)src_hs, (size_t)src_vs, &layout_size) &&
         src_size >= layout_size;
+    if (linear_nv15)
+        linear_layout_valid = linear_layout_valid &&
+            src_hs_pixels >= frame_w && (src_hs_pixels % 64) == 0 &&
+            (fhs_pix <= 0 || fhs_pix == src_hs_pixels);
+    bool afbc_layout_valid = afbc_nv15 && src_hs_pixels >= frame_w &&
+        (src_hs_pixels % 64) == 0 && src_vs >= frame_h &&
+        (src_vs % 16) == 0 && offset_x >= 0 && offset_y >= 0 &&
+        offset_x <= src_hs_pixels && frame_w <= src_hs_pixels - offset_x &&
+        offset_y <= src_vs && frame_h <= src_vs - offset_y && src_size > 0;
+    bool layout_valid = linear_layout_valid || afbc_layout_valid;
     int pool_index = -1;
     bool pool_match = external_buffer_matches_pool(c, buf, &pool_index);
     RKDecodePool *pool = c->decode_pool;
@@ -405,14 +421,15 @@ static bool assign_mpp_frame(MppFrame frame, RKContext *c)
     MppFrame stored_frame = frame;
     int output_hstride = src_hs;
 
-    if (usable && linear_nv15) {
+    if (usable && nv15) {
         MppBuffer converted = NULL;
         usable = external_ready &&
             rk_convert_nv15_to_p010(pool->backing_group, buf,
                                     (uint32_t)frame_w, (uint32_t)frame_h,
                                     (uint32_t)src_hs,
                                     (uint32_t)src_hs_pixels,
-                                    (uint32_t)src_vs, &converted);
+                                    (uint32_t)src_vs, (uint32_t)offset_x,
+                                    (uint32_t)offset_y, afbc_nv15, &converted);
         if (usable) {
             converted_10bit = true;
             backing = converted;

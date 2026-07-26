@@ -13,6 +13,9 @@ bool rk_convert_nv15_to_p010(MppBufferGroup group, MppBuffer source,
                              uint32_t source_byte_stride,
                              uint32_t pixel_stride,
                              uint32_t vertical_stride,
+                             uint32_t source_offset_x,
+                             uint32_t source_offset_y,
+                             bool source_afbc,
                              MppBuffer *converted_out);
 
 #endif

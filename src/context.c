@@ -9,6 +9,7 @@
 #include <rockchip/mpp_frame.h>
 #include <rockchip/rk_mpi.h>
 
+#include "convert.h"
 #include "driver_internal.h"
 #include "mpp_dec.h"
 
@@ -130,6 +131,18 @@ VAStatus rk_CreateContext(VADriverContextP ctx,
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
     LOG("CreateContext: mpp_init OK");
+
+    if (profile == VAProfileHEVCMain10) {
+        MppFrameFormat output_format = MPP_FRAME_FBC_AFBC_V2;
+        if (!rk_rga_available() ||
+            c->mpi->control(c->mpp, MPP_DEC_SET_OUTPUT_FORMAT,
+                            &output_format) != MPP_OK) {
+            LOG("CreateContext: Main10 AFBC output configuration failed");
+            rk_object_unref(&c->base);
+            return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
+        }
+        LOG("CreateContext: Main10 output mode=AFBC_V2");
+    }
 
     /* Must be set after mpp_init: split_parse=0 means we send complete
      * access units. The worker uses a bounded blocking output wait so it can

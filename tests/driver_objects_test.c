@@ -48,6 +48,50 @@ static void test_configs(struct VADriverVTable *v, VADriverContextP ctx,
     }
 }
 
+static void test_experimental_main10(struct VADriverVTable *v,
+                                     VADriverContextP ctx)
+{
+    VAEntrypoint entrypoints[2];
+    int entrypoint_count = 0;
+    CHECK_STATUS(v->vaQueryConfigEntrypoints(
+                     ctx, VAProfileHEVCMain10, entrypoints,
+                     &entrypoint_count),
+                 VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
+
+    if (setenv("RK_VAAPI_EXPERIMENTAL_PROFILES", "hevc-main10", 1) != 0) {
+        perror("setenv");
+        exit(1);
+    }
+    CHECK_STATUS(v->vaQueryConfigEntrypoints(
+                     ctx, VAProfileHEVCMain10, entrypoints,
+                     &entrypoint_count),
+                 VA_STATUS_SUCCESS);
+    if (entrypoint_count != 1 || entrypoints[0] != VAEntrypointVLD) {
+        fputs("Main10 experimental entrypoint changed unexpectedly\n", stderr);
+        exit(1);
+    }
+
+    VAConfigAttrib rt_format = { .type = VAConfigAttribRTFormat };
+    CHECK_STATUS(v->vaGetConfigAttributes(
+                     ctx, VAProfileHEVCMain10, VAEntrypointVLD,
+                     &rt_format, 1),
+                 VA_STATUS_SUCCESS);
+    if (rt_format.value != VA_RT_FORMAT_YUV420_10) {
+        fputs("Main10 experimental RT format is not 10-bit 4:2:0\n", stderr);
+        exit(1);
+    }
+
+    VAConfigID config;
+    CHECK_STATUS(v->vaCreateConfig(ctx, VAProfileHEVCMain10,
+                                   VAEntrypointVLD, &rt_format, 1, &config),
+                 VA_STATUS_SUCCESS);
+    CHECK_STATUS(v->vaDestroyConfig(ctx, config), VA_STATUS_SUCCESS);
+    if (unsetenv("RK_VAAPI_EXPERIMENTAL_PROFILES") != 0) {
+        perror("unsetenv");
+        exit(1);
+    }
+}
+
 static void test_buffers(struct VADriverVTable *v, VADriverContextP ctx,
                          VABufferID buffers[BUFFER_COUNT])
 {
@@ -180,6 +224,7 @@ int main(void)
     VABufferID buffers[BUFFER_COUNT];
     VAImage images[IMAGE_COUNT];
 
+    test_experimental_main10(&vtable, &ctx);
     test_configs(&vtable, &ctx, configs);
     test_buffers(&vtable, &ctx, buffers);
     test_images(&vtable, &ctx, images);

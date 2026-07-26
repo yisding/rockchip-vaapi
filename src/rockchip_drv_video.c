@@ -64,13 +64,14 @@ static VAStatus rk_Terminate(VADriverContextP ctx) {
  *     software-exact. Fall back instead of returning corrupt frames.
  *   - HEVC: reconstruction and worker routing exist, and a narrow
  *     RK_VAAPI_EXPERIMENTAL_PROFILES=hevc-main gate can expose Main for
- *     validation. Five pinned Main vectors are bit-exact as of 2026-07-26,
+ *     validation. Seven pinned Main vectors are bit-exact as of 2026-07-26,
  *     but the profile remains hidden by default until the full pinned gate is
  *     bit-exact rather than partially fail-closed.
+ *   - HEVC Main10: MPP AFBC-to-P010 conversion is bit-exact on the narrow
+ *     hevc-main10 gate, but it remains hidden until the broader conformance
+ *     and HDR gates pass.
+ *   - H.264 High10 / VP9 Profile 2: not yet wired to an experimental gate.
  *   - VP8: verified segfault in the generic path.
- *   - H.264 High10 / VP9 Profile 2 (10-bit): compact NV15-to-P010 conversion
- *     is implemented, but these profiles remain hidden until the fixed
- *     kernel/librga pair and 10-bit hardware gate pass.
  *   - AV1: MPP needs a full OBU bytestream but VA-API hands us only
  *     headerless tile data, so MPP can never parse it. Firefox falls back
  *     to VP9 (hardware-decoded) for AV1-capable content. */
@@ -92,6 +93,8 @@ static bool profile_supported(VAProfile p) {
         return true;
     case VAProfileHEVCMain:
         return experimental_profile_enabled("hevc-main");
+    case VAProfileHEVCMain10:
+        return experimental_profile_enabled("hevc-main10");
     default:
         return false;
     }
@@ -106,6 +109,8 @@ static VAStatus rk_QueryConfigProfiles(VADriverContextP ctx,
     list[i++] = VAProfileVP9Profile0;
     if (profile_supported(VAProfileHEVCMain))
         list[i++] = VAProfileHEVCMain;
+    if (profile_supported(VAProfileHEVCMain10))
+        list[i++] = VAProfileHEVCMain10;
     *n = i;
     return VA_STATUS_SUCCESS;
 }
@@ -125,13 +130,14 @@ static VAStatus rk_GetConfigAttributes(VADriverContextP ctx,
                                        VAProfile profile,
                                        VAEntrypoint entrypoint,
                                        VAConfigAttrib *list, int n) {
-    (void)ctx; (void)profile; (void)entrypoint;
+    (void)ctx; (void)entrypoint;
     for (int i = 0; i < n; i++) {
         LOG("GetConfigAttributes: type=%d", list[i].type);
         switch (list[i].type) {
         case VAConfigAttribRTFormat:
-            /* 10-bit intentionally not offered — see profile_supported() */
-            list[i].value = VA_RT_FORMAT_YUV420;
+            list[i].value = profile == VAProfileHEVCMain10
+                          ? VA_RT_FORMAT_YUV420_10
+                          : VA_RT_FORMAT_YUV420;
             break;
         case VAConfigAttribDecSliceMode:
             list[i].value = VA_DEC_SLICE_MODE_NORMAL;

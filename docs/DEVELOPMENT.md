@@ -267,10 +267,14 @@ frame even though routing and buffer indices were correct.
 
 MPP reports 10-bit 4:2:0 output as compact NV15
 (`MPP_FMT_YUV420SP_10BIT`). Apps expect P010, so `assign_mpp_frame` converts
-linear NV15 from the external decode pool into a driver-owned P010 buffer via
-`rk_convert_nv15_to_p010`. The source layout is bounded with MPP's byte stride;
-the RGA image wrapper and exported P010 descriptor use MPP's pixel stride
-(`mpp_frame_get_hor_stride_pixel`, or the derived 4/5 ratio when MPP omits it).
+NV15 from the external decode pool into a driver-owned P010 buffer via
+`rk_convert_nv15_to_p010`. HEVC Main10 contexts request
+`MPP_FRAME_FBC_AFBC_V2`: VDPU383's normal linear 10-bit byte stride is not
+always a whole, 64-aligned number of compact pixels and cannot be passed to
+librga honestly. AFBC input uses `mpp_frame_get_fbc_hdr_stride()` as its pixel
+stride, `IM_AFBC16x16_MODE`, and MPP's crop offsets as the source rectangle.
+Linear NV15 remains fail-closed unless byte stride, pixel stride, alignment,
+and buffer bounds are all mutually consistent.
 
 The converted P010 buffer is stored as `surface->backing_buf` and the source
 `MppFrame` is released back to MPP after the surface is signaled. Export and
@@ -443,10 +447,10 @@ patching Firefox's sandbox policy).
 - HEVC reconstruction is host-validated but unadvertised pending the pinned
   on-device Main conformance gate. Seven of eight pinned vectors are bit-exact;
   MPP-reported errored TILES output is the remaining fail-closed class.
-- HEVC Main10 and VP9 Profile 2 have NV15-to-P010 plumbing. The standalone
-  P010/librga blocker is fixed on the tested kernel/librga stack, but these
-  profiles remain unadvertised until the on-device 10-bit conformance/HDR
-  gates pass. VP8 and AV1 are also unadvertised.
+- HEVC Main10 has a bit-exact 48-frame AFBC NV15-to-P010 development gate.
+  It remains unadvertised until broader conformance and HDR gates pass. VP9
+  Profile 2 has not inherited that result and remains unwired. VP8 and AV1
+  are also unadvertised.
 
 ---
 

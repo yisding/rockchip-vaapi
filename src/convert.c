@@ -24,6 +24,9 @@ bool rk_convert_nv15_to_p010(MppBufferGroup group, MppBuffer source,
                              uint32_t source_byte_stride,
                              uint32_t pixel_stride,
                              uint32_t vertical_stride,
+                             uint32_t source_offset_x,
+                             uint32_t source_offset_y,
+                             bool source_afbc,
                              MppBuffer *converted_out)
 {
     if (!converted_out)
@@ -33,16 +36,24 @@ bool rk_convert_nv15_to_p010(MppBufferGroup group, MppBuffer source,
     size_t source_size = source ? mpp_buffer_get_size(source) : 0;
     size_t source_layout_size = 0;
     size_t converted_size = 0;
-    if (!group || !source || !width || !height || !source_byte_stride ||
-        !pixel_stride || !vertical_stride ||
-        !rk_nv12_layout_size(source_byte_stride, vertical_stride,
-                             &source_layout_size) ||
+    bool source_layout_valid = source_afbc ||
+        (source_byte_stride &&
+         rk_nv12_layout_size(source_byte_stride, vertical_stride,
+                             &source_layout_size) &&
+         source_size >= source_layout_size);
+    if (!group || !source || !width || !height || !pixel_stride ||
+        !vertical_stride || !source_layout_valid ||
+        source_offset_x > pixel_stride ||
+        width > pixel_stride - source_offset_x ||
+        source_offset_y > vertical_stride ||
+        height > vertical_stride - source_offset_y ||
         !rk_p010_layout_size(pixel_stride, vertical_stride,
-                             &converted_size) ||
-        source_size < source_layout_size) {
+                             &converted_size)) {
         LOG("convert: invalid NV15/P010 layout src_stride=%u pixel_stride=%u "
-            "vstride=%u source_size=%zu source_layout=%zu",
-            source_byte_stride, pixel_stride, vertical_stride, source_size,
+            "vstride=%u offset=(%u,%u) afbc=%d source_size=%zu "
+            "source_layout=%zu",
+            source_byte_stride, pixel_stride, vertical_stride,
+            source_offset_x, source_offset_y, source_afbc, source_size,
             source_layout_size);
         return false;
     }
@@ -74,44 +85,30 @@ bool rk_convert_nv15_to_p010(MppBufferGroup group, MppBuffer source,
         return false;
     }
 
-    im_handle_param_t source_param = {
-        .width = pixel_stride,
-        .height = vertical_stride,
-        .format = RK_FORMAT_YCbCr_420_SP_10B,
-    };
-    im_handle_param_t converted_param = {
-        .width = pixel_stride,
-        .height = vertical_stride,
-        .format = RK_FORMAT_P010,
-    };
-    rga_buffer_handle_t source_handle =
-        importbuffer_fd(source_fd, &source_param);
-    rga_buffer_handle_t converted_handle =
-        importbuffer_fd(converted_fd, &converted_param);
-    if (!source_handle || !converted_handle) {
-        LOG("convert: RGA import failed source_handle=%u converted_handle=%u",
-            source_handle, converted_handle);
-        if (source_handle)
-            releasebuffer_handle(source_handle);
-        if (converted_handle)
-            releasebuffer_handle(converted_handle);
-        mpp_buffer_put(converted);
-        return false;
-    }
-
-    rga_buffer_t source_image = wrapbuffer_handle_t(
-        source_handle, (int)width, (int)height, (int)pixel_stride,
+    rga_buffer_t source_image = wrapbuffer_fd_t(
+        source_fd, (int)width, (int)height, (int)pixel_stride,
         (int)vertical_stride, RK_FORMAT_YCbCr_420_SP_10B);
-    rga_buffer_t converted_image = wrapbuffer_handle_t(
-        converted_handle, (int)width, (int)height, (int)pixel_stride,
+    if (source_afbc)
+        source_image.rd_mode = IM_AFBC16x16_MODE;
+    rga_buffer_t converted_image = wrapbuffer_fd_t(
+        converted_fd, (int)width, (int)height, (int)pixel_stride,
         (int)vertical_stride, RK_FORMAT_P010);
 
-    IM_STATUS status = imcvtcolor_t(source_image, converted_image,
-                                    RK_FORMAT_YCbCr_420_SP_10B,
-                                    RK_FORMAT_P010,
-                                    IM_COLOR_SPACE_DEFAULT, 1);
-    releasebuffer_handle(source_handle);
-    releasebuffer_handle(converted_handle);
+    im_rect source_rect = {
+        .x = (int)source_offset_x,
+        .y = (int)source_offset_y,
+        .width = (int)width,
+        .height = (int)height,
+    };
+    im_rect converted_rect = {
+        .x = 0,
+        .y = 0,
+        .width = (int)width,
+        .height = (int)height,
+    };
+    IM_STATUS status = improcess(source_image, converted_image,
+                                 (rga_buffer_t){0}, source_rect,
+                                 converted_rect, (im_rect){0}, IM_SYNC);
     if (status != IM_STATUS_SUCCESS && status != IM_STATUS_NOERROR) {
         LOG("convert: RGA NV15->P010 failed status=%d (%s)", (int)status,
             imStrError_t(status));
@@ -120,9 +117,9 @@ bool rk_convert_nv15_to_p010(MppBufferGroup group, MppBuffer source,
     }
 
     LOG("convert: NV15->P010 %ux%u src_stride_bytes=%u pixel_stride=%u "
-        "vstride=%u fd=%d",
+        "vstride=%u offset=(%u,%u) afbc=%d fd=%d",
         width, height, source_byte_stride, pixel_stride, vertical_stride,
-        converted_fd);
+        source_offset_x, source_offset_y, source_afbc, converted_fd);
     *converted_out = converted;
     return true;
 #endif

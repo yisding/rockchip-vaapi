@@ -126,11 +126,12 @@ succeeds.
 
 - 8-bit decode outputs NV12; export as NV12 (composed) or R8+GR88 split layers
   (Firefox `DMABufSurfaceYUV`) — the PoC's `export.c` logic, kept.
-- **10-bit:** MPP emits compact **NV15**. Convert **NV15→P010 via RGA**
-  (`convert.c`, librga im2d) for universal app compatibility — this reuses the
-  kernel-side RGA NV15→P010 path validated in the ROCK 5B forward-port (patches
-  `0048`/`0049`). Export P010 as R16+GR1616 split (Firefox) or composed P010
-  (mpv/GStreamer). Investigate **direct NV15 dmabuf export**
+- **10-bit:** request MPP **AFBC NV15** and convert **NV15→P010 via RGA**
+  (`convert.c`, librga im2d) for universal app compatibility. Linear decoder
+  NV15 is accepted only when its byte and pixel strides are exactly
+  representable; RK3588's normal VDPU383 linear stride is not. Export P010 as
+  R16+GR1616 split (Firefox) or composed P010 (mpv/GStreamer). Investigate
+  **direct NV15 dmabuf export**
   (`DRM_FORMAT_NV15`) as a later zero-copy optimization where the consumer
   accepts it.
 
@@ -330,17 +331,23 @@ post-slice Phase 0 hardware regression is green normally and under ASan/UBSan,
 but that proves only the already-shipping profiles and HEVC fallback contract;
 HEVC Main hardware output remains pending rather than inferred from it.
 
-**Progress (2026-07-26, 10-bit plumbing):** The driver now has a fail-closed
-RGA-backed NV15->P010 path for MPP's compact 10-bit output. The decode worker
-accepts linear NV15 only from the external decode pool, converts it into a
-driver-owned P010 backing buffer with librga im2d, stores P010 pixel stride for
-export/readback, and releases the source `MppFrame` back to MPP. Surface export
-and `vaGetImage` prefer the converted backing buffer, so consumers see P010
-instead of compact NV15. Host gates passed for this slice: `make`, `make test`,
-`make sanitize`, `make test-tsan`, and the TSan driver artifact build. The
-standalone P010/librga issue is fixed on the tested kernel/librga stack and is
-not the current HEVC Main blocker, but Main10 and VP9 Profile 2 remain
-unadvertised until the full on-device 10-bit conformance/HDR gate passes.
+**Progress (2026-07-26, Main10 hardware slice):** A narrow
+`RK_VAAPI_EXPERIMENTAL_PROFILES=hevc-main10` gate now exposes
+`VAProfileHEVCMain10` with `VA_RT_FORMAT_YUV420_10`. Context creation requests
+`MPP_FRAME_FBC_AFBC_V2`; this is required because VDPU383 reports a 448-byte
+linear NV15 stride for 320 pixels, which cannot be represented by librga's
+64-pixel-aligned compact format. The decode worker validates AFBC metadata,
+uses `mpp_frame_get_fbc_hdr_stride()` as the RGA pixel stride, and applies
+MPP's `offset_x`/`offset_y` to the source rectangle before writing a
+driver-owned linear P010 buffer. Ignoring the measured four-row AFBC offset
+produced a shifted image at 21.7 dB PSNR; honoring it is byte-exact.
+
+`make check-hevc-main10-experimental` generates a 48-frame Main10 stream,
+compares downloaded P010 bytes against software decode, and audits that all 48
+frames used AFBC conversion. It passes bit-exactly on the 2026-07-25
+kernel/librga stack. The profile remains hidden by default until broader
+Main10 conformance and HDR metadata/playback gates pass; VP9 Profile 2 remains
+unadvertised and is not covered by this result.
 
 **Progress (2026-07-26, HEVC hardware gate):** Added a gated HEVC Main
 validation path without advertising HEVC by default:
@@ -379,9 +386,8 @@ advertised hardware subset (`check-safe`) still passes with HEVC software
 fallback and the risky VP9 vector blocked. HEVC Main stays hidden.
 
 **Gate:** HEVC Main bit-exact vs software on conformance vectors; HEVC Main10 /
-VP9 P2 validated (PSNR-bounded, since RGA P010 conversion is not
-transform-exact — or NV15-space bit-exact if direct export lands); HDR HEVC
-plays correctly in Firefox and mpv on-device.
+VP9 P2 bit-exact after P010 repacking; HDR HEVC plays correctly in Firefox and
+mpv on-device.
 
 ### Phase 3 — Production hardening & the app matrix  (~2–3 wk)
 
@@ -460,9 +466,9 @@ concurrent with decode contexts are race-free.
 - **External buffer group parity:** resolved for shipping H.264 and VP9 on the
   pinned MPP/ROCK 5B stack. HEVC must repeat the parity gate when its decode
   path lands; the internal-group ref-holding fallback remains zero-copy.
-- **10-bit exactness:** RGA NV15→P010 is a conversion, so 10-bit can't be
-  transform-bit-exact against a P010 software reference; decide between a PSNR
-  bound vs. NV15-space bit-exact comparison vs. landing direct NV15 export.
+- **10-bit exactness:** resolved for the narrow HEVC Main10 AFBC path. RGA
+  performs a pure NV15-to-P010 repack and the 48-frame gate is byte-exact.
+  Broader Main10/HDR vectors and VP9 Profile 2 still need their own gates.
 - **Encode conformance:** encoders aren't spec-exact; the gate must be
   round-trip PSNR + interop, and depends on the kernel RKVENC2 hardening.
 - **Sandbox upstreamability:** the Firefox RDD policy patch is small but must be
@@ -482,10 +488,10 @@ concurrent with decode contexts are race-free.
   zero-copy, worker/fence synchronization, module separation, two active
   decoders, sanitizer gates, and the multi-hour 4K resource soak are green.
 - Phase 2: in progress; the first host reconstruction/routing slice is green,
-  the NV15->P010 plumbing builds cleanly, and a fail-fast experimental HEVC
-  hardware gate is 7/8 bit-exact. HEVC Main remains hidden on the direct-MPP
-  TILES failure, while 10-bit profile advertisement and HDR validation remain
-  open.
+  the fail-fast experimental HEVC Main hardware gate is 7/8 bit-exact, and the
+  separate 48-frame Main10 AFBC-to-P010 gate is bit-exact. HEVC Main remains
+  hidden on the direct-MPP TILES failure; Main10 remains hidden while broader
+  conformance and HDR validation are open.
 - Phases 3–5: planned.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement

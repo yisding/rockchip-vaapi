@@ -15,7 +15,8 @@ make test-tsan
 make test-valgrind
 make lint
 shellcheck tests/check-concurrent-decode.sh tests/check-zero-copy.sh \
-    tests/check-soak.sh tests/fetch-vectors.sh tests/validate.sh
+    tests/check-hevc-main10.sh tests/check-soak.sh tests/fetch-vectors.sh \
+    tests/validate.sh
 ```
 
 `make sanitize` builds the whole driver and runs its hardware-independent unit
@@ -96,6 +97,7 @@ FFMPEG=/usr/bin/ffmpeg make check-concurrent-decode-sanitize
 FFMPEG=/usr/bin/ffmpeg make check-concurrent-decode-tsan
 FFMPEG=/usr/bin/ffmpeg make check-soak
 FFMPEG=/usr/bin/ffmpeg make check-hevc-experimental
+FFMPEG=/usr/bin/ffmpeg make check-hevc-main10-experimental
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-conformance
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-sanitize
 ```
@@ -116,11 +118,15 @@ VA-API path both report `errinfo=1` from frame 1 onward, so the driver maps
 errored/discarded MPP frames to `VA_STATUS_ERROR_DECODING_ERROR` instead of
 returning corrupt output.
 
-For the 10-bit Phase 2 gate, the board must run a kernel/librga pair whose
-standalone RGA NV15/P010 probes pass; the prior standalone P010/librga blocker
-is fixed on the tested stack. The driver converts MPP's compact NV15 output to
-P010 with librga and intentionally keeps Main10 / VP9 Profile 2 hidden until
-that stack also passes the VA-API conformance and HDR playback checks.
+`check-hevc-main10-experimental` generates 48 Main10 frames at 320x240, forces
+the hidden `hevc-main10` profile, downloads P010, and requires byte-for-byte
+equality with software decode. It also requires one MPP AFBC-to-RGA conversion
+per frame and rejects linear fallback, buffer mismatch, or decode failure. The
+gate is bit-exact on the tested 2026-07-25 kernel/librga stack. MPP AFBC is
+mandatory here because VDPU383's 448-byte linear NV15 stride is not
+RGA-expressible; the conversion also applies MPP's AFBC crop offset. Main10
+stays hidden until broader conformance and HDR playback checks pass, and this
+result does not cover VP9 Profile 2.
 
 The object-lifecycle gate crosses every former fixed-array ceiling, validates
 all five typed handle namespaces and stale-handle rejection, and creates nine
