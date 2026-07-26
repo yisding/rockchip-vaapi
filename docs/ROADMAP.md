@@ -401,6 +401,23 @@ decoder during teardown so in-flight MPP buffers are not leaked. The safe
 advertised hardware subset (`check-safe`) still passes with HEVC software
 fallback and the risky VP9 vector blocked. HEVC Main stays hidden.
 
+**Progress (2026-07-26, HDR10 metadata slice):**
+`make check-hevc-main10-hdr-experimental` generates a 24-frame Main10 HDR10
+stream and validates the complete hardware-frame boundary. Its downloaded
+P010 bytes are identical to software decode, with one audited AFBC-to-RGA
+conversion per frame. Every hardware-decoded frame retains limited-range
+BT.2020 non-constant-luminance color, BT.2020 primaries, SMPTE ST 2084 (PQ),
+the expected mastering-display chromaticities and 0.0001-1000 nit luminance,
+and MaxCLL 1000/MaxFALL 400 metadata.
+
+The original HEVC VUI and prefix/suffix SEI messages are parsed by libavcodec
+before VA submission and carried on its output `AVFrame`; they do not need to
+be reconstructed into the SPS sent privately to MPP. VA's HEVC picture
+parameters do not expose those original syntax elements, so the reconstructed
+SPS deliberately keeps `vui_parameters_present_flag=0`. This contract is now
+tested instead of depending on MPP to reproduce application-facing metadata.
+Actual HDR presentation in Firefox and mpv remains an app/display-system gate.
+
 **Gate:** HEVC Main bit-exact vs software on conformance vectors; HEVC Main10 /
 VP9 P2 bit-exact after P010 repacking; HDR HEVC plays correctly in Firefox and
 mpv on-device.
@@ -483,9 +500,10 @@ concurrent with decode contexts are race-free.
   pinned MPP/ROCK 5B stack. HEVC must repeat the parity gate when its decode
   path lands; the internal-group ref-holding fallback remains zero-copy.
 - **10-bit exactness:** resolved for the generated HEVC Main10 and VP9 Profile
-  2 AFBC paths plus the pinned 256-frame Main10 weighted-prediction vector.
-  RGA performs a pure NV15-to-P010 repack and all three gates are byte-exact.
-  Broader conformance and HDR playback remain open.
+  2 AFBC paths, the pinned 256-frame Main10 weighted-prediction vector, and the
+  24-frame HDR10 vector. RGA performs a pure NV15-to-P010 repack and all four
+  gates are byte-exact. Static BT.2020/PQ HDR metadata survives the hardware
+  frame path; broader conformance and app/display HDR presentation remain open.
 - **Encode conformance:** encoders aren't spec-exact; the gate must be
   round-trip PSNR + interop, and depends on the kernel RKVENC2 hardening.
 - **Sandbox upstreamability:** the Firefox RDD policy patch is small but must be
@@ -506,10 +524,11 @@ concurrent with decode contexts are race-free.
   decoders, sanitizer gates, and the multi-hour 4K resource soak are green.
 - Phase 2: in progress; the first host reconstruction/routing slice is green,
   the fail-fast experimental HEVC Main hardware gate is 7/8 bit-exact, and the
-  generated 48-frame Main10/Profile 2 and pinned 256-frame Main10
-  AFBC-to-P010 gates are bit-exact. HEVC Main remains hidden on the direct-MPP
-  TILES failure; both 10-bit profiles remain hidden while broader conformance
-  and HDR validation are open.
+  generated 48-frame Main10/Profile 2, pinned 256-frame Main10, and 24-frame
+  Main10 HDR10 AFBC-to-P010 gates are bit-exact. Static BT.2020/PQ HDR metadata
+  is preserved. HEVC Main remains hidden on the direct-MPP TILES failure; both
+  10-bit profiles remain hidden while broader conformance and app/display HDR
+  presentation are open.
 - Phases 3–5: planned.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement

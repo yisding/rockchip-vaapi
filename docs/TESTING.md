@@ -15,8 +15,8 @@ make test-tsan
 make test-valgrind
 make lint
 shellcheck tests/check-concurrent-decode.sh tests/check-zero-copy.sh \
-    tests/check-hevc-main10.sh tests/check-soak.sh tests/fetch-vectors.sh \
-    tests/validate.sh
+    tests/check-hevc-main10.sh tests/check-hevc-main10-hdr.sh \
+    tests/check-soak.sh tests/fetch-vectors.sh tests/validate.sh
 ```
 
 `make sanitize` builds the whole driver and runs its hardware-independent unit
@@ -98,6 +98,7 @@ FFMPEG=/usr/bin/ffmpeg make check-concurrent-decode-tsan
 FFMPEG=/usr/bin/ffmpeg make check-soak
 FFMPEG=/usr/bin/ffmpeg make check-hevc-experimental
 FFMPEG=/usr/bin/ffmpeg make check-hevc-main10-experimental
+FFMPEG=/usr/bin/ffmpeg make check-hevc-main10-hdr-experimental
 FFMPEG=/usr/bin/ffmpeg make check-vp9-profile2-experimental
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-conformance
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-sanitize
@@ -129,6 +130,15 @@ bit-exact on the tested 2026-07-25 kernel/librga stack. MPP AFBC is mandatory
 here because VDPU383's linear NV15 stride is not always RGA-expressible; the
 conversion also applies MPP's AFBC crop offset. Main10 stays hidden until
 broader conformance and HDR playback checks pass.
+
+`check-hevc-main10-hdr-experimental` generates 24 Main10 HDR10 frames at
+320x240. It requires P010 byte equality with software decode, one audited
+AFBC-to-RGA conversion per frame, and matching per-frame limited-range
+BT.2020 non-constant-luminance color, BT.2020 primaries, SMPTE ST 2084 (PQ),
+mastering-display, and MaxCLL/MaxFALL metadata. This proves that libavcodec's
+original-stream VUI/SEI metadata survives the VA hardware-frame path even
+though the private SPS reconstructed for MPP has no VUI. It does not replace
+the Firefox/mpv display-presentation gate.
 
 `check-vp9-profile2-experimental` generates a lossless 48-frame VP9 Profile 2
 stream at 320x240, forces the hidden `vp9-profile2` profile, downloads P010,

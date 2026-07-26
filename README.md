@@ -62,9 +62,12 @@ decoder gates, and two-hour 4K resource soak are also complete; see
   or has a documented fallback contract. HEVC Main10 has a separate opt-in
   gate whose generated 48-frame and pinned 256-frame MPP AFBC-to-RGA P010
   paths are bit-exact, but it remains hidden pending broader conformance and
-  HDR validation. VP9 Profile 2 has its
-  own opt-in 48-frame P010-exact AFBC/RGA gate and remains hidden for the same
-  reason. VP8 and the other unvalidated profiles are also not advertised, so
+  app/display HDR presentation. VP9 Profile 2 has its
+  own opt-in 48-frame P010-exact AFBC/RGA gate and remains hidden pending
+  conformance validation. HEVC Main10 additionally has a 24-frame HDR10 gate
+  proving byte-exact P010 output and preservation of BT.2020/PQ, mastering
+  display, and content-light metadata. VP8 and the other unvalidated profiles
+  are also not advertised, so
   applications fall back instead of receiving an unsafe format or decode path.
 - Packaging/build hygiene: `DESTDIR`/`PREFIX`/multiarch-aware Makefile,
   no `sudo` in `make install`, `make check` validation gate.
@@ -103,7 +106,7 @@ Key features:
 | VP9 | Profile 0 | full normal + ASan/UBSan gates bit-exact | hidden-reference vector included on audited kernel |
 | VP9 | Profile 2 (under development) | not offered | opt-in 48-frame gate is P010 bit-exact through MPP AFBC + RGA; conformance/HDR matrix pending |
 | HEVC | Main (under development) | not offered | gated hardware path has 7/8 pinned Main vectors bit-exact; MPP rejects the remaining TILES vector |
-| HEVC | Main10 (under development) | not offered | generated 48-frame and pinned 256-frame weighted-prediction gates are P010 bit-exact through MPP AFBC + RGA; broader conformance/HDR matrix pending |
+| HEVC | Main10 (under development) | not offered | generated, pinned weighted-prediction, and HDR10 gates are P010 bit-exact through MPP AFBC + RGA; BT.2020/PQ and static HDR metadata survive hardware decode |
 | VP8 | — | not offered | crashes in the generic path; needs debugging |
 | AV1 | — | not offered | VA-API hands headerless tile data; MPP needs full OBUs |
 | H.264 | High10 | not offered | profile-specific reconstruction and validation pending |

@@ -114,6 +114,9 @@ check-hevc-experimental: $(TARGET) test
 check-hevc-main10-experimental: $(TARGET) test
 	tests/check-hevc-main10.sh
 
+check-hevc-main10-hdr-experimental: $(TARGET) test
+	tests/check-hevc-main10-hdr.sh
+
 check-vp9-profile2-experimental: $(TARGET) test
 	tests/check-vp9-profile2.sh
 
