@@ -2,6 +2,7 @@
 #define RK_VAAPI_CONVERT_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include <rockchip/mpp_buffer.h>
@@ -17,5 +18,12 @@ bool rk_convert_nv15_to_p010(MppBufferGroup group, MppBuffer source,
                              uint32_t source_offset_y,
                              bool source_afbc,
                              MppBuffer *converted_out);
+
+bool rk_convert_rgb_to_nv12(int source_fd, size_t source_size,
+                            uint32_t source_fourcc, uint32_t source_pitch,
+                            uint32_t width, uint32_t height,
+                            MppBuffer destination,
+                            uint32_t destination_stride,
+                            uint32_t destination_vertical_stride);
 
 #endif

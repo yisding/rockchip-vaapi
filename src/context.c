@@ -284,6 +284,12 @@ VAStatus rk_BeginPicture(VADriverContextP ctx,
         return VA_STATUS_SUCCESS;
     }
 
+    if (s->import_buf) {
+        rk_object_unref(&s->base);
+        rk_object_unref(&c->base);
+        return VA_STATUS_ERROR_INVALID_SURFACE;
+    }
+
     pthread_mutex_lock(&c->picture_lock);
     RKSurface *previous_render_surface = c->render_surface;
     uint64_t previous_render_fence = c->render_fence;

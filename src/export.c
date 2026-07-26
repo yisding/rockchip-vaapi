@@ -46,7 +46,8 @@ VAStatus rk_ExportSurfaceHandle(VADriverContextP context, VASurfaceID id,
     }
 
     pthread_mutex_lock(&surface->lock);
-    MppBuffer active_buffer = surface->backing_buf ? surface->backing_buf
+    MppBuffer active_buffer = surface->import_buf ? surface->import_buf
+                            : surface->backing_buf ? surface->backing_buf
                             : surface->frame ? mpp_frame_get_buffer(surface->frame)
                             : surface->priv_buf;
     int fd = active_buffer ? mpp_buffer_get_fd(active_buffer) : -1;
@@ -56,8 +57,14 @@ VAStatus rk_ExportSurfaceHandle(VADriverContextP context, VASurfaceID id,
     int width = surface->width;
     int height = surface->height;
     bool decoded = surface->decoded;
-    bool is_placeholder = surface->frame == NULL && surface->backing_buf == NULL;
+    bool is_placeholder = surface->import_buf == NULL &&
+                          surface->frame == NULL &&
+                          surface->backing_buf == NULL;
     bool is_10bit = MPP_FRAME_FMT_IS_YUV_10BIT(surface->fmt);
+    bool imported_rgb = surface->imported_rgb;
+    uint32_t import_pitch = surface->import_pitch;
+    uint32_t import_drm_format = surface->import_drm_format;
+    uint32_t surface_fourcc = surface->fourcc;
     int export_fd = fd >= 0 ? dup(fd) : -1;
     int duplicate_error = export_fd < 0 ? errno : 0;
     pthread_mutex_unlock(&surface->lock);
@@ -90,6 +97,18 @@ VAStatus rk_ExportSurfaceHandle(VADriverContextP context, VASurfaceID id,
     desc->objects[0].fd = export_fd;
     desc->objects[0].size = (uint32_t)object_size;
     desc->objects[0].drm_format_modifier = 0; /* DRM_FORMAT_MOD_LINEAR */
+
+    if (imported_rgb) {
+        desc->fourcc = surface_fourcc;
+        desc->num_layers = 1;
+        desc->layers[0].drm_format = import_drm_format;
+        desc->layers[0].num_planes = 1;
+        desc->layers[0].object_index[0] = 0;
+        desc->layers[0].offset[0] = 0;
+        desc->layers[0].pitch[0] = import_pitch;
+        rk_object_unref(&surface->base);
+        return VA_STATUS_SUCCESS;
+    }
 
     bool composed = (flags & VA_EXPORT_SURFACE_COMPOSED_LAYERS) != 0;
 

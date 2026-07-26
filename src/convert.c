@@ -3,6 +3,8 @@
 #include <limits.h>
 #include <stddef.h>
 
+#include <va/va.h>
+
 #include "frame_layout.h"
 #include "log.h"
 
@@ -16,6 +18,101 @@ bool rk_rga_available(void)
     return true;
 #else
     return false;
+#endif
+}
+
+static int rgb_rga_format(uint32_t fourcc)
+{
+#ifdef RK_HAVE_RGA
+    switch (fourcc) {
+    case VA_FOURCC_RGBA: return RK_FORMAT_RGBA_8888;
+    case VA_FOURCC_RGBX: return RK_FORMAT_RGBX_8888;
+    case VA_FOURCC_BGRA: return RK_FORMAT_BGRA_8888;
+    case VA_FOURCC_BGRX: return RK_FORMAT_BGRX_8888;
+    default:             return -1;
+    }
+#else
+    (void)fourcc;
+    return -1;
+#endif
+}
+
+bool rk_convert_rgb_to_nv12(int source_fd, size_t source_size,
+                            uint32_t source_fourcc, uint32_t source_pitch,
+                            uint32_t width, uint32_t height,
+                            MppBuffer destination,
+                            uint32_t destination_stride,
+                            uint32_t destination_vertical_stride)
+{
+    size_t source_layout_size = 0;
+    size_t destination_layout_size = 0;
+    int source_format = rgb_rga_format(source_fourcc);
+    if (height && source_pitch > SIZE_MAX / height)
+        source_layout_size = SIZE_MAX;
+    else if (height)
+        source_layout_size = (size_t)source_pitch * height;
+    if (source_fd < 0 || !width || !height || (width & 1) || (height & 1) ||
+        source_format < 0 || source_pitch % 4 != 0 ||
+        source_pitch / 4 < width || source_layout_size > source_size ||
+        !destination || destination_stride < width ||
+        destination_vertical_stride < height ||
+        !rk_nv12_layout_size(destination_stride,
+                             destination_vertical_stride,
+                             &destination_layout_size) ||
+        destination_layout_size > mpp_buffer_get_size(destination)) {
+        LOG("convert: invalid RGB/NV12 layout fourcc=0x%x source_fd=%d "
+            "source_size=%zu source_pitch=%u size=%ux%u dst_stride=%u "
+            "dst_vstride=%u",
+            source_fourcc, source_fd, source_size, source_pitch, width,
+            height, destination_stride, destination_vertical_stride);
+        return false;
+    }
+
+#ifndef RK_HAVE_RGA
+    LOG("convert: RGA support not compiled in; cannot convert RGB to NV12");
+    return false;
+#else
+    int destination_fd = mpp_buffer_get_fd(destination);
+    if (destination_fd < 0 || source_size > (size_t)INT_MAX ||
+        destination_layout_size > (size_t)INT_MAX ||
+        source_pitch / 4 > (uint32_t)INT_MAX ||
+        width > (uint32_t)INT_MAX || height > (uint32_t)INT_MAX ||
+        destination_stride > (uint32_t)INT_MAX ||
+        destination_vertical_stride > (uint32_t)INT_MAX) {
+        LOG("convert: RGB/NV12 buffer not importable source_fd=%d "
+            "destination_fd=%d source_size=%zu destination_size=%zu",
+            source_fd, destination_fd, source_size, destination_layout_size);
+        return false;
+    }
+
+    rga_buffer_t source_image = wrapbuffer_fd_t(
+        source_fd, (int)width, (int)height, (int)(source_pitch / 4),
+        (int)height, source_format);
+    rga_buffer_t destination_image = wrapbuffer_fd_t(
+        destination_fd, (int)width, (int)height, (int)destination_stride,
+        (int)destination_vertical_stride, RK_FORMAT_YCbCr_420_SP);
+    im_rect source_rect = {
+        .x = 0,
+        .y = 0,
+        .width = (int)width,
+        .height = (int)height,
+    };
+    im_rect destination_rect = source_rect;
+    IM_STATUS status = improcess(source_image, destination_image,
+                                 (rga_buffer_t){0}, source_rect,
+                                 destination_rect, (im_rect){0}, IM_SYNC);
+    if (status != IM_STATUS_SUCCESS && status != IM_STATUS_NOERROR) {
+        LOG("convert: RGA RGB->NV12 failed status=%d (%s)", (int)status,
+            imStrError_t(status));
+        return false;
+    }
+
+    LOG("convert: RGB->NV12 fourcc=0x%x %ux%u source_pitch=%u "
+        "destination_stride=%u destination_vstride=%u source_fd=%d "
+        "destination_fd=%d",
+        source_fourcc, width, height, source_pitch, destination_stride,
+        destination_vertical_stride, source_fd, destination_fd);
+    return true;
 #endif
 }
 

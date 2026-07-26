@@ -11,6 +11,7 @@
 #include <rockchip/rk_venc_rc.h>
 
 #include "buffer.h"
+#include "convert.h"
 #include "log.h"
 
 static bool enc_set_s32(MppEncCfg cfg, const char *key, int32_t value)
@@ -430,8 +431,15 @@ VAStatus rk_mpp_enc_encode(RKContext *context)
     MppPacket packet = NULL;
     RKSurface *surface = context->render_surface;
     pthread_mutex_lock(&surface->lock);
-    MppBuffer input = surface->priv_buf;
+    MppBuffer input = surface->import_buf && !surface->imported_rgb
+                    ? surface->import_buf : surface->priv_buf;
     if (!input || MPP_FRAME_FMT_IS_YUV_10BIT(surface->fmt) ||
+        (surface->imported_rgb &&
+         !rk_convert_rgb_to_nv12(
+             mpp_buffer_get_fd(surface->import_buf), surface->import_size,
+             surface->fourcc, surface->import_pitch,
+             (uint32_t)surface->width, (uint32_t)surface->height, input,
+             (uint32_t)surface->hstride, (uint32_t)surface->vstride)) ||
         !configure_encoder(context) ||
         mpp_frame_init(&frame) != MPP_OK) {
         goto out;

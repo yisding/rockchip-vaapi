@@ -461,12 +461,27 @@ one MPP packet, and publishes it through a `VACodedBufferSegment`. MPP emits
 H.264 SPS/PPS or HEVC VPS/SPS/PPS on each IDR. Coded-buffer overflow fails
 closed.
 
-The current boundary is deliberately narrow: progressive NV12, one complete
-frame-level macroblock/CTU slice, MPP-managed references, and synchronous
-completion. P010 encode, imported RGB/DMABUF RGA conversion, packed application
-headers, B-frames, multi-slice, and WebRTC integration are not advertised.
-This also avoids exercising the kernel's historically vulnerable multi-slice
-FIFO path.
+`vaCreateSurfaces2` also implements DRM PRIME 2 import for encode inputs. The
+accepted contract is deliberately narrow: one linear object, one composed
+layer, exact visible dimensions, zero packed-RGB offset, and checked pitches
+and object capacity. Linear NV12 with canonical Y/UV offsets is submitted
+directly. RGBA, RGBX, BGRA, and BGRX use an owned duplicate of the application
+fd and one synchronous RGA conversion into the driver's aligned NV12 buffer
+per encoded frame. Multi-object, tiled/modifier, undersized, mismatched, and
+non-DMA-BUF descriptors fail during surface creation. Imported surfaces reject
+`vaPutImage`, and imported RGB is advertised only when RGA was linked.
+
+The current boundary remains progressive 8-bit input, one complete frame-level
+macroblock/CTU slice, MPP-managed references, and synchronous completion. P010
+encode, packed application headers, B-frames, multi-slice, and full WebRTC
+integration are not advertised. This also avoids exercising the kernel's
+historically vulnerable multi-slice FIFO path.
+
+`check-rgb-dmabuf-encode-experimental` imports a real BGRA DMA-BUF through the
+public libva API, closes the descriptor fd after surface creation, converts 48
+frames through RGA, encodes H.264 High, and standard-decodes the output. It
+requires one import, conversion, and MPP packet audit at the expected
+boundaries and measures 37.14 dB against a software BGRA-to-YUV reference.
 
 `check-webrtc-rtp-experimental` carries a direct-I420 `vah264enc` stream
 through `h264parse`, `rtph264pay`, and `rtph264depay`, captures every RTP

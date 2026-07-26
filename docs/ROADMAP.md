@@ -516,8 +516,8 @@ produces parser-clean 48/48 Main-profile streams at 45.19, 44.46, and 40.91 dB;
 codecs. Concurrent 96-frame H.264 and HEVC encoder runs also pass while the
 complete shipping synthetic decode matrix runs in parallel. The implementation
 intentionally exposes one full-frame slice only; planar upload support is
-recorded below, while imported RGB/DMABUF input, WebRTC, multi-slice, and long
-encode soak remain open.
+recorded below, while P010 input, full WebRTC, multi-slice, and long encode
+soak remain open.
 
 **Progress (2026-07-26, planar encoder input):** Encode configs now advertise
 NV12 plus I420/YV12 system-memory upload formats. Explicit three-plane
@@ -527,7 +527,17 @@ mapping byte-exactly. Stock FFmpeg direct `yuv420p` upload produces the same
 CQP stream/PSNR as NV12 for both H.264 and HEVC. GStreamer now feeds I420
 directly to `vah264enc`/`vah265enc` without `videoconvert`; normal,
 ASan/UBSan, and expanded 96-frame concurrent encode/decode gates pass.
-Imported RGB/DMABUF surfaces still require a separate RGA conversion path.
+
+**Progress (2026-07-26, imported DMA-BUF input):** Encode configs now
+advertise RGBA/RGBX/BGRA/BGRX when RGA is linked. `vaCreateSurfaces2` accepts
+one-object linear DRM PRIME 2 descriptors with exact dimensions, checked
+pitches/capacity, canonical zero-offset packed RGB or canonical NV12 planes,
+and an owned fd duplicate. Compatible NV12 is submitted directly; packed RGB
+is converted into aligned NV12 by RGA before every encode. A public-libva BGRA
+gate closes the application's descriptor fd, encodes and standard-decodes
+48/48 H.264 High frames at 37.14 dB, and requires exactly 48 RGA conversions
+and MPP packets normally and under ASan/UBSan. Multi-object and non-linear
+modifier layouts remain unsupported and fail closed.
 
 **Progress (2026-07-26, WebRTC-compatible RTP):** A 120-frame direct-I420
 GStreamer path now carries `vah264enc` output through `h264parse`,
@@ -627,10 +637,11 @@ concurrent with decode contexts are race-free.
   encode pass FFmpeg and GStreamer CQP/CBR/VBR interoperability, parser, and
   PSNR gates normally and under ASan/UBSan. Both 96-frame encoder gates pass
   together with the shipping decode matrix. Checked I420/YV12 uploads are
-  normalized to native NV12 and pass direct FFmpeg/GStreamer gates. Imported
-  RGB/DMABUF conversion, full WebRTC peer negotiation, multi-slice, and long
-  encode qualification remain open; H.264 WebRTC-compatible RTP packetization
-  and paced dual-codec soak smoke are green.
+  normalized to native NV12 and pass direct FFmpeg/GStreamer gates. Linear
+  packed-RGB DMA-BUF import passes a public-libva RGA conversion gate. P010
+  input, multi-object/tiled imports, full WebRTC peer negotiation, multi-slice,
+  and long encode qualification remain open; H.264 WebRTC-compatible RTP
+  packetization and paced dual-codec soak smoke are green.
 - Phase 5: planned.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement

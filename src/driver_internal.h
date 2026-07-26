@@ -144,6 +144,13 @@ struct RKSurface {
     MppBufferGroup priv_group;
     MppBuffer priv_buf;
 
+    MppBuffer import_buf;
+    int import_fd;
+    size_t import_size;
+    uint32_t import_pitch;
+    uint32_t import_drm_format;
+    bool imported_rgb;
+
     MppFrameFormat fmt;
     uint32_t fourcc;
     bool decoded;

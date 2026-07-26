@@ -11,6 +11,7 @@ WARNINGS ?= -Wall -Wextra -Werror
 LDFLAGS  ?=
 VA_CFLAGS  ?= $(shell $(PKG_CONFIG) --cflags libva 2>/dev/null)
 VA_LIBS    ?= $(shell $(PKG_CONFIG) --libs libva 2>/dev/null)
+VA_CLIENT_LIBS ?= -lva-drm -lva
 MPP_CFLAGS ?= -I/usr/include/rockchip
 MPP_LIBS   ?= -lrockchip_mpp
 RGA_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags librga 2>/dev/null || \
@@ -34,6 +35,7 @@ OBJS   := $(SRCS:.c=.o)
 UNIT_TESTS := tests/object_heap_test tests/frame_layout_test tests/h264_test \
 	tests/hevc_test tests/vp9_test
 HARDWARE_TESTS := tests/driver_objects_test
+RGB_ENCODE_TEST := tests/va_rgb_dmabuf_encode
 
 VALGRIND        ?= valgrind
 VALGRIND_FLAGS  ?= --quiet --error-exitcode=99 --leak-check=full \
@@ -72,8 +74,8 @@ $(TARGET): $(OBJS)
 src/%.o: src/%.c
 	$(DRIVER_COMPILE) -c $< -o $@
 
-src/rockchip_drv_video.o: src/buffer.h src/context.h src/driver_internal.h \
-	src/export.h src/log.h src/object_heap.h src/surface.h
+src/rockchip_drv_video.o: src/buffer.h src/context.h src/convert.h \
+	src/driver_internal.h src/export.h src/log.h src/object_heap.h src/surface.h
 src/buffer.o: src/buffer.h src/driver_internal.h src/frame_layout.h \
 	src/log.h src/object_heap.h
 src/context.o: src/context.h src/convert.h src/driver_internal.h src/log.h \
@@ -85,9 +87,10 @@ src/convert.o: src/convert.h src/frame_layout.h src/log.h
 src/mpp_dec.o: src/convert.h src/driver_internal.h src/frame_layout.h \
 	src/h264.h src/log.h src/hevc.h src/mpp_dec.h src/object_heap.h \
 	src/vp9.h
-src/mpp_enc.o: src/buffer.h src/driver_internal.h src/log.h src/mpp_enc.h
+src/mpp_enc.o: src/buffer.h src/convert.h src/driver_internal.h src/log.h \
+	src/mpp_enc.h
 src/object_heap.o: src/object_heap.h
-src/surface.o: src/driver_internal.h src/frame_layout.h src/log.h \
+src/surface.o: src/convert.h src/driver_internal.h src/frame_layout.h src/log.h \
 	src/object_heap.h src/surface.h
 src/frame_layout.o: src/frame_layout.h
 src/h264.o: src/h264.h src/bs.h
@@ -141,6 +144,15 @@ check-hevc-encode-experimental-sanitize: sanitize
 	ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
 	UBSAN_OPTIONS=halt_on_error=1 \
 	DRIVER_DIR="$(abspath $(SAN_DIR))" tests/check-hevc-encode.sh
+
+check-rgb-dmabuf-encode-experimental: $(TARGET) $(RGB_ENCODE_TEST)
+	tests/check-rgb-dmabuf-encode.sh
+
+check-rgb-dmabuf-encode-experimental-sanitize: sanitize $(RGB_ENCODE_TEST)
+	LD_PRELOAD="$(shell $(CC) -print-file-name=libasan.so)" \
+	ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
+	UBSAN_OPTIONS=halt_on_error=1 \
+	DRIVER_DIR="$(abspath $(SAN_DIR))" tests/check-rgb-dmabuf-encode.sh
 
 check-webrtc-rtp-experimental: $(TARGET) test
 	tests/check-webrtc-rtp.sh
@@ -203,7 +215,12 @@ tests/driver_objects_test: tests/driver_objects_test.c $(SRCS) \
 		src/log.h src/hevc.h src/mpp_dec.h src/mpp_enc.h src/surface.h src/vp9.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(VA_CFLAGS) $(MPP_CFLAGS) \
 		$(RGA_CFLAGS) -Isrc tests/driver_objects_test.c $(SRCS) \
-		$(LDLIBS) -o $@
+	$(LDLIBS) -o $@
+
+$(RGB_ENCODE_TEST): tests/va_rgb_dmabuf_encode.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(VA_CFLAGS) $(MPP_CFLAGS) \
+		tests/va_rgb_dmabuf_encode.c $(VA_CLIENT_LIBS) \
+		$(MPP_LIBS) -o $@
 
 check-driver-objects: $(HARDWARE_TESTS)
 	@set -e; for test_binary in $(HARDWARE_TESTS); do ./$$test_binary; done
@@ -358,7 +375,8 @@ lint:
 
 clean:
 	rm -f $(OBJS) $(SAN_OBJS) $(TSAN_OBJS) $(TARGET) $(UNIT_TESTS) $(SAN_TESTS) \
-		$(TSAN_TESTS) $(HARDWARE_TESTS) tests/driver_objects_test.san \
+		$(TSAN_TESTS) $(HARDWARE_TESTS) $(RGB_ENCODE_TEST) \
+		tests/driver_objects_test.san \
 		tests/driver_objects_test.tsan
 	rm -rf $(SAN_DIR) $(TSAN_DIR)
 
@@ -368,6 +386,8 @@ clean:
 	check-vp9-profile2-experimental check-gstreamer-va \
 	check-h264-encode-experimental check-h264-encode-experimental-sanitize \
 	check-hevc-encode-experimental check-hevc-encode-experimental-sanitize \
+	check-rgb-dmabuf-encode-experimental \
+	check-rgb-dmabuf-encode-experimental-sanitize \
 	check-webrtc-rtp-experimental check-webrtc-rtp-experimental-sanitize \
 	check-encode-soak-experimental check-encode-soak-experimental-sanitize \
 	check-encode-decode-concurrent \

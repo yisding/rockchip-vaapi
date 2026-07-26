@@ -30,6 +30,7 @@
 
 #include "buffer.h"
 #include "context.h"
+#include "convert.h"
 #include "driver_internal.h"
 #include "export.h"
 #include "surface.h"
@@ -485,10 +486,12 @@ static VAStatus rk_QuerySurfaceAttrs(VADriverContextP ctx, VAConfigID config,
         return VA_STATUS_ERROR_INVALID_CONFIG;
 
     bool is_10bit = cfg->rt_format == VA_RT_FORMAT_YUV420_10;
-    bool planar_uploads = cfg->entrypoint == VAEntrypointEncSlice &&
+    bool encode_uploads = cfg->entrypoint == VAEntrypointEncSlice &&
                           !is_10bit;
+    bool rgb_imports = encode_uploads && rk_rga_available();
     /* Firefox calls this twice: first with NULL to get count, then with buffer */
-    const unsigned int pixel_formats = planar_uploads ? 3 : 1;
+    const unsigned int pixel_formats = encode_uploads
+                                     ? (rgb_imports ? 7 : 3) : 1;
     const unsigned int n = pixel_formats + 3;
     if (!attrib_list) {
         *num_attribs = n;
@@ -510,11 +513,21 @@ static VAStatus rk_QuerySurfaceAttrs(VADriverContextP ctx, VAConfigID config,
     attrib_list[0].value.type        = VAGenericValueTypeInteger;
     attrib_list[0].value.value.i     = is_10bit ? VA_FOURCC_P010
                                                 : VA_FOURCC_NV12;
-    if (planar_uploads) {
+    if (encode_uploads) {
         attrib_list[1] = attrib_list[0];
         attrib_list[1].value.value.i = VA_FOURCC_I420;
         attrib_list[2] = attrib_list[0];
         attrib_list[2].value.value.i = VA_FOURCC_YV12;
+        if (rgb_imports) {
+            attrib_list[3] = attrib_list[0];
+            attrib_list[3].value.value.i = VA_FOURCC_RGBA;
+            attrib_list[4] = attrib_list[0];
+            attrib_list[4].value.value.i = VA_FOURCC_RGBX;
+            attrib_list[5] = attrib_list[0];
+            attrib_list[5].value.value.i = VA_FOURCC_BGRA;
+            attrib_list[6] = attrib_list[0];
+            attrib_list[6].value.value.i = VA_FOURCC_BGRX;
+        }
     }
 
     /* Memory type: VA-managed + DRM PRIME 2 */
@@ -542,7 +555,8 @@ static VAStatus rk_QuerySurfaceAttrs(VADriverContextP ctx, VAConfigID config,
     *num_attribs = n;
     LOG("QuerySurfaceAttributes: returned %u attribs (%s%s, DRM_PRIME_2)",
         n, is_10bit ? "P010" : "NV12",
-        planar_uploads ? "/I420/YV12" : "");
+        rgb_imports ? "/I420/YV12/RGBA/RGBX/BGRA/BGRX"
+        : encode_uploads ? "/I420/YV12" : "");
     return VA_STATUS_SUCCESS;
 }
 

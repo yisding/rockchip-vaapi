@@ -3,6 +3,9 @@
 #include <va/va_drmcommon.h>
 #include <va/va_enc_hevc.h>
 
+#include <drm/drm_fourcc.h>
+#include <rockchip/mpp_buffer.h>
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -105,12 +108,12 @@ static void test_experimental_h264_encode(struct VADriverVTable *v,
     CHECK_STATUS(v->vaQuerySurfaceAttributes(
                      ctx, config, NULL, &surface_attr_count),
                  VA_STATUS_SUCCESS);
-    if (surface_attr_count != 6) {
+    if (surface_attr_count != 10) {
         fputs("experimental encode surface attribute count is invalid\n",
               stderr);
         exit(1);
     }
-    VASurfaceAttrib surface_attrs[6];
+    VASurfaceAttrib surface_attrs[10];
     CHECK_STATUS(v->vaQuerySurfaceAttributes(
                      ctx, config, surface_attrs, &surface_attr_count),
                  VA_STATUS_SUCCESS);
@@ -119,7 +122,11 @@ static void test_experimental_h264_encode(struct VADriverVTable *v,
         surface_attrs[1].type != VASurfaceAttribPixelFormat ||
         surface_attrs[1].value.value.i != VA_FOURCC_I420 ||
         surface_attrs[2].type != VASurfaceAttribPixelFormat ||
-        surface_attrs[2].value.value.i != VA_FOURCC_YV12) {
+        surface_attrs[2].value.value.i != VA_FOURCC_YV12 ||
+        surface_attrs[3].value.value.i != VA_FOURCC_RGBA ||
+        surface_attrs[4].value.value.i != VA_FOURCC_RGBX ||
+        surface_attrs[5].value.value.i != VA_FOURCC_BGRA ||
+        surface_attrs[6].value.value.i != VA_FOURCC_BGRX) {
         fputs("H.264 encode upload surface formats are invalid\n", stderr);
         exit(1);
     }
@@ -609,6 +616,179 @@ static void test_surfaces(struct VADriverVTable *v, VADriverContextP ctx,
                      ctx, VA_RT_FORMAT_YUV420_10, 16, 16, &p010_surface, 1,
                      &p010_format, 1),
                  VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+
+    MppBufferGroup rgb_group = NULL;
+    MppBuffer rgb_buffer = NULL;
+    const uint32_t rgb_pitch = 16u * 4u;
+    const size_t rgb_size = rgb_pitch * 16u;
+    if (mpp_buffer_group_get_internal(&rgb_group, MPP_BUFFER_TYPE_DRM) !=
+            MPP_OK ||
+        mpp_buffer_get(rgb_group, &rgb_buffer, rgb_size) != MPP_OK) {
+        fputs("failed to allocate RGB import test buffer\n", stderr);
+        exit(1);
+    }
+    int rgb_application_fd = dup(mpp_buffer_get_fd(rgb_buffer));
+    if (rgb_application_fd < 0) {
+        perror("dup");
+        exit(1);
+    }
+    VADRMPRIMESurfaceDescriptor rgb_descriptor = {
+        .fourcc = VA_FOURCC_BGRA,
+        .width = 16,
+        .height = 16,
+        .num_objects = 1,
+        .objects = {
+            {
+                .fd = rgb_application_fd,
+                .size = (uint32_t)rgb_size,
+                .drm_format_modifier = DRM_FORMAT_MOD_LINEAR,
+            },
+        },
+        .num_layers = 1,
+        .layers = {
+            {
+                .drm_format = DRM_FORMAT_ARGB8888,
+                .num_planes = 1,
+                .object_index = { 0 },
+                .offset = { 0 },
+                .pitch = { rgb_pitch },
+            },
+        },
+    };
+    VASurfaceAttrib rgb_attributes[] = {
+        {
+            .type = VASurfaceAttribPixelFormat,
+            .flags = VA_SURFACE_ATTRIB_SETTABLE,
+            .value = {
+                .type = VAGenericValueTypeInteger,
+                .value.i = VA_FOURCC_BGRA,
+            },
+        },
+        {
+            .type = VASurfaceAttribMemoryType,
+            .flags = VA_SURFACE_ATTRIB_SETTABLE,
+            .value = {
+                .type = VAGenericValueTypeInteger,
+                .value.i = VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+            },
+        },
+        {
+            .type = VASurfaceAttribExternalBufferDescriptor,
+            .flags = VA_SURFACE_ATTRIB_SETTABLE,
+            .value = {
+                .type = VAGenericValueTypePointer,
+                .value.p = &rgb_descriptor,
+            },
+        },
+    };
+    VASurfaceID rgb_surface;
+    CHECK_STATUS(v->vaCreateSurfaces2(
+                     ctx, VA_RT_FORMAT_RGB32, 16, 16, &rgb_surface, 1,
+                     rgb_attributes, 3), VA_STATUS_SUCCESS);
+    close(rgb_application_fd);
+
+    memset(&descriptor, 0, sizeof(descriptor));
+    CHECK_STATUS(v->vaExportSurfaceHandle(
+                     ctx, rgb_surface,
+                     VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+                     VA_EXPORT_SURFACE_COMPOSED_LAYERS, &descriptor),
+                 VA_STATUS_SUCCESS);
+    if (descriptor.fourcc != VA_FOURCC_BGRA ||
+        descriptor.num_objects != 1 || descriptor.objects[0].fd < 0 ||
+        descriptor.objects[0].size != rgb_size ||
+        descriptor.num_layers != 1 ||
+        descriptor.layers[0].drm_format != DRM_FORMAT_ARGB8888 ||
+        descriptor.layers[0].num_planes != 1 ||
+        descriptor.layers[0].pitch[0] != rgb_pitch) {
+        fputs("imported RGB export descriptor is invalid\n", stderr);
+        exit(1);
+    }
+    close(descriptor.objects[0].fd);
+    CHECK_STATUS(v->vaDestroySurfaces(ctx, &rgb_surface, 1),
+                 VA_STATUS_SUCCESS);
+
+    int nv12_application_fd = dup(mpp_buffer_get_fd(rgb_buffer));
+    if (nv12_application_fd < 0) {
+        perror("dup");
+        exit(1);
+    }
+    VADRMPRIMESurfaceDescriptor nv12_descriptor = {
+        .fourcc = VA_FOURCC_NV12,
+        .width = 16,
+        .height = 16,
+        .num_objects = 1,
+        .objects = {
+            {
+                .fd = nv12_application_fd,
+                .size = (uint32_t)rgb_size,
+                .drm_format_modifier = DRM_FORMAT_MOD_LINEAR,
+            },
+        },
+        .num_layers = 1,
+        .layers = {
+            {
+                .drm_format = DRM_FORMAT_NV12,
+                .num_planes = 2,
+                .object_index = { 0, 0 },
+                .offset = { 0, 16u * 16u },
+                .pitch = { 16, 16 },
+            },
+        },
+    };
+    VASurfaceAttrib nv12_attributes[] = {
+        {
+            .type = VASurfaceAttribPixelFormat,
+            .flags = VA_SURFACE_ATTRIB_SETTABLE,
+            .value = {
+                .type = VAGenericValueTypeInteger,
+                .value.i = VA_FOURCC_NV12,
+            },
+        },
+        rgb_attributes[1],
+        rgb_attributes[2],
+    };
+    nv12_attributes[2].value.value.p = &nv12_descriptor;
+    VASurfaceID imported_nv12_surface;
+    CHECK_STATUS(v->vaCreateSurfaces2(
+                     ctx, VA_RT_FORMAT_YUV420, 16, 16,
+                     &imported_nv12_surface, 1, nv12_attributes, 3),
+                 VA_STATUS_SUCCESS);
+    close(nv12_application_fd);
+    memset(&descriptor, 0, sizeof(descriptor));
+    CHECK_STATUS(v->vaExportSurfaceHandle(
+                     ctx, imported_nv12_surface,
+                     VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+                     VA_EXPORT_SURFACE_COMPOSED_LAYERS, &descriptor),
+                 VA_STATUS_SUCCESS);
+    if (descriptor.fourcc != VA_FOURCC_NV12 ||
+        descriptor.num_objects != 1 || descriptor.objects[0].fd < 0 ||
+        descriptor.num_layers != 1 ||
+        descriptor.layers[0].drm_format != DRM_FORMAT_NV12 ||
+        descriptor.layers[0].num_planes != 2 ||
+        descriptor.layers[0].offset[1] != 16u * 16u ||
+        descriptor.layers[0].pitch[0] != 16 ||
+        descriptor.layers[0].pitch[1] != 16) {
+        fputs("imported NV12 export descriptor is invalid\n", stderr);
+        exit(1);
+    }
+    close(descriptor.objects[0].fd);
+    CHECK_STATUS(v->vaDestroySurfaces(
+                     ctx, &imported_nv12_surface, 1),
+                 VA_STATUS_SUCCESS);
+
+    rgb_attributes[1].value.value.i = VA_SURFACE_ATTRIB_MEM_TYPE_VA;
+    CHECK_STATUS(v->vaCreateSurfaces2(
+                     ctx, VA_RT_FORMAT_RGB32, 16, 16, &rgb_surface, 1,
+                     rgb_attributes, 1),
+                 VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE);
+    rgb_attributes[1].value.value.i =
+        VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2;
+    rgb_descriptor.num_objects = 2;
+    CHECK_STATUS(v->vaCreateSurfaces2(
+                     ctx, VA_RT_FORMAT_RGB32, 16, 16, &rgb_surface, 1,
+                     rgb_attributes, 3), VA_STATUS_ERROR_INVALID_PARAMETER);
+    mpp_buffer_put(rgb_buffer);
+    mpp_buffer_group_put(rgb_group);
 }
 
 static void test_contexts(struct VADriverVTable *v, VADriverContextP ctx,

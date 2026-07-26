@@ -192,6 +192,16 @@ and 45.191850 dB for HEVC. The object gate separately verifies byte-exact I420
 and YV12 `vaPutImage`/`vaGetImage` round trips, plane layouts, odd-size
 rejection, and conflicting-format rejection.
 
+`check-rgb-dmabuf-encode-experimental` allocates a real linear BGRA DMA-BUF,
+imports it with a DRM PRIME 2 descriptor through public libva, closes the
+application descriptor fd, and updates the same surface for 48 H.264 High
+frames. The gate requires exactly one accepted import, 48 RGA RGB-to-NV12
+conversions, 48 MPP packets, standard FFmpeg decode, and at least 30 dB against
+a software BGRA-to-YUV reference. The measured normal and full-driver
+ASan/UBSan runs both produce 48/48 frames at 37.140921 dB. The object gate
+separately checks fd lifetime, re-export identity, and rejection of VA-managed
+RGB and multi-object descriptors.
+
 `check-webrtc-rtp-experimental` runs 120 direct-I420 H.264 frames through
 `vah264enc`, `h264parse`, RTP payload/depay, and standard software decode. It
 captures each RTP buffer, requires more than one packet per frame, enforces a
@@ -222,10 +232,11 @@ The object-lifecycle gate crosses every former fixed-array ceiling, validates
 all five typed handle namespaces and stale-handle rejection, and creates nine
 simultaneous MPP decode contexts. It also checks immediate success for NV12
 and P010 placeholder surfaces, validates composed P010 and split R16/GR1616
-descriptors before decode, verifies NV12 `PutImage`/`GetImage` byte equality
-and coded-buffer segment mapping, rejects inconsistent RT/pixel formats,
-checks zero-timeout behavior for a pending fence, and checks failure signaling
-when that fence's context is destroyed. Its sanitized and TSan variants apply
+descriptors before decode, validates packed-RGB PRIME import/re-export and
+owned-fd lifetime, verifies NV12 `PutImage`/`GetImage` byte equality and
+coded-buffer segment mapping, rejects inconsistent RT/pixel formats, checks
+zero-timeout behavior for a pending fence, and checks failure signaling when
+that fence's context is destroyed. Its sanitized and TSan variants apply
 ASan/UBSan and thread-race checking to the complete lifecycle.
 
 The zero-copy gate runs the synthetic H.264 reference/B-frame matrix, 4K

@@ -429,7 +429,8 @@ VAStatus rk_PutImage(VADriverContextP context, VASurfaceID surface,
          image_plane_fits(source, 2, chroma_bytes,
                           (unsigned int)target->height / 2,
                           source_buffer->capacity));
-    if (!full_frame || source->fourcc != target->fourcc ||
+    if (target->import_buf || !full_frame ||
+        source->fourcc != target->fourcc ||
         (planar && is_10bit) || !source_layout_valid) {
         rk_object_unref(&source->base);
         rk_object_unref(&target->base);
