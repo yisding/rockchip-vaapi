@@ -18,6 +18,8 @@ rockchip-vaapi (1.0.11+ysp3) resolute; urgency=medium
   * Accept checked linear P010 DRM PRIME surfaces with byte-exact readback,
     and document the RK3588 MPP 10-bit encoder-input blocker without
     advertising HEVC Main10 encode.
+  * Add a native two-peer WebRTC development gate with SDP offer/answer,
+    trickle ICE, DTLS-SRTP audits, and H.264 transport/decode validation.
 
  -- Yi Ding <yi.s.ding@gmail.com>  Sun, 26 Jul 2026 02:16:42 -0700
 

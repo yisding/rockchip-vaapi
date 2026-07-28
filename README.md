@@ -136,11 +136,14 @@ encode. Linear P010 DMA-BUF import and byte-exact image readback are supported
 as a surface contract, but P010 encode remains unadvertised because the
 RK3588 MPP `vepu5xx` encoder HAL rejects its compact 10-bit input format; see
 [`docs/HEVC_MAIN10_ENCODE_BACKEND.md`](docs/HEVC_MAIN10_ENCODE_BACKEND.md).
-Full WebRTC peer negotiation, multi-slice, tiled or multi-object imports, and
-long encode soak remain open. A WebRTC-compatible
-H.264 RTP pay/depay gate already passes with 1,200-byte MTU enforcement. Paced
-dual-codec encode smoke runs also pass with flat post-warmup RSS/fd counts; the
-two-hour qualification run remains open.
+The native two-peer WebRTC harness now covers SDP offer/answer, trickle ICE,
+DTLS-SRTP state, and H.264 media transfer; its software transport control
+passes, while the combined `vah264enc` normal and sanitizer qualification
+remains open. The separate hardware H.264 RTP pay/depay gate passes with
+1,200-byte MTU enforcement. Multi-slice, tiled or multi-object imports, and
+long encode soak also remain open. Paced dual-codec encode smoke runs pass
+with flat post-warmup RSS/fd counts; the two-hour qualification run remains
+open.
 
 ## Dependencies
 
@@ -154,6 +157,11 @@ Build:
 - `librockchip-mpp-dev`
 - `librga-dev`
 - `pkg-config`, `gcc`
+
+Native WebRTC peer gate:
+- `python3-gi`
+- `gir1.2-gst-plugins-bad-1.0`
+- `gstreamer1.0-nice`
 
 ## Quick start
 

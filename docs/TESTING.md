@@ -17,7 +17,9 @@ make lint
 make check-firefox-rdd-patch
 shellcheck tests/check-concurrent-decode.sh tests/check-zero-copy.sh \
     tests/check-hevc-main10.sh tests/check-hevc-main10-hdr.sh \
-    tests/check-soak.sh tests/fetch-vectors.sh tests/validate.sh
+    tests/check-soak.sh tests/check-webrtc-peer.sh \
+    tests/fetch-vectors.sh tests/validate.sh
+python3 -c "import ast,pathlib; ast.parse(pathlib.Path('tests/webrtc_peer.py').read_text())"
 ```
 
 `make sanitize` builds the whole driver and runs its hardware-independent unit
@@ -115,6 +117,7 @@ FFMPEG=/usr/bin/ffmpeg make check-gstreamer-va
 FFMPEG=/usr/bin/ffmpeg make check-h264-encode-experimental
 FFMPEG=/usr/bin/ffmpeg make check-hevc-encode-experimental
 FFMPEG=/usr/bin/ffmpeg make check-webrtc-rtp-experimental
+FFMPEG=/usr/bin/ffmpeg make check-webrtc-peer-experimental
 make check-encode-soak-experimental
 FFMPEG=/usr/bin/ffmpeg make check-encode-decode-concurrent
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-conformance
@@ -227,6 +230,19 @@ upload per encoded frame. The measured run produces 604 RTP packets at
 41.061795 dB. Its sanitizer target loads the full ASan/UBSan driver. This is a
 WebRTC-compatible media-path gate; signaling and secure peer transport are
 outside its claim.
+
+`check-webrtc-peer-experimental` connects two local `webrtcbin` peers through
+an in-process SDP offer/answer and trickle-ICE exchange. It requires connected
+peer and ICE states, SDP fingerprints, connected DTLS-SRTP elements on both
+peers, and an H.264 receiver pad before accepting the same 120-frame
+`vah264enc` stream. The receiver depayloads and standard-decodes the resulting
+Annex B stream; the outer gate checks exact High-profile frame count, at least
+35 dB PSNR, and one MPP packet plus one checked I420 upload per frame.
+`python3-gi`, `gir1.2-gst-plugins-bad-1.0`, and `gstreamer1.0-nice` are
+additional test dependencies. `WEBRTC_DEPS_ROOT` can point at an extracted
+arm64 package root during development. Running `tests/webrtc_peer.py` with
+`--encoder openh264enc` is a transport-only diagnostic and is not hardware
+encode evidence.
 
 `check-encode-soak-experimental` launches simultaneous live H.264 and HEVC
 GStreamer pipelines at 30 fps for two hours by default. It samples combined

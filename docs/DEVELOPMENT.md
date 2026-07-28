@@ -476,8 +476,8 @@ descriptors fail during surface creation. Imported surfaces reject
 
 The current boundary remains progressive 8-bit input, one complete frame-level
 macroblock/CTU slice, MPP-managed references, and synchronous completion. P010
-encode, packed application headers, B-frames, multi-slice, and full WebRTC
-integration are not advertised. This also avoids exercising the kernel's
+encode, packed application headers, B-frames, multi-slice, and WebRTC encode
+are not advertised. This also avoids exercising the kernel's
 historically vulnerable multi-slice FIFO path. P010 surface import/readback is
 not a Main10 encode claim: the tested MPP `vepu5xx` HAL rejects
 `MPP_FMT_YUV420SP_10BIT`. The direct diagnostic and promotion criteria are in
@@ -494,6 +494,16 @@ through `h264parse`, `rtph264pay`, and `rtph264depay`, captures every RTP
 packet, and standard-decodes the resulting Annex B stream. This verifies the
 WebRTC-compatible H.264 payload boundary and MTU behavior, but it does not
 perform SDP/ICE/DTLS/SRTP negotiation with a peer.
+
+`check-webrtc-peer-experimental` creates a sending and receiving `webrtcbin`
+in one process. The harness exchanges the SDP offer/answer and trickled ICE
+candidates directly, waits for both peer connections, then replaces the
+negotiation-only RTP source with an `appsrc`/encoder/payloader bin on the
+already negotiated transceiver. The receiving peer dynamically links
+H.264 depayload/parser/output elements. Completion requires connected
+DTLS-SRTP elements on both peers as well as exact access-unit, decode, PSNR,
+I420-upload, and MPP-packet audits. `openh264enc` is available only as a
+transport diagnostic; the Make target always selects `vah264enc`.
 
 `check-encode-soak-experimental` holds live H.264 and HEVC GStreamer encoder
 contexts open together at 30 fps. It samples the actual `gst-launch` process

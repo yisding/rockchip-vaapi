@@ -177,6 +177,15 @@ check-webrtc-rtp-experimental-sanitize: sanitize
 	UBSAN_OPTIONS=halt_on_error=1 \
 	DRIVER_DIR="$(abspath $(SAN_DIR))" tests/check-webrtc-rtp.sh
 
+check-webrtc-peer-experimental: $(TARGET) test
+	tests/check-webrtc-peer.sh
+
+check-webrtc-peer-experimental-sanitize: sanitize
+	LD_PRELOAD="$(shell $(CC) -print-file-name=libasan.so)" \
+	ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
+	UBSAN_OPTIONS=halt_on_error=1 \
+	DRIVER_DIR="$(abspath $(SAN_DIR))" tests/check-webrtc-peer.sh
+
 check-encode-soak-experimental: $(TARGET) test
 	tests/check-encode-soak.sh
 
@@ -404,6 +413,7 @@ clean:
 	check-rgb-dmabuf-encode-experimental \
 	check-rgb-dmabuf-encode-experimental-sanitize \
 	check-webrtc-rtp-experimental check-webrtc-rtp-experimental-sanitize \
+	check-webrtc-peer-experimental check-webrtc-peer-experimental-sanitize \
 	check-encode-soak-experimental check-encode-soak-experimental-sanitize \
 	check-encode-decode-concurrent \
 	check-safe check-zero-copy check-zero-copy-sanitize \

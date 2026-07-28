@@ -578,14 +578,17 @@ gate closes the application's descriptor fd, encodes and standard-decodes
 and MPP packets normally and under ASan/UBSan. Multi-object and non-linear
 modifier layouts remain unsupported and fail closed.
 
-**Progress (2026-07-26, WebRTC-compatible RTP):** A 120-frame direct-I420
-GStreamer path now carries `vah264enc` output through `h264parse`,
-`rtph264pay`, `application/x-rtp`, `rtph264depay`, and a standard H.264
-decoder. It produces 604 packets at a strict 1,200-byte maximum, round-trips
-all 120 High-profile frames at 41.06 dB average PSNR, and passes normally and
-with the full ASan/UBSan driver. The installed image has `webrtcbin`, but lacks
-the higher-level sink/source pair and `GstWebRTC` introspection typelib; full
-SDP/ICE/DTLS/SRTP peer negotiation remains open.
+**Progress (2026-07-27, native WebRTC peer transport):** The earlier
+120-frame direct-I420 `vah264enc` RTP path still produces 604 packets at a
+strict 1,200-byte maximum and round-trips every High-profile frame at
+41.06 dB normally and under ASan/UBSan. A new two-`webrtcbin` gate adds
+in-process SDP offer/answer, trickle ICE, DTLS-SRTP state auditing, dynamic
+sender attachment after the peers connect, H.264 depayload, and standard
+decode/PSNR checks. An independent 12-frame OpenH264 transport control
+completed 12/12 access units, exchanged 28 candidates in each direction, and
+reported connected DTLS-SRTP elements on both peers. The combined
+`vah264enc` normal and sanitizer qualification remains open pending a clean
+on-device encoder run; the transport-only control is not hardware evidence.
 
 **Progress (2026-07-26, encode soak smoke):** The new paced soak exposed and
 closed a GStreamer HEVC geometry mismatch: a 640x360 visible I420 surface is
