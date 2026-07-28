@@ -38,6 +38,12 @@ HARDWARE_TESTS := tests/driver_objects_test
 RGB_ENCODE_TEST := tests/va_rgb_dmabuf_encode
 HEVC_MPP_REPRO := tests/hevc_mpp_repro
 AV1_MPP_CAPS := tests/av1_mpp_caps
+DEB_OUTPUT_DIR ?= $(abspath ..)
+DEB_VERSION = $(shell dpkg-parsechangelog -SVersion)
+DEB_ARCH = $(shell dpkg-architecture -qDEB_HOST_ARCH)
+DRIVER_DEB = $(DEB_OUTPUT_DIR)/rockchip-vaapi_$(DEB_VERSION)_$(DEB_ARCH).deb
+CONFIG_DEB = $(DEB_OUTPUT_DIR)/rockchip-vaapi-config_$(DEB_VERSION)_all.deb
+DEB_CHANGES = $(DEB_OUTPUT_DIR)/rockchip-vaapi_$(DEB_VERSION)_$(DEB_ARCH).changes
 
 VALGRIND        ?= valgrind
 VALGRIND_FLAGS  ?= --quiet --error-exitcode=99 --leak-check=full \
@@ -102,6 +108,13 @@ src/vp9.o: src/vp9.h
 
 install: $(TARGET)
 	install -D -m 755 $(TARGET) $(DESTDIR)$(DRIVERDIR)/$(TARGET)
+
+package:
+	dpkg-buildpackage -us -uc -b
+
+check-package-install: package
+	lintian --tag-display-limit 0 "$(DEB_CHANGES)"
+	tests/check-package-install.sh "$(DRIVER_DEB)" "$(CONFIG_DEB)"
 
 fetch-vectors:
 	tests/fetch-vectors.sh
@@ -425,7 +438,8 @@ clean:
 		tests/driver_objects_test.tsan
 	rm -rf $(SAN_DIR) $(TSAN_DIR)
 
-.PHONY: all install fetch-vectors check check-conformance check-synthetic \
+.PHONY: all install package check-package-install fetch-vectors \
+	check check-conformance check-synthetic \
 	check-hevc-experimental check-hevc-experimental-sanitize \
 	check-hevc-tiles-backend probe-mpp-main10-encode probe-av1-platform \
 	check-hevc-main10-experimental check-hevc-main10-hdr-experimental \

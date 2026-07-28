@@ -489,13 +489,15 @@ modules matched`, falls back to software, and never loads this driver. There is
 no Wayland/X11 socket in the session. A valid VLC gate therefore requires a
 real display/DRM session; headless playback success is not hardware evidence.
 
-**Progress (2026-07-26, packaging slice):** Debian packaging now declares its
+**Progress (2026-07-27, packaging slice):** Debian packaging now declares its
 RGA build dependency and produces separate `rockchip-vaapi` and
 `rockchip-vaapi-config` packages. The optional config package selects the
 driver and enables GStreamer's supported vendor override, but does not alter
 browser sandboxes or display backends. Upgrading the driver removes legacy
-ysp2 environment files that globally disabled Firefox's RDD sandbox. The
-Firefox policy patch and clean-image install test remain open.
+ysp2 environment files that globally disabled Firefox's RDD sandbox. A
+Lintian-backed isolated-root gate now validates package metadata, payloads,
+clean install, driver upgrade, config-only purge, reinstall, and full purge
+against an empty package database. Fresh-image hardware decode remains open.
 
 **Progress (2026-07-26, Firefox RDD policy source slice):** The exact Firefox
 152.0.6 RDD policy was audited and a hash-pinned distribution source patch now
@@ -685,9 +687,10 @@ concurrent with decode contexts are race-free.
   driver/config Debian packaging no longer weakens Firefox's sandbox globally.
   A hash-pinned Firefox 152.0.6 RDD source patch covers the measured Rockchip
   broker and seccomp contract. Structured leveled text/JSON logging is
-  lifecycle-, sanitizer-, thread-, and leak-tested. The rebuilt Firefox
-  package, live RDD playback, display sinks, other desktop apps, and
-  clean-image package validation remain open.
+  lifecycle-, sanitizer-, thread-, and leak-tested. Clean-image package
+  lifecycle validation is green. The rebuilt Firefox package, live RDD
+  playback, display sinks, other desktop apps, and fresh-image hardware decode
+  remain open.
 - Phase 4: in progress; experimental one-slice H.264 Main/High and HEVC Main
   encode pass FFmpeg and GStreamer CQP/CBR/VBR interoperability, parser, and
   PSNR gates normally and under ASan/UBSan. Both 96-frame encoder gates pass

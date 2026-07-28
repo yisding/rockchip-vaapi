@@ -525,6 +525,18 @@ only as smoke coverage.
 
 ---
 
+## Debian package lifecycle
+
+`make check-package-install` builds the driver and optional config packages,
+runs Lintian, validates their metadata and payloads, and uses Bubblewrap plus
+Fakeroot to exercise `dpkg` install, upgrade, config-only purge, reinstall, and
+full purge against an empty isolated package database. It forces dependencies
+only inside that database, after checking the packages declare the expected
+MPP, RGA, libva, and exact-version driver relationships. The test does not
+alter the host package database or install either package on the host.
+
+---
+
 ## Firefox process model
 
 Firefox decodes video in the **RDD (Remote Data Decoder)** sandboxed process.

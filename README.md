@@ -180,7 +180,9 @@ LIBVA_DRIVER_NAME=rockchip GST_VA_ALL_DRIVERS=1 gst-inspect-1.0 vah264dec
 The Debian build produces a driver package and a separate, optional
 `rockchip-vaapi-config` package. The config package selects the driver and sets
 `GST_VA_ALL_DRIVERS=1` system-wide; it does not change browser sandbox or
-display-backend settings.
+display-backend settings. `make check-package-install` builds and lints both
+packages, then exercises their clean install, upgrade, and purge lifecycle in
+an isolated root.
 
 Firefox additionally needs a distribution sandbox policy that permits the RDD
 process to use Rockchip MPP, RGA, and dma-heap devices. A version-pinned

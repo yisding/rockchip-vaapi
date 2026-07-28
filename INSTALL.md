@@ -42,8 +42,12 @@ This installs `rockchip_drv_video.so` to
 `/usr/lib/aarch64-linux-gnu/dri/` and registers the package with `dpkg`.
 Install `rockchip-vaapi-config_1.0.11+ysp3_all.deb` as well to select this
 driver and enable GStreamer's non-Intel vendor probe for all login sessions.
-The config package does not weaken browser sandboxes. To uninstall:
-`sudo apt remove rockchip-vaapi rockchip-vaapi-config`.
+The config package does not weaken browser sandboxes. Purge both packages to
+remove the config package's system-wide conffiles as well:
+
+```bash
+sudo apt purge rockchip-vaapi-config rockchip-vaapi
+```
 
 ## Option B: Build and install from source
 
@@ -90,6 +94,9 @@ dpkg-buildpackage -us -uc -b
 
 # Build source package
 dpkg-buildpackage -us -uc -S
+
+# Build, lint, and exercise clean install/upgrade/purge in an isolated root
+make check-package-install
 ```
 
 ## Verifying the installation

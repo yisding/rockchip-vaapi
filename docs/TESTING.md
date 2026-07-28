@@ -15,6 +15,7 @@ make test-tsan
 make test-valgrind
 make lint
 make check-firefox-rdd-patch
+make check-package-install
 shellcheck tests/check-concurrent-decode.sh tests/check-zero-copy.sh \
     tests/check-hevc-main10.sh tests/check-hevc-main10-hdr.sh \
     tests/check-soak.sh tests/check-webrtc-peer.sh \
@@ -43,6 +44,18 @@ the two upstream source hashes and dry-run/apply the patch:
 ```sh
 tests/check-firefox-rdd-patch.sh /path/to/firefox-152.0.6
 ```
+
+`make check-package-install` builds both binary packages in the repository's
+parent directory, runs Lintian, checks their metadata, payload modes, config
+contents, AArch64 ELF dependencies, and linker hardening, then exercises
+install, driver upgrade, config-only purge, reinstall, and final purge with
+`dpkg`. Bubblewrap and Fakeroot keep all package and maintainer-script writes
+inside an ignored isolated root with an empty package database. Dependency
+resolution is deliberately forced in that empty database; the gate separately
+checks the declared package dependencies and tests package lifecycle behavior,
+not dependency installation or hardware decode. Install `dpkg-dev`,
+`debhelper`, `lintian`, `bubblewrap`, `fakeroot`, and the normal build
+dependencies before running it.
 
 `make test-tsan` stress-tests concurrent object insertion, lookup, removal,
 and refcounted destruction under ThreadSanitizer. The full two-decoder TSan
