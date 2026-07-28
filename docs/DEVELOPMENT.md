@@ -355,6 +355,13 @@ acknowledges `info_change` and decodes zero frames, because VA-API hands MPP
 headerless tile data instead of a full OBU bitstream. CMA exhaustion is the
 opposite — decode works, then a resource runs out.
 
+`make probe-av1-platform` deliberately stops before decode submission. It
+distinguishes the public MPP AV1 capability, a bound vendor `mpp_av1dec`
+platform device, and a stateless V4L2 `AV1F` endpoint, then reports Phase 0 as
+unqualified regardless of discovery. The neutral parsed-picture architecture,
+missing libva state, and promotion gates are documented in
+[`AV1_SUPPORT_PLAN.md`](AV1_SUPPORT_PLAN.md).
+
 ### External-pool surface binding
 
 On the first info-change frame, the context allocates 24 conservative-size DRM

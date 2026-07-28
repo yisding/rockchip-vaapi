@@ -1,6 +1,6 @@
 # AV1 decode support: feasibility, architecture, and implementation plan
 
-Status: proposed
+Status: Phase 0 blocked; non-submitting platform probe implemented
 
 Research snapshot: 2026-07-27
 
@@ -124,17 +124,30 @@ The 2026-07-27 development machine was checked separately from the driver:
 - libva `2.23.0`
 - FFmpeg `8.0.3+rockchip+git20260719`
 - `/dev/mpp_service` exists
+- the vendor kernel binds `mpp_av1dec` to
+  `fdc70000.video-codec` (`rockchip,av1-decoder`, status `okay`)
 - the only decoder V4L2 node found was
   `rockchip,rk3328-vpu-dec`, advertising parsed MPEG-2 and VP8 rather than AV1
 - no `rockchip,rk3588-av1-vpu-dec`/VPU981 node was present
-- MPP recognized the AV1 coding number, but a tiny valid low-overhead AV1
+- MPP's public capability function advertised AV1 decode while emitting six
+  generic client-driver readiness diagnostics; this does not prove that the
+  bound AV1 endpoint can complete work
+- a tiny valid low-overhead AV1
   stream submitted with `mpi_dec_test` produced no frame and did not terminate
 - MPP logged that `VPU_CLIENT_AV1DEC` was not ready
 
 This proves only the state of this board image, not a limitation of RK3588
 silicon. It does establish a Phase 0 blocker: driver work cannot be qualified
-on this image until either the vendor MPP AV1 client or the mainline VPU981
-node is enabled.
+on this image until either the vendor MPP AV1 path completes a bounded
+known-answer decode or the mainline VPU981 node is enabled and qualified.
+
+`make probe-av1-platform` now records this boundary without submitting a
+bitstream. Its versioned key/value report inventories the kernel, MPP/libva
+packages, `/dev/mpp_service` access, bound `mpp_av1dec` devices, public MPP AV1
+capability result, readiness diagnostics, and every V4L2 OUTPUT format. The
+report always states `hardware_decode_attempted=0` and
+`phase0_qualified=0`; an endpoint-present result is discovery evidence only,
+not a decode claim.
 
 Mainline Linux has an RK3588 VPU981 stateless AV1 implementation in
 [`rockchip_vpu981_hw_av1_dec.c`](https://github.com/torvalds/linux/blob/master/drivers/media/platform/verisilicon/rockchip_vpu981_hw_av1_dec.c).
@@ -1005,7 +1018,9 @@ the parsed backend. Without that backend cooperation, schedule risk is high.
 ## Immediate next actions
 
 1. Fix the RK3588 board image so one raw AV1 hardware path passes Phase 0.
-2. Check in a bounded hardware probe and its expected report format.
+2. Use the checked-in bounded platform probe as the Phase 0 report, then add
+   known-answer submission only after the endpoint can reset and terminate
+   reliably.
 3. Implement the debug-only VA AV1 capture/replay format.
 4. Build the neutral AV1 picture and pure mapping tests.
 5. Send the MPP parsed-API RFC with a minimal standalone proof.

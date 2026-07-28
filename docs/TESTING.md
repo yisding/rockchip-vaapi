@@ -18,7 +18,7 @@ make check-firefox-rdd-patch
 shellcheck tests/check-concurrent-decode.sh tests/check-zero-copy.sh \
     tests/check-hevc-main10.sh tests/check-hevc-main10-hdr.sh \
     tests/check-soak.sh tests/check-webrtc-peer.sh \
-    tests/fetch-vectors.sh tests/validate.sh
+    tests/fetch-vectors.sh tests/probe-av1-platform.sh tests/validate.sh
 python3 -c "import ast,pathlib; ast.parse(pathlib.Path('tests/webrtc_peer.py').read_text())"
 ```
 
@@ -110,6 +110,7 @@ FFMPEG=/usr/bin/ffmpeg make check-concurrent-decode-tsan
 FFMPEG=/usr/bin/ffmpeg make check-soak
 FFMPEG=/usr/bin/ffmpeg make check-hevc-experimental
 make check-hevc-tiles-backend
+make probe-av1-platform
 FFMPEG=/usr/bin/ffmpeg make check-hevc-main10-experimental
 FFMPEG=/usr/bin/ffmpeg make check-hevc-main10-hdr-experimental
 FFMPEG=/usr/bin/ffmpeg make check-vp9-profile2-experimental
@@ -266,6 +267,17 @@ compact 10-bit byte stride and requires the tested `vepu5xx_set_fmt`
 unsupported-format result. It is not a passing Main10 encode claim; a changed
 backend result is inconclusive until the full promotion gates in
 [`HEVC_MAIN10_ENCODE_BACKEND.md`](HEVC_MAIN10_ENCODE_BACKEND.md) pass.
+
+`make probe-av1-platform` is non-submitting Phase 0 discovery. It reports a
+versioned key/value inventory of the public MPP AV1 capability, bound vendor
+AV1 devices, `/dev/mpp_service` access, MPP readiness messages, and compressed
+V4L2 OUTPUT formats. On the audited image it finds one bound
+`rockchip,av1-decoder` endpoint and MPP API advertisement, but no `AV1F` V4L2
+node and six generic MPP “driver is not ready” messages. The report therefore
+ends with `hardware_decode_attempted=0`, `phase0_qualified=0`, and
+`result=endpoint-present-unqualified`. `AV1_REQUIRE_ENDPOINT=1` can make an
+endpoint-missing report fail for platform provisioning checks; it still does
+not turn discovery into decode qualification.
 
 The object-lifecycle gate crosses every former fixed-array ceiling, validates
 all five typed handle namespaces and stale-handle rejection, and creates nine

@@ -37,6 +37,7 @@ UNIT_TESTS := tests/object_heap_test tests/frame_layout_test tests/h264_test \
 HARDWARE_TESTS := tests/driver_objects_test
 RGB_ENCODE_TEST := tests/va_rgb_dmabuf_encode
 HEVC_MPP_REPRO := tests/hevc_mpp_repro
+AV1_MPP_CAPS := tests/av1_mpp_caps
 
 VALGRIND        ?= valgrind
 VALGRIND_FLAGS  ?= --quiet --error-exitcode=99 --leak-check=full \
@@ -128,6 +129,14 @@ check-hevc-tiles-backend: $(HEVC_MPP_REPRO)
 
 probe-mpp-main10-encode:
 	tests/probe-mpp-main10-encode.sh
+
+$(AV1_MPP_CAPS): tests/av1_mpp_caps.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(MPP_CFLAGS) $< \
+		$(MPP_LIBS) -o $@
+
+probe-av1-platform: $(AV1_MPP_CAPS)
+	MPP_CAPS_PROBE="$(abspath $(AV1_MPP_CAPS))" \
+		tests/probe-av1-platform.sh
 
 check-hevc-main10-experimental: $(TARGET) test
 	tests/check-hevc-main10.sh
@@ -399,13 +408,14 @@ lint:
 clean:
 	rm -f $(OBJS) $(SAN_OBJS) $(TSAN_OBJS) $(TARGET) $(UNIT_TESTS) $(SAN_TESTS) \
 		$(TSAN_TESTS) $(HARDWARE_TESTS) $(RGB_ENCODE_TEST) $(HEVC_MPP_REPRO) \
+		$(AV1_MPP_CAPS) \
 		tests/driver_objects_test.san \
 		tests/driver_objects_test.tsan
 	rm -rf $(SAN_DIR) $(TSAN_DIR)
 
 .PHONY: all install fetch-vectors check check-conformance check-synthetic \
 	check-hevc-experimental check-hevc-experimental-sanitize \
-	check-hevc-tiles-backend probe-mpp-main10-encode \
+	check-hevc-tiles-backend probe-mpp-main10-encode probe-av1-platform \
 	check-hevc-main10-experimental check-hevc-main10-hdr-experimental \
 	check-vp9-profile2-experimental check-gstreamer-va \
 	check-h264-encode-experimental check-h264-encode-experimental-sanitize \

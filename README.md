@@ -117,7 +117,7 @@ Key features:
 | HEVC | Main (under development) | not offered | gated hardware path has 7/8 pinned Main vectors bit-exact; MPP rejects the remaining TILES vector |
 | HEVC | Main10 (under development) | not offered | generated, pinned weighted-prediction, and HDR10 gates are P010 bit-exact through MPP AFBC + RGA; BT.2020/PQ and static HDR metadata survive hardware decode |
 | VP8 | — | not offered | crashes in the generic path; needs debugging |
-| AV1 | — | not offered | VA-API hands headerless tile data; MPP needs full OBUs |
+| AV1 | — | not offered | VA-API hands headerless tile data; MPP needs full OBUs; see the [support plan](docs/AV1_SUPPORT_PLAN.md) and non-submitting platform probe |
 | H.264 | High10 | not offered | profile-specific reconstruction and validation pending |
 
 Applications fall back to their software decoders for the codecs that are

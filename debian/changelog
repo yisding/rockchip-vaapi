@@ -20,6 +20,8 @@ rockchip-vaapi (1.0.11+ysp3) resolute; urgency=medium
     advertising HEVC Main10 encode.
   * Add a native two-peer WebRTC development gate with SDP offer/answer,
     trickle ICE, DTLS-SRTP audits, and H.264 transport/decode validation.
+  * Add a non-submitting AV1 platform probe that distinguishes MPP/kernel
+    endpoint discovery from Phase 0 decode qualification.
 
  -- Yi Ding <yi.s.ding@gmail.com>  Sun, 26 Jul 2026 02:16:42 -0700
 
