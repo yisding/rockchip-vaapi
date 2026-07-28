@@ -56,6 +56,11 @@ decoder gates, and two-hour 4K resource soak are also complete; see
 - **Pinned real conformance vectors and CI plumbing.** The gate now uses ITU-T
   H.264 and official libvpx VP9 vectors with payload checksums, and normal plus
   sanitized AArch64 builds are cross-compiled in CI.
+- **Direct HEVC backend reduction tooling.** The remaining TILES failure has a
+  libva-free MPP runner and a control-gated access-unit prefix reducer; current
+  host analysis isolates the first candidate to an IDR plus one replacement-PPS
+  P-picture transition. See
+  [`docs/HEVC_TILES_BACKEND.md`](docs/HEVC_TILES_BACKEND.md).
 - **Honest capability advertising.** HEVC reconstruction is under Phase 2
   validation; seven of eight gated Main vectors are bit-exact, but the profile
   remains hidden until every pinned HEVC case is either supported bit-exactly

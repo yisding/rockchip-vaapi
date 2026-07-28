@@ -2,10 +2,13 @@
 src/*.o
 *.so
 .test-work.*
+/.hevc-probe/
+/.vlc-probe/
 tests/vectors/
 tests/frame_layout_test
 tests/h264_test
 tests/hevc_test
+tests/hevc_mpp_repro
 tests/driver_objects_test
 tests/va_rgb_dmabuf_encode
 tests/object_heap_test

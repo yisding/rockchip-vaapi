@@ -36,6 +36,7 @@ UNIT_TESTS := tests/object_heap_test tests/frame_layout_test tests/h264_test \
 	tests/hevc_test tests/vp9_test
 HARDWARE_TESTS := tests/driver_objects_test
 RGB_ENCODE_TEST := tests/va_rgb_dmabuf_encode
+HEVC_MPP_REPRO := tests/hevc_mpp_repro
 
 VALGRIND        ?= valgrind
 VALGRIND_FLAGS  ?= --quiet --error-exitcode=99 --leak-check=full \
@@ -117,6 +118,13 @@ check-conformance: $(TARGET) test
 check-hevc-experimental: $(TARGET) test
 	TEST_SET=hevc EXPERIMENTAL_HEVC=1 FAIL_FAST=1 FFMPEG_TIMEOUT=60 \
 		tests/validate.sh
+
+$(HEVC_MPP_REPRO): tests/hevc_mpp_repro.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(MPP_CFLAGS) $< \
+		$(MPP_LIBS) -o $@
+
+check-hevc-tiles-backend: $(HEVC_MPP_REPRO)
+	EXPECTED_RESULT=fixed tests/minimize-hevc-tiles.sh
 
 check-hevc-main10-experimental: $(TARGET) test
 	tests/check-hevc-main10.sh
@@ -378,13 +386,14 @@ lint:
 
 clean:
 	rm -f $(OBJS) $(SAN_OBJS) $(TSAN_OBJS) $(TARGET) $(UNIT_TESTS) $(SAN_TESTS) \
-		$(TSAN_TESTS) $(HARDWARE_TESTS) $(RGB_ENCODE_TEST) \
+		$(TSAN_TESTS) $(HARDWARE_TESTS) $(RGB_ENCODE_TEST) $(HEVC_MPP_REPRO) \
 		tests/driver_objects_test.san \
 		tests/driver_objects_test.tsan
 	rm -rf $(SAN_DIR) $(TSAN_DIR)
 
 .PHONY: all install fetch-vectors check check-conformance check-synthetic \
 	check-hevc-experimental check-hevc-experimental-sanitize \
+	check-hevc-tiles-backend \
 	check-hevc-main10-experimental check-hevc-main10-hdr-experimental \
 	check-vp9-profile2-experimental check-gstreamer-va \
 	check-h264-encode-experimental check-h264-encode-experimental-sanitize \

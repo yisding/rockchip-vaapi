@@ -48,7 +48,11 @@ jobs:
       - name: Static analysis
         run: make lint MPP_CFLAGS="-I$GITHUB_WORKSPACE/build/mpp-headers"
       - name: Shell analysis
-        run: shellcheck tests/check-concurrent-decode.sh tests/check-soak.sh tests/check-zero-copy.sh tests/fetch-vectors.sh tests/validate.sh
+        run: |
+          shellcheck tests/check-concurrent-decode.sh \
+            tests/check-soak.sh tests/check-zero-copy.sh \
+            tests/fetch-vectors.sh tests/minimize-hevc-tiles.sh \
+            tests/validate.sh
 
   arm64-cross-build:
     runs-on: ubuntu-24.04
@@ -85,7 +89,13 @@ jobs:
             VA_LIBS= \
             MPP_CFLAGS="-I$GITHUB_WORKSPACE/build/mpp-headers" \
             MPP_LIBS="-L$GITHUB_WORKSPACE/build/mpp/mpp -lrockchip_mpp"
+          make tests/hevc_mpp_repro \
+            CC=aarch64-linux-gnu-gcc \
+            MPP_CFLAGS="-I$GITHUB_WORKSPACE/build/mpp-headers" \
+            MPP_LIBS="-L$GITHUB_WORKSPACE/build/mpp/mpp -lrockchip_mpp"
           aarch64-linux-gnu-readelf -h rockchip_drv_video.so | \
+            grep -q 'Machine:.*AArch64'
+          aarch64-linux-gnu-readelf -h tests/hevc_mpp_repro | \
             grep -q 'Machine:.*AArch64'
       - name: Cross-build sanitized driver
         run: |

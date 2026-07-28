@@ -408,6 +408,20 @@ decoder during teardown so in-flight MPP buffers are not leaked. The safe
 advertised hardware subset (`check-safe`) still passes with HEVC software
 fallback and the risky VP9 vector blocked. HEVC Main stays hidden.
 
+**Progress (2026-07-27, TILES backend reduction tooling):** A libva-free
+`tests/hevc_mpp_repro` now submits Annex-B HEVC directly to MPP, reports every
+frame's `errinfo`/discard/EOS state, and uses distinct clean, stream-failure,
+environment, and runtime exit classes. `tests/minimize-hevc-tiles.sh` gates on
+a checksum-pinned known-good HEVC control before accepting the full TILES
+failure, then tests software-valid access-unit prefixes and strips nonessential
+NAL classes. Host analysis reduces the first candidate boundary to a
+software-valid two-packet stream: VPS/SPS/PPS/IDR followed by a replacement PPS
+and one P-picture. The PPS transition changes between two non-uniform 5×5 tile
+layouts and toggles cross-tile filtering. Confirmation on a healthy backend is
+pending: the 2026-07-27 KASAN kernel failed the known-good control with
+`ENODEV`/`EIO`, and the reducer correctly stopped without attributing that
+failure to TILES. See `docs/HEVC_TILES_BACKEND.md`.
+
 **Progress (2026-07-26, HDR10 metadata slice):**
 `make check-hevc-main10-hdr-experimental` generates a 24-frame Main10 HDR10
 stream and validates the complete hardware-frame boundary. Its downloaded

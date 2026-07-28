@@ -107,6 +107,7 @@ FFMPEG=/usr/bin/ffmpeg make check-concurrent-decode-sanitize
 FFMPEG=/usr/bin/ffmpeg make check-concurrent-decode-tsan
 FFMPEG=/usr/bin/ffmpeg make check-soak
 FFMPEG=/usr/bin/ffmpeg make check-hevc-experimental
+make check-hevc-tiles-backend
 FFMPEG=/usr/bin/ffmpeg make check-hevc-main10-experimental
 FFMPEG=/usr/bin/ffmpeg make check-hevc-main10-hdr-experimental
 FFMPEG=/usr/bin/ffmpeg make check-vp9-profile2-experimental
@@ -134,7 +135,13 @@ are carried in the per-access-unit PPS. `TILES_A_Cisco_2.bit` is the sole
 failure. Direct MPP decode of the original Annex B stream and the reconstructed
 VA-API path both report `errinfo=1` from frame 1 onward, so the driver maps
 errored/discarded MPP frames to `VA_STATUS_ERROR_DECODING_ERROR` instead of
-returning corrupt output.
+returning corrupt output. `make check-hevc-tiles-backend` builds a libva-free
+MPP runner and reduces the pinned stream by software-valid access-unit prefix.
+It first requires the known-good `PPS_A_qualcomm_7.bit` control to decode
+cleanly, preventing a broken kernel/device stack from being mistaken for a
+TILES-specific failure. The host-side packet, NAL, PPS-transition, checksum,
+and fixed-kernel rerun details are recorded in
+[`HEVC_TILES_BACKEND.md`](HEVC_TILES_BACKEND.md).
 
 `check-hevc-main10-experimental` generates 48 Main10 frames at 320x240 and also
 runs the checksum-pinned FATE `WP_A_MAIN10_Toshiba_3.bit` weighted-prediction

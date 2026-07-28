@@ -13,6 +13,8 @@ rockchip-vaapi (1.0.11+ysp3) resolute; urgency=medium
     remove the legacy global Firefox RDD sandbox disable during driver upgrade.
   * Add a hash-pinned Firefox 152.0.6 RDD sandbox source patch and validator
     for the measured Rockchip MPP, RGA, DMA-BUF, and dma-heap contract.
+  * Add a libva-free direct-MPP HEVC reproducer and control-gated access-unit
+    reducer for the remaining TILES conformance failure.
 
  -- Yi Ding <yi.s.ding@gmail.com>  Sun, 26 Jul 2026 02:16:42 -0700
 
