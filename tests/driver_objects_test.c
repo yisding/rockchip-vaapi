@@ -562,10 +562,36 @@ static void test_surfaces(struct VADriverVTable *v, VADriverContextP ctx,
         },
     };
     VASurfaceID p010_surface;
+    VASurfaceID rejected_p010_surface;
+    CHECK_STATUS(v->vaCreateSurfaces2(
+                     ctx, VA_RT_FORMAT_YUV420_10, 15, 16,
+                     &rejected_p010_surface, 1, &p010_format, 1),
+                 VA_STATUS_ERROR_INVALID_PARAMETER);
     CHECK_STATUS(v->vaCreateSurfaces2(
                      ctx, VA_RT_FORMAT_YUV420_10, 16, 16, &p010_surface, 1,
                      &p010_format, 1),
                  VA_STATUS_SUCCESS);
+
+    CHECK_STATUS(v->vaMapBuffer(ctx, images[1].buf, (void **)&upload),
+                 VA_STATUS_SUCCESS);
+    for (unsigned int i = 0; i < images[1].data_size; i++)
+        upload[i] = (uint8_t)(i * 17u + 3u);
+    CHECK_STATUS(v->vaUnmapBuffer(ctx, images[1].buf), VA_STATUS_SUCCESS);
+    CHECK_STATUS(v->vaPutImage(ctx, p010_surface, images[1].image_id,
+                              0, 0, 16, 16, 0, 0, 16, 16),
+                 VA_STATUS_SUCCESS);
+    CHECK_STATUS(v->vaGetImage(ctx, p010_surface, 0, 0, 16, 16,
+                              images[3].image_id), VA_STATUS_SUCCESS);
+    CHECK_STATUS(v->vaMapBuffer(ctx, images[1].buf, (void **)&upload),
+                 VA_STATUS_SUCCESS);
+    CHECK_STATUS(v->vaMapBuffer(ctx, images[3].buf, (void **)&download),
+                 VA_STATUS_SUCCESS);
+    if (memcmp(upload, download, images[1].data_size) != 0) {
+        fputs("P010 PutImage/GetImage round trip changed bytes\n", stderr);
+        exit(1);
+    }
+    CHECK_STATUS(v->vaUnmapBuffer(ctx, images[3].buf), VA_STATUS_SUCCESS);
+    CHECK_STATUS(v->vaUnmapBuffer(ctx, images[1].buf), VA_STATUS_SUCCESS);
 
     memset(&descriptor, 0, sizeof(descriptor));
     CHECK_STATUS(v->vaExportSurfaceHandle(
@@ -610,6 +636,108 @@ static void test_surfaces(struct VADriverVTable *v, VADriverContextP ctx,
     close(descriptor.objects[0].fd);
     CHECK_STATUS(v->vaDestroySurfaces(ctx, &p010_surface, 1),
                  VA_STATUS_SUCCESS);
+
+    MppBufferGroup p010_group = NULL;
+    MppBuffer p010_buffer = NULL;
+    const uint32_t p010_pitch = 16u * 2u;
+    const size_t p010_size = p010_pitch * 16u * 3u / 2u;
+    if (mpp_buffer_group_get_internal(&p010_group, MPP_BUFFER_TYPE_DRM) !=
+            MPP_OK ||
+        mpp_buffer_get(p010_group, &p010_buffer, p010_size) != MPP_OK) {
+        fputs("failed to allocate P010 import test buffer\n", stderr);
+        exit(1);
+    }
+    uint8_t *p010_bytes = mpp_buffer_get_ptr(p010_buffer);
+    if (!p010_bytes) {
+        fputs("failed to map P010 import test buffer\n", stderr);
+        exit(1);
+    }
+    for (size_t byte = 0; byte < p010_size; byte++)
+        p010_bytes[byte] = (uint8_t)(byte * 23u + 11u);
+    int p010_application_fd = dup(mpp_buffer_get_fd(p010_buffer));
+    if (p010_application_fd < 0) {
+        perror("dup");
+        exit(1);
+    }
+    VADRMPRIMESurfaceDescriptor p010_descriptor = {
+        .fourcc = VA_FOURCC_P010,
+        .width = 16,
+        .height = 16,
+        .num_objects = 1,
+        .objects = {
+            {
+                .fd = p010_application_fd,
+                .size = (uint32_t)p010_size,
+                .drm_format_modifier = DRM_FORMAT_MOD_LINEAR,
+            },
+        },
+        .num_layers = 1,
+        .layers = {
+            {
+                .drm_format = DRM_FORMAT_P010,
+                .num_planes = 2,
+                .object_index = { 0, 0 },
+                .offset = { 0, p010_pitch * 16u },
+                .pitch = { p010_pitch, p010_pitch },
+            },
+        },
+    };
+    VASurfaceAttrib p010_import_attributes[] = {
+        p010_format,
+        {
+            .type = VASurfaceAttribMemoryType,
+            .flags = VA_SURFACE_ATTRIB_SETTABLE,
+            .value = {
+                .type = VAGenericValueTypeInteger,
+                .value.i = VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+            },
+        },
+        {
+            .type = VASurfaceAttribExternalBufferDescriptor,
+            .flags = VA_SURFACE_ATTRIB_SETTABLE,
+            .value = {
+                .type = VAGenericValueTypePointer,
+                .value.p = &p010_descriptor,
+            },
+        },
+    };
+    p010_descriptor.layers[0].pitch[0]--;
+    CHECK_STATUS(v->vaCreateSurfaces2(
+                     ctx, VA_RT_FORMAT_YUV420_10, 16, 16,
+                     &p010_surface, 1, p010_import_attributes, 3),
+                 VA_STATUS_ERROR_INVALID_PARAMETER);
+    p010_descriptor.layers[0].pitch[0]++;
+    CHECK_STATUS(v->vaCreateSurfaces2(
+                     ctx, VA_RT_FORMAT_YUV420_10, 16, 16,
+                     &p010_surface, 1, p010_import_attributes, 3),
+                 VA_STATUS_SUCCESS);
+    close(p010_application_fd);
+    CHECK_STATUS(v->vaGetImage(ctx, p010_surface, 0, 0, 16, 16,
+                              images[3].image_id), VA_STATUS_SUCCESS);
+    CHECK_STATUS(v->vaMapBuffer(ctx, images[3].buf, (void **)&download),
+                 VA_STATUS_SUCCESS);
+    if (memcmp(p010_bytes, download, p010_size) != 0) {
+        fputs("imported P010 readback changed bytes\n", stderr);
+        exit(1);
+    }
+    CHECK_STATUS(v->vaUnmapBuffer(ctx, images[3].buf), VA_STATUS_SUCCESS);
+    memset(&descriptor, 0, sizeof(descriptor));
+    CHECK_STATUS(v->vaExportSurfaceHandle(
+                     ctx, p010_surface,
+                     VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+                     VA_EXPORT_SURFACE_COMPOSED_LAYERS, &descriptor),
+                 VA_STATUS_SUCCESS);
+    if (descriptor.objects[0].fd < 0 ||
+        descriptor.objects[0].size != p010_size ||
+        descriptor.layers[0].drm_format != DRM_FORMAT_P010) {
+        fputs("imported P010 surface did not retain its descriptor\n", stderr);
+        exit(1);
+    }
+    close(descriptor.objects[0].fd);
+    CHECK_STATUS(v->vaDestroySurfaces(ctx, &p010_surface, 1),
+                 VA_STATUS_SUCCESS);
+    mpp_buffer_put(p010_buffer);
+    mpp_buffer_group_put(p010_group);
 
     p010_format.value.value.i = VA_FOURCC_NV12;
     CHECK_STATUS(v->vaCreateSurfaces2(

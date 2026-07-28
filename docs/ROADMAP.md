@@ -541,8 +541,22 @@ produces parser-clean 48/48 Main-profile streams at 45.19, 44.46, and 40.91 dB;
 codecs. Concurrent 96-frame H.264 and HEVC encoder runs also pass while the
 complete shipping synthetic decode matrix runs in parallel. The implementation
 intentionally exposes one full-frame slice only; planar upload support is
-recorded below, while P010 input, full WebRTC, multi-slice, and long encode
+recorded below, while P010 encode, full WebRTC, multi-slice, and long encode
 soak remain open.
+
+**Progress (2026-07-27, P010 contract and Main10 backend boundary):** Linear
+single-object P010 DRM PRIME 2 surfaces now enforce canonical two-plane
+offsets, even 4:2:0 dimensions, byte-pitch divisibility, pixel width, object
+capacity, and owned-fd lifetime. The object gate covers byte-exact P010
+upload/readback and imported-surface readback. This does not advertise P010
+encode. A driver experiment converted P010 through RGA and reached MPP as
+`MPP_FMT_YUV420SP_10BIT`, where RK3588's `vepu5xx_set_fmt` rejected format 1
+and produced no packet. The official MPP `vepu5xx` format table likewise maps
+that format to its unsupported sentinel. `make probe-mpp-main10-encode`
+reproduces the backend result without libva; promotion now explicitly depends
+on backend support plus Main10 interoperability, quality, sanitizer, and soak
+gates. See
+[`HEVC_MAIN10_ENCODE_BACKEND.md`](HEVC_MAIN10_ENCODE_BACKEND.md).
 
 **Progress (2026-07-26, planar encoder input):** Encode configs now advertise
 NV12 plus I420/YV12 system-memory upload formats. Explicit three-plane
@@ -666,10 +680,12 @@ concurrent with decode contexts are race-free.
   PSNR gates normally and under ASan/UBSan. Both 96-frame encoder gates pass
   together with the shipping decode matrix. Checked I420/YV12 uploads are
   normalized to native NV12 and pass direct FFmpeg/GStreamer gates. Linear
-  packed-RGB DMA-BUF import passes a public-libva RGA conversion gate. P010
-  input, multi-object/tiled imports, full WebRTC peer negotiation, multi-slice,
-  and long encode qualification remain open; H.264 WebRTC-compatible RTP
-  packetization and paced dual-codec soak smoke are green.
+  packed-RGB DMA-BUF import passes a public-libva RGA conversion gate. Linear
+  P010 import/readback is byte-exact, but Main10 encode is backend-blocked by
+  MPP `vepu5xx` rejecting its compact 10-bit input format. Multi-object/tiled
+  imports, full WebRTC peer negotiation, multi-slice, and long encode
+  qualification remain open; H.264 WebRTC-compatible RTP packetization and
+  paced dual-codec soak smoke are green.
 - Phase 5: planned.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement

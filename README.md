@@ -132,8 +132,12 @@ CQP/CBR/VBR, FFmpeg interoperability, direct-I420 GStreamer
 `vah264enc`/`vah265enc`, ASan/UBSan, and concurrent encode/decode. Imported
 linear NV12 DMA-BUFs can be submitted directly, and single-object linear
 RGBA/RGBX/BGRA/BGRX DMA-BUFs are converted through RGA into aligned NV12 before
-encode. Full WebRTC peer negotiation, P010 encode, multi-slice, tiled or
-multi-object imports, and long encode soak remain open. A WebRTC-compatible
+encode. Linear P010 DMA-BUF import and byte-exact image readback are supported
+as a surface contract, but P010 encode remains unadvertised because the
+RK3588 MPP `vepu5xx` encoder HAL rejects its compact 10-bit input format; see
+[`docs/HEVC_MAIN10_ENCODE_BACKEND.md`](docs/HEVC_MAIN10_ENCODE_BACKEND.md).
+Full WebRTC peer negotiation, multi-slice, tiled or multi-object imports, and
+long encode soak remain open. A WebRTC-compatible
 H.264 RTP pay/depay gate already passes with 1,200-byte MTU enforcement. Paced
 dual-codec encode smoke runs also pass with flat post-warmup RSS/fd counts; the
 two-hour qualification run remains open.

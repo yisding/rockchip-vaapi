@@ -126,6 +126,9 @@ $(HEVC_MPP_REPRO): tests/hevc_mpp_repro.c
 check-hevc-tiles-backend: $(HEVC_MPP_REPRO)
 	EXPECTED_RESULT=fixed tests/minimize-hevc-tiles.sh
 
+probe-mpp-main10-encode:
+	tests/probe-mpp-main10-encode.sh
+
 check-hevc-main10-experimental: $(TARGET) test
 	tests/check-hevc-main10.sh
 
@@ -393,7 +396,7 @@ clean:
 
 .PHONY: all install fetch-vectors check check-conformance check-synthetic \
 	check-hevc-experimental check-hevc-experimental-sanitize \
-	check-hevc-tiles-backend \
+	check-hevc-tiles-backend probe-mpp-main10-encode \
 	check-hevc-main10-experimental check-hevc-main10-hdr-experimental \
 	check-vp9-profile2-experimental check-gstreamer-va \
 	check-h264-encode-experimental check-h264-encode-experimental-sanitize \

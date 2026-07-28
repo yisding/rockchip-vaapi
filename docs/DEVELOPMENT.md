@@ -461,21 +461,27 @@ one MPP packet, and publishes it through a `VACodedBufferSegment`. MPP emits
 H.264 SPS/PPS or HEVC VPS/SPS/PPS on each IDR. Coded-buffer overflow fails
 closed.
 
-`vaCreateSurfaces2` also implements DRM PRIME 2 import for encode inputs. The
-accepted contract is deliberately narrow: one linear object, one composed
-layer, exact visible dimensions, zero packed-RGB offset, and checked pitches
-and object capacity. Linear NV12 with canonical Y/UV offsets is submitted
-directly. RGBA, RGBX, BGRA, and BGRX use an owned duplicate of the application
-fd and one synchronous RGA conversion into the driver's aligned NV12 buffer
-per encoded frame. Multi-object, tiled/modifier, undersized, mismatched, and
-non-DMA-BUF descriptors fail during surface creation. Imported surfaces reject
+`vaCreateSurfaces2` also implements DRM PRIME 2 import for application
+surfaces. The accepted contract is deliberately narrow: one linear object, one
+composed layer, exact visible dimensions, zero packed-RGB offset, and checked
+pitches and object capacity. Linear NV12 and P010 require canonical Y/UV
+offsets; P010 pitches are byte pitches and are converted to the surface's pixel
+stride only after divisibility and width checks. For the currently advertised
+8-bit encode paths, NV12 is submitted directly. RGBA, RGBX, BGRA, and BGRX use
+an owned duplicate of the application fd and one synchronous RGA conversion
+into the driver's aligned NV12 buffer per encoded frame.
+Multi-object, tiled/modifier, undersized, mismatched, and non-DMA-BUF
+descriptors fail during surface creation. Imported surfaces reject
 `vaPutImage`, and imported RGB is advertised only when RGA was linked.
 
 The current boundary remains progressive 8-bit input, one complete frame-level
 macroblock/CTU slice, MPP-managed references, and synchronous completion. P010
 encode, packed application headers, B-frames, multi-slice, and full WebRTC
 integration are not advertised. This also avoids exercising the kernel's
-historically vulnerable multi-slice FIFO path.
+historically vulnerable multi-slice FIFO path. P010 surface import/readback is
+not a Main10 encode claim: the tested MPP `vepu5xx` HAL rejects
+`MPP_FMT_YUV420SP_10BIT`. The direct diagnostic and promotion criteria are in
+[`HEVC_MAIN10_ENCODE_BACKEND.md`](HEVC_MAIN10_ENCODE_BACKEND.md).
 
 `check-rgb-dmabuf-encode-experimental` imports a real BGRA DMA-BUF through the
 public libva API, closes the descriptor fd after surface creation, converts 48

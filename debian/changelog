@@ -15,6 +15,9 @@ rockchip-vaapi (1.0.11+ysp3) resolute; urgency=medium
     for the measured Rockchip MPP, RGA, DMA-BUF, and dma-heap contract.
   * Add a libva-free direct-MPP HEVC reproducer and control-gated access-unit
     reducer for the remaining TILES conformance failure.
+  * Accept checked linear P010 DRM PRIME surfaces with byte-exact readback,
+    and document the RK3588 MPP 10-bit encoder-input blocker without
+    advertising HEVC Main10 encode.
 
  -- Yi Ding <yi.s.ding@gmail.com>  Sun, 26 Jul 2026 02:16:42 -0700
 

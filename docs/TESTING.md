@@ -244,16 +244,24 @@ in parallel with the shipping synthetic decode matrix. It requires all three
 processes to complete, providing a board-level overlap check between two MPP
 encoder contexts and independent H.264/VP9 decode contexts.
 
+`make probe-mpp-main10-encode` is a bounded, libva-free diagnostic for the
+current HEVC Main10 encoder blocker. It configures MPP format id 1 with the
+compact 10-bit byte stride and requires the tested `vepu5xx_set_fmt`
+unsupported-format result. It is not a passing Main10 encode claim; a changed
+backend result is inconclusive until the full promotion gates in
+[`HEVC_MAIN10_ENCODE_BACKEND.md`](HEVC_MAIN10_ENCODE_BACKEND.md) pass.
+
 The object-lifecycle gate crosses every former fixed-array ceiling, validates
 all five typed handle namespaces and stale-handle rejection, and creates nine
 simultaneous MPP decode contexts. It also checks immediate success for NV12
 and P010 placeholder surfaces, validates composed P010 and split R16/GR1616
-descriptors before decode, validates packed-RGB PRIME import/re-export and
-owned-fd lifetime, verifies NV12 `PutImage`/`GetImage` byte equality and
-coded-buffer segment mapping, rejects inconsistent RT/pixel formats, checks
-zero-timeout behavior for a pending fence, and checks failure signaling when
-that fence's context is destroyed. Its sanitized and TSan variants apply
-ASan/UBSan and thread-race checking to the complete lifecycle.
+descriptors before decode, validates byte-exact linear P010 PRIME import and
+readback plus packed-RGB PRIME import/re-export and owned-fd lifetime, verifies
+NV12/P010 `PutImage`/`GetImage` byte equality and coded-buffer segment mapping,
+rejects inconsistent RT/pixel formats, checks zero-timeout behavior for a
+pending fence, and checks failure signaling when that fence's context is
+destroyed. Its sanitized and TSan variants apply ASan/UBSan and thread-race
+checking to the complete lifecycle.
 
 The zero-copy gate runs the synthetic H.264 reference/B-frame matrix, 4K
 decode, and five VP9 runs while auditing the driver log. It requires at least

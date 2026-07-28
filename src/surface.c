@@ -70,8 +70,11 @@ static VAStatus import_surface_descriptor(
 {
     uint32_t expected_drm_format = rgb_drm_format(surface->fourcc);
     bool rgb = expected_drm_format != 0;
-    if (!rgb && surface->fourcc != VA_FOURCC_NV12)
+    bool p010 = surface->fourcc == VA_FOURCC_P010;
+    if (!rgb && surface->fourcc != VA_FOURCC_NV12 && !p010)
         return VA_STATUS_ERROR_ATTR_NOT_SUPPORTED;
+    if (!rgb)
+        expected_drm_format = p010 ? DRM_FORMAT_P010 : DRM_FORMAT_NV12;
     if (rgb && !rk_rga_available())
         return VA_STATUS_ERROR_ATTR_NOT_SUPPORTED;
     if (!descriptor || descriptor->fourcc != surface->fourcc ||
@@ -96,19 +99,21 @@ static VAStatus import_surface_descriptor(
             (surface->width & 1) || (surface->height & 1))
             return VA_STATUS_ERROR_INVALID_PARAMETER;
     } else {
+        uint32_t bytes_per_sample = p010 ? 2u : 1u;
         size_t chroma_offset =
             (size_t)pitch * (uint32_t)surface->height;
         required_size =
             chroma_offset + (size_t)pitch *
                                 ((uint32_t)surface->height / 2);
-        if (descriptor->layers[0].drm_format != DRM_FORMAT_NV12 ||
+        if (descriptor->layers[0].drm_format != expected_drm_format ||
             descriptor->layers[0].num_planes != 2 ||
             descriptor->layers[0].object_index[0] != 0 ||
             descriptor->layers[0].object_index[1] != 0 ||
             descriptor->layers[0].offset[0] != 0 ||
             descriptor->layers[0].offset[1] != chroma_offset ||
             descriptor->layers[0].pitch[1] != pitch ||
-            pitch < (uint32_t)surface->width)
+            pitch % bytes_per_sample != 0 ||
+            pitch / bytes_per_sample < (uint32_t)surface->width)
             return VA_STATUS_ERROR_INVALID_PARAMETER;
     }
     if (required_size > descriptor->objects[0].size)
@@ -144,12 +149,13 @@ static VAStatus import_surface_descriptor(
     surface->import_drm_format = descriptor->layers[0].drm_format;
     surface->imported_rgb = rgb;
     if (!rgb) {
-        surface->hstride = (int)pitch;
+        surface->hstride = (int)(pitch / (p010 ? 2u : 1u));
         surface->vstride = surface->height;
     }
     LOG("CreateSurfaces: imported %s %dx%d fd=%d size=%zu pitch=%u "
         "drm_format=0x%x",
-        rgb ? "RGB" : "NV12", surface->width, surface->height, imported_fd,
+        rgb ? "RGB" : p010 ? "P010" : "NV12",
+        surface->width, surface->height, imported_fd,
         surface->import_size, pitch, surface->import_drm_format);
     return VA_STATUS_SUCCESS;
 }
@@ -165,7 +171,8 @@ static VAStatus create_surfaces(VADriverContextP ctx, int width, int height,
         return VA_STATUS_ERROR_INVALID_PARAMETER;
     if (width > RK_MAX_WIDTH || height > RK_MAX_HEIGHT)
         return VA_STATUS_ERROR_RESOLUTION_NOT_SUPPORTED;
-    if ((fourcc == VA_FOURCC_I420 || fourcc == VA_FOURCC_YV12) &&
+    if ((fourcc == VA_FOURCC_I420 || fourcc == VA_FOURCC_YV12 ||
+         fourcc == VA_FOURCC_P010) &&
         ((width & 1) || (height & 1)))
         return VA_STATUS_ERROR_INVALID_PARAMETER;
 
@@ -384,7 +391,8 @@ VAStatus rk_CreateSurfaces2(VADriverContextP ctx,
         return VA_STATUS_ERROR_INVALID_PARAMETER;
     if (rgb_fourcc(fourcc) && !imported)
         return VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE;
-    if (imported && fourcc != VA_FOURCC_NV12 && !rgb_fourcc(fourcc))
+    if (imported && fourcc != VA_FOURCC_NV12 &&
+        fourcc != VA_FOURCC_P010 && !rgb_fourcc(fourcc))
         return VA_STATUS_ERROR_ATTR_NOT_SUPPORTED;
 
     return create_surfaces(ctx, (int)width, (int)height, (int)n, ids,
