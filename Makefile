@@ -33,7 +33,7 @@ SRCS   := src/rockchip_drv_video.c src/buffer.c src/context.c src/convert.c \
 OBJS   := $(SRCS:.c=.o)
 
 UNIT_TESTS := tests/object_heap_test tests/frame_layout_test tests/h264_test \
-	tests/hevc_test tests/vp9_test
+	tests/hevc_test tests/vp9_test tests/log_test
 HARDWARE_TESTS := tests/driver_objects_test
 RGB_ENCODE_TEST := tests/va_rgb_dmabuf_encode
 HEVC_MPP_REPRO := tests/hevc_mpp_repro
@@ -50,10 +50,11 @@ SAN_DIR      := tests/.san-driver
 SAN_TARGET   := $(SAN_DIR)/$(TARGET)
 SAN_OBJS     := $(SRCS:.c=.san.o)
 SAN_TESTS    := tests/object_heap_test.san tests/frame_layout_test.san \
-	tests/h264_test.san tests/hevc_test.san tests/vp9_test.san
+	tests/h264_test.san tests/hevc_test.san tests/vp9_test.san \
+	tests/log_test.san
 TSAN_CFLAGS  ?= -O1 -g3 -fno-omit-frame-pointer -fsanitize=thread
 TSAN_LDFLAGS ?= -fsanitize=thread
-TSAN_TESTS   := tests/object_heap_test.tsan
+TSAN_TESTS   := tests/object_heap_test.tsan tests/log_test.tsan
 TSAN_DIR     := tests/.tsan-driver
 TSAN_TARGET  := $(TSAN_DIR)/$(TARGET)
 TSAN_OBJS    := $(SRCS:.c=.tsan.o)
@@ -295,6 +296,9 @@ tests/hevc_test: tests/hevc_test.c src/hevc.c src/hevc.h src/bs.h
 tests/vp9_test: tests/vp9_test.c src/vp9.c src/vp9.h
 	$(TEST_COMPILE) tests/vp9_test.c src/vp9.c -o $@
 
+tests/log_test: tests/log_test.c src/log.c src/log.h
+	$(TEST_COMPILE) tests/log_test.c src/log.c -lpthread -o $@
+
 test: $(UNIT_TESTS)
 	@set -e; for test_binary in $(UNIT_TESTS); do ./$$test_binary; done
 
@@ -364,6 +368,10 @@ tests/hevc_test.san: tests/hevc_test.c src/hevc.c src/hevc.h src/bs.h
 tests/vp9_test.san: tests/vp9_test.c src/vp9.c src/vp9.h
 	$(SAN_TEST_COMPILE) tests/vp9_test.c src/vp9.c $(SAN_LDFLAGS) -o $@
 
+tests/log_test.san: tests/log_test.c src/log.c src/log.h
+	$(SAN_TEST_COMPILE) tests/log_test.c src/log.c $(SAN_LDFLAGS) \
+		-lpthread -o $@
+
 test-sanitize: $(SAN_TESTS)
 	@set -e; for test_binary in $(SAN_TESTS); do \
 		ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
@@ -374,6 +382,10 @@ tests/object_heap_test.tsan: tests/object_heap_test.c src/object_heap.c src/obje
 	$(CC) $(CPPFLAGS) $(TSAN_CFLAGS) $(WARNINGS) -Isrc \
 		tests/object_heap_test.c src/object_heap.c $(TSAN_LDFLAGS) \
 		-lpthread -o $@
+
+tests/log_test.tsan: tests/log_test.c src/log.c src/log.h
+	$(CC) $(CPPFLAGS) $(TSAN_CFLAGS) $(WARNINGS) -Isrc \
+		tests/log_test.c src/log.c $(TSAN_LDFLAGS) -lpthread -o $@
 
 test-tsan: $(TSAN_TESTS)
 	@set -e; for test_binary in $(TSAN_TESTS); do ./$$test_binary; done

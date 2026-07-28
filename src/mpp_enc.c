@@ -17,7 +17,7 @@
 static bool enc_set_s32(MppEncCfg cfg, const char *key, int32_t value)
 {
     if (mpp_enc_cfg_set_s32(cfg, key, value) != MPP_OK) {
-        LOG("encoder config rejected %s=%d", key, value);
+        LOG_WARNING("encoder config rejected %s=%d", key, value);
         return false;
     }
     return true;
@@ -203,7 +203,7 @@ static bool configure_encoder(RKContext *context)
 
     if (context->mpi->control(context->mpp, MPP_ENC_SET_CFG,
                               context->enc_cfg) != MPP_OK) {
-        LOG("encoder MPP_ENC_SET_CFG failed");
+        LOG_ERROR("encoder MPP_ENC_SET_CFG failed");
         return false;
     }
     return true;
@@ -214,7 +214,7 @@ VAStatus rk_mpp_enc_init(RKContext *context)
     if (mpp_enc_cfg_init(&context->enc_cfg) != MPP_OK ||
         context->mpi->control(context->mpp, MPP_ENC_GET_CFG,
                               context->enc_cfg) != MPP_OK) {
-        LOG("encoder config initialization failed");
+        LOG_ERROR("encoder config initialization failed");
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
 
@@ -227,7 +227,7 @@ VAStatus rk_mpp_enc_init(RKContext *context)
                               &output_timeout) != MPP_OK ||
         context->mpi->control(context->mpp, MPP_ENC_SET_HEADER_MODE,
                               &header_mode) != MPP_OK) {
-        LOG("encoder timeout/header configuration failed");
+        LOG_ERROR("encoder timeout/header configuration failed");
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
     return VA_STATUS_SUCCESS;
@@ -456,24 +456,24 @@ VAStatus rk_mpp_enc_encode(RKContext *context)
     if (request_idr &&
         context->mpi->control(context->mpp, MPP_ENC_SET_IDR_FRAME, NULL) !=
             MPP_OK) {
-        LOG("encoder failed to request IDR frame");
+        LOG_ERROR("encoder failed to request IDR frame");
         goto out;
     }
     if (context->mpi->encode_put_frame(context->mpp, frame) != MPP_OK) {
-        LOG("encoder failed to submit frame");
+        LOG_ERROR("encoder failed to submit frame");
         goto out;
     }
     if (context->mpi->encode_get_packet(context->mpp, &packet) != MPP_OK ||
         !packet) {
-        LOG("encoder failed to receive packet");
+        LOG_ERROR("encoder failed to receive packet");
         goto out;
     }
 
     const void *position = mpp_packet_get_pos(packet);
     size_t length = mpp_packet_get_length(packet);
     if (!position || !length || length > UINT32_MAX) {
-        LOG("encoder returned invalid packet pos=%p length=%zu",
-            position, length);
+        LOG_ERROR("encoder returned invalid packet pos=%p length=%zu",
+                  position, length);
         goto out;
     }
     status = rk_buffer_store_coded(coded, position, length, 0);

@@ -31,6 +31,11 @@ checking and treats every reported leak kind or memory error as a failure. On
 AArch64, install both `valgrind` and the matching `libc6-dbg`; Valgrind needs
 the dynamic loader's symbols before it can start.
 
+`tests/log_test` is part of `make test`, `make sanitize`, `make test-tsan`, and
+`make test-valgrind`. It verifies severity filtering, JSON escaping and
+one-record-per-line framing, nested init/finalize plus sink reopen, and 800
+concurrent records from eight threads without interleaving.
+
 `make check-firefox-rdd-patch` checks the committed policy contract without
 network access. Pass an unpacked exact Firefox 152.0.6 source tree to validate
 the two upstream source hashes and dry-run/apply the patch:

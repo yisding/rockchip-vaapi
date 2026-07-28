@@ -8,6 +8,7 @@ tests/vectors/
 tests/frame_layout_test
 tests/h264_test
 tests/hevc_test
+tests/log_test
 tests/hevc_mpp_repro
 tests/av1_mpp_caps
 tests/driver_objects_test

@@ -508,6 +508,15 @@ piece was the dma-heap broker path. Patch application is checked against exact
 upstream source hashes. Building/installing the Firefox package and validating
 RDD playback in a real display session remain open.
 
+**Progress (2026-07-27, structured logging):** The opt-in driver log now emits
+single-record structured text or newline-delimited JSON with realtime
+nanoseconds, PID/TID, severity, source, line, function, and an escaped message.
+Five severity levels are runtime-filtered while the default text message
+remains compatible with existing hardware audit greps. The sink is
+reference-counted across VA displays and closes/reopens cleanly. Dedicated
+normal, ASan/UBSan, TSan, and Valgrind tests cover filtering, JSON control
+characters, nested lifecycle, and 800 concurrent records without interleaving.
+
 **Gate:** the app matrix passes on-device; conformance suite green; clean soak;
 `.deb` + config packages install and enable HW decode from a clean image.
 
@@ -675,9 +684,10 @@ concurrent with decode contexts are race-free.
   gate is byte-exact for H.264, HEVC Main10, and VP9 Profiles 0/2. Split
   driver/config Debian packaging no longer weakens Firefox's sandbox globally.
   A hash-pinned Firefox 152.0.6 RDD source patch covers the measured Rockchip
-  broker and seccomp contract. The rebuilt Firefox package, live RDD playback,
-  display sinks, other desktop apps, and clean-image package validation remain
-  open.
+  broker and seccomp contract. Structured leveled text/JSON logging is
+  lifecycle-, sanitizer-, thread-, and leak-tested. The rebuilt Firefox
+  package, live RDD playback, display sinks, other desktop apps, and
+  clean-image package validation remain open.
 - Phase 4: in progress; experimental one-slice H.264 Main/High and HEVC Main
   encode pass FFmpeg and GStreamer CQP/CBR/VBR interoperability, parser, and
   PSNR gates normally and under ASan/UBSan. Both 96-frame encoder gates pass
@@ -685,10 +695,12 @@ concurrent with decode contexts are race-free.
   normalized to native NV12 and pass direct FFmpeg/GStreamer gates. Linear
   packed-RGB DMA-BUF import passes a public-libva RGA conversion gate. Linear
   P010 import/readback is byte-exact, but Main10 encode is backend-blocked by
-  MPP `vepu5xx` rejecting its compact 10-bit input format. Multi-object/tiled
-  imports, full WebRTC peer negotiation, multi-slice, and long encode
-  qualification remain open; H.264 WebRTC-compatible RTP packetization and
-  paced dual-codec soak smoke are green.
+  MPP `vepu5xx` rejecting its compact 10-bit input format. A native two-peer
+  WebRTC gate covers SDP/ICE/DTLS/SRTP and passes its software transport
+  control; combined `vah264enc` normal/sanitizer qualification remains open.
+  Multi-object/tiled imports, multi-slice, and long encode qualification also
+  remain open; H.264 WebRTC-compatible RTP packetization and paced dual-codec
+  soak smoke are green.
 - Phase 5: planned.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement

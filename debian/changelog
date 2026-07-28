@@ -22,6 +22,8 @@ rockchip-vaapi (1.0.11+ysp3) resolute; urgency=medium
     trickle ICE, DTLS-SRTP audits, and H.264 transport/decode validation.
   * Add a non-submitting AV1 platform probe that distinguishes MPP/kernel
     endpoint discovery from Phase 0 decode qualification.
+  * Add leveled structured text/JSON logging with clean multi-display
+    lifecycle and sanitizer, race, leak, filtering, and escaping tests.
 
  -- Yi Ding <yi.s.ding@gmail.com>  Sun, 26 Jul 2026 02:16:42 -0700
 

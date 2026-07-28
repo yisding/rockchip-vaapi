@@ -40,7 +40,10 @@
 static VAStatus rk_Terminate(VADriverContextP ctx) {
     LOG("Terminate: cleaning up driver");
     RKDriver *d = drv_from_ctx(ctx);
-    if (!d) return VA_STATUS_SUCCESS;
+    if (!d) {
+        rk_log_finish();
+        return VA_STATUS_SUCCESS;
+    }
 
     /* destroy any leftover objects */
     rk_object_heap_finish(&d->context_heap);
@@ -51,6 +54,7 @@ static VAStatus rk_Terminate(VADriverContextP ctx) {
     pthread_mutex_destroy(&d->object_lock);
     free(d);
     ctx->pDriverData = NULL;
+    rk_log_finish();
     return VA_STATUS_SUCCESS;
 }
 
@@ -268,7 +272,8 @@ static VAStatus rk_GetConfigAttributes(VADriverContextP ctx,
             list[i].value = VA_ATTRIB_NOT_SUPPORTED;
             break;
         default:
-            LOG("GetConfigAttributes: unsupported type=%d", list[i].type);
+            LOG_WARNING("GetConfigAttributes: unsupported type=%d",
+                        list[i].type);
             list[i].value = VA_ATTRIB_NOT_SUPPORTED;
         }
     }
@@ -284,12 +289,12 @@ static VAStatus rk_CreateConfig(VADriverContextP ctx,
         profile, entrypoint, n_attribs);
 
     if (!profile_supported(profile)) {
-        LOG("CreateConfig: unsupported profile %d", profile);
+        LOG_WARNING("CreateConfig: unsupported profile %d", profile);
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
     }
     bool encode = entrypoint == VAEntrypointEncSlice;
     if (entrypoint != VAEntrypointVLD && !encode) {
-        LOG("CreateConfig: unsupported entrypoint %d", entrypoint);
+        LOG_WARNING("CreateConfig: unsupported entrypoint %d", entrypoint);
         return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
     }
     if (entrypoint == VAEntrypointVLD &&
@@ -646,20 +651,26 @@ VAStatus __vaDriverInit_1_20(VADriverContextP ctx)  /* NOLINT */
     rk_log_init();
     LOG("__vaDriverInit_1_20: entry");
     RKDriver *d = calloc(1, sizeof(*d));
-    if (!d) return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    if (!d) {
+        rk_log_finish();
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
     if (pthread_mutex_init(&d->object_lock, NULL) != 0) {
         free(d);
+        rk_log_finish();
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
     if (!rk_object_heap_init(&d->config_heap, RK_OBJECT_CONFIG)) {
         pthread_mutex_destroy(&d->object_lock);
         free(d);
+        rk_log_finish();
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
     if (!rk_object_heap_init(&d->context_heap, RK_OBJECT_CONTEXT)) {
         rk_object_heap_finish(&d->config_heap);
         pthread_mutex_destroy(&d->object_lock);
         free(d);
+        rk_log_finish();
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
     if (!rk_object_heap_init(&d->surface_heap, RK_OBJECT_SURFACE)) {
@@ -667,6 +678,7 @@ VAStatus __vaDriverInit_1_20(VADriverContextP ctx)  /* NOLINT */
         rk_object_heap_finish(&d->config_heap);
         pthread_mutex_destroy(&d->object_lock);
         free(d);
+        rk_log_finish();
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
     if (!rk_object_heap_init(&d->buffer_heap, RK_OBJECT_BUFFER)) {
@@ -675,6 +687,7 @@ VAStatus __vaDriverInit_1_20(VADriverContextP ctx)  /* NOLINT */
         rk_object_heap_finish(&d->config_heap);
         pthread_mutex_destroy(&d->object_lock);
         free(d);
+        rk_log_finish();
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
     if (!rk_object_heap_init(&d->image_heap, RK_OBJECT_IMAGE)) {
@@ -684,6 +697,7 @@ VAStatus __vaDriverInit_1_20(VADriverContextP ctx)  /* NOLINT */
         rk_object_heap_finish(&d->config_heap);
         pthread_mutex_destroy(&d->object_lock);
         free(d);
+        rk_log_finish();
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
     ctx->pDriverData = d;

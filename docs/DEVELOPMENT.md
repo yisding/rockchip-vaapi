@@ -111,16 +111,21 @@ the acquired object remains alive after that short critical section.
 `driver_internal.h` is private to the driver translation units. It centralizes
 the shared object layouts and short heap-acquire helpers without exposing them
 as public ABI. Buffer/image ownership now lives in `buffer.c`; logging uses a
-`pthread_once`-initialized sink and stdio stream locking so independent decode
-workers cannot interleave log records. DRM PRIME 2 descriptor construction is
-isolated in `export.c`; it synchronizes pending surfaces through the narrow
-interface in `surface.h` before duplicating and describing the active DMA-BUF.
-Surface allocation, teardown, status/fence waits, and DMA-BUF-synchronized
-image readback now live together in `surface.c`. Context creation/destruction,
-picture lifecycle, and render-target ownership are isolated in `context.c`.
-`mpp_dec.c` owns packet construction, external-pool management, frame routing,
-submission/draining, and the dedicated worker. The main translation unit now
-owns capability/configuration policy, stubs, initialization, and vtable wiring.
+reference-counted sink guarded by one mutex, so independent decode workers
+cannot interleave records and the final VA display closes the file cleanly.
+Every record carries realtime nanoseconds, PID/TID, severity, source, line,
+function, and message. `RK_VAAPI_LOG_LEVEL` filters five levels and
+`RK_VAAPI_LOG_FORMAT=json` selects newline-delimited, control-character-safe
+JSON; the default text format preserves existing audit substrings. DRM PRIME 2
+descriptor construction is isolated in `export.c`; it synchronizes pending
+surfaces through the narrow interface in `surface.h` before duplicating and
+describing the active DMA-BUF. Surface allocation, teardown, status/fence
+waits, and DMA-BUF-synchronized image readback now live together in
+`surface.c`. Context creation/destruction, picture lifecycle, and render-target
+ownership are isolated in `context.c`. `mpp_dec.c` owns packet construction,
+external-pool management, frame routing, submission/draining, and the dedicated
+worker. The main translation unit now owns capability/configuration policy,
+stubs, initialization, and vtable wiring.
 
 ---
 

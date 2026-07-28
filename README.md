@@ -206,6 +206,17 @@ LIBVA_DRIVER_NAME=rockchip firefox
 tail -f "$HOME/.local/state/rockchip-vaapi.log"
 ```
 
+Each default text record includes realtime nanoseconds, process/thread IDs,
+severity, source file, line, and function while preserving the human-readable
+message. `RK_VAAPI_LOG_LEVEL` accepts `error`, `warning`, `info` (default),
+`debug`, or `trace`. Set `RK_VAAPI_LOG_FORMAT=json` for newline-delimited JSON:
+
+```bash
+RK_VAAPI_LOG="$HOME/.local/state/rockchip-vaapi.jsonl" \
+RK_VAAPI_LOG_LEVEL=debug RK_VAAPI_LOG_FORMAT=json \
+LIBVA_DRIVER_NAME=rockchip firefox
+```
+
 You can also check VPU activity:
 
 ```bash

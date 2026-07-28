@@ -137,7 +137,7 @@ VAStatus rk_CreateContext(VADriverContextP ctx,
 
     MPP_RET ret = mpp_create(&c->mpp, &c->mpi);
     if (ret != MPP_OK) {
-        LOG("mpp_create FAILED: %d", ret);
+        LOG_ERROR("mpp_create FAILED: %d", ret);
         rk_object_unref(&c->base);
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
@@ -146,7 +146,7 @@ VAStatus rk_CreateContext(VADriverContextP ctx,
     ret = mpp_init(c->mpp, c->is_encoder ? MPP_CTX_ENC : MPP_CTX_DEC,
                    coding);
     if (ret != MPP_OK) {
-        LOG("mpp_init FAILED: %d (coding=%d)", ret, (int)coding);
+        LOG_ERROR("mpp_init FAILED: %d (coding=%d)", ret, (int)coding);
         rk_object_unref(&c->base);
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
@@ -166,8 +166,8 @@ VAStatus rk_CreateContext(VADriverContextP ctx,
             if (!rk_rga_available() ||
                 c->mpi->control(c->mpp, MPP_DEC_SET_OUTPUT_FORMAT,
                                 &output_format) != MPP_OK) {
-                LOG("CreateContext: 10-bit AFBC output configuration failed "
-                    "profile=%d", profile);
+                LOG_ERROR("CreateContext: 10-bit AFBC output configuration "
+                          "failed profile=%d", profile);
                 rk_object_unref(&c->base);
                 return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
             }
@@ -180,7 +180,7 @@ VAStatus rk_CreateContext(VADriverContextP ctx,
             c->mpi->control(c->mpp, MPP_DEC_SET_CFG, dec_cfg) != MPP_OK) {
             if (dec_cfg)
                 mpp_dec_cfg_deinit(dec_cfg);
-            LOG("CreateContext: decoder configuration failed");
+            LOG_ERROR("CreateContext: decoder configuration failed");
             rk_object_unref(&c->base);
             return VA_STATUS_ERROR_ALLOCATION_FAILED;
         }
@@ -192,7 +192,7 @@ VAStatus rk_CreateContext(VADriverContextP ctx,
                             &input_timeout_ms) != MPP_OK ||
             c->mpi->control(c->mpp, MPP_SET_OUTPUT_TIMEOUT,
                             &output_timeout_ms) != MPP_OK) {
-            LOG("CreateContext: decoder timeout configuration failed");
+            LOG_ERROR("CreateContext: decoder timeout configuration failed");
             rk_object_unref(&c->base);
             return VA_STATUS_ERROR_ALLOCATION_FAILED;
         }
@@ -200,14 +200,15 @@ VAStatus rk_CreateContext(VADriverContextP ctx,
             RK_U32 immediate_out = 1;
             if (c->mpi->control(c->mpp, MPP_DEC_SET_IMMEDIATE_OUT,
                                 &immediate_out) != MPP_OK) {
-                LOG("CreateContext: HEVC immediate-output configuration failed");
+                LOG_ERROR("CreateContext: HEVC immediate-output "
+                          "configuration failed");
                 rk_object_unref(&c->base);
                 return VA_STATUS_ERROR_ALLOCATION_FAILED;
             }
         }
         c->sps_sent = false;
         if (pthread_create(&c->worker, NULL, rk_mpp_dec_worker_main, c) != 0) {
-            LOG("CreateContext: decode worker creation failed");
+            LOG_ERROR("CreateContext: decode worker creation failed");
             rk_object_unref(&c->base);
             return VA_STATUS_ERROR_ALLOCATION_FAILED;
         }
