@@ -162,7 +162,8 @@ static VAStatus import_surface_descriptor(
 
 static VAStatus create_surfaces(VADriverContextP ctx, int width, int height,
                                 int n, VASurfaceID *ids, uint32_t fourcc,
-                                const VADRMPRIMESurfaceDescriptor *imports)
+                                const VADRMPRIMESurfaceDescriptor *imports,
+                                bool encoder_input)
 {
     RKDriver *d = drv_from_ctx(ctx);
     bool is_10bit = fourcc == VA_FOURCC_P010;
@@ -229,6 +230,7 @@ static VAStatus create_surfaces(VADriverContextP ctx, int width, int height,
                         surf->hstride = (int)((width  + 15) & ~15);
                         surf->vstride = (int)((height + 15) & ~15);
                     }
+                    surf->encoder_input = encoder_input;
                     LOG("CreateSurfaces: surface %ux%u placeholder fd=%d "
                         "size=%zu format=%s",
                         (unsigned)width, (unsigned)height, raw_fd,
@@ -286,7 +288,7 @@ VAStatus rk_CreateSurfaces(VADriverContextP ctx,
     return create_surfaces(ctx, width, height, n, ids,
                            format == VA_RT_FORMAT_YUV420_10
                                ? VA_FOURCC_P010 : VA_FOURCC_NV12,
-                           NULL);
+                           NULL, false);
 }
 
 VAStatus rk_DestroySurfaces(VADriverContextP ctx,
@@ -331,6 +333,7 @@ VAStatus rk_CreateSurfaces2(VADriverContextP ctx,
     bool pixel_format_seen = false;
     bool memory_type_seen = false;
     bool descriptor_seen = false;
+    bool encoder_input = false;
     uint32_t memory_type = VA_SURFACE_ATTRIB_MEM_TYPE_VA;
     const VADRMPRIMESurfaceDescriptor *external_descriptors = NULL;
     for (unsigned i = 0; i < n_attribs; i++) {
@@ -338,6 +341,13 @@ VAStatus rk_CreateSurfaces2(VADriverContextP ctx,
             i, attribs[i].type, attribs[i].flags,
             attribs[i].value.type == VAGenericValueTypeInteger
                 ? (unsigned)attribs[i].value.value.i : 0u);
+        if (attribs[i].type == VASurfaceAttribUsageHint) {
+            if (attribs[i].value.type == VAGenericValueTypeInteger &&
+                (attribs[i].value.value.i &
+                 VA_SURFACE_ATTRIB_USAGE_HINT_ENCODER))
+                encoder_input = true;
+            continue;
+        }
         if (attribs[i].type == VASurfaceAttribMemoryType) {
             if (attribs[i].value.type != VAGenericValueTypeInteger)
                 return VA_STATUS_ERROR_INVALID_PARAMETER;
@@ -396,7 +406,8 @@ VAStatus rk_CreateSurfaces2(VADriverContextP ctx,
         return VA_STATUS_ERROR_ATTR_NOT_SUPPORTED;
 
     return create_surfaces(ctx, (int)width, (int)height, (int)n, ids,
-                           fourcc, imported ? external_descriptors : NULL);
+                           fourcc, imported ? external_descriptors : NULL,
+                           encoder_input);
 }
 
 static VAStatus sync_surface_timeout(VADriverContextP ctx, VASurfaceID id,

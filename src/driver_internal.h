@@ -158,6 +158,10 @@ struct RKSurface {
     uint32_t import_pitch;
     uint32_t import_drm_format;
     bool imported_rgb;
+    /* The application declared this surface as encoder input. Its content is
+     * written through the checked vaPutImage path, never read back as decoded
+     * pixels, so it must not be exposed through vaDeriveImage. */
+    bool encoder_input;
 
     MppFrameFormat fmt;
     uint32_t fourcc;

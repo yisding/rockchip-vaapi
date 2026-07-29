@@ -578,6 +578,7 @@ VAStatus rk_DeriveImage(VADriverContextP context, VASurfaceID surface_id,
      * surface still bound to the MPP frame itself can actually be compressed;
      * once backing_buf holds the conversion result the layout is linear. */
     bool fbc = surface->frame != NULL && MPP_FRAME_FMT_IS_FBC(surface->fmt);
+    bool encoder_input = surface->encoder_input;
     pthread_mutex_unlock(&surface->lock);
 
     /* A VAImage fixes its pitches once, but a surface's layout is only final
@@ -589,10 +590,10 @@ VAStatus rk_DeriveImage(VADriverContextP context, VASurfaceID surface_id,
      * readback resolves the layout per call. Map and acquire re-check the rest
      * against the surface, so a stale image fails instead of returning pixels
      * from the wrong geometry. */
-    if (imported_rgb || fbc || is_10bit) {
+    if (imported_rgb || fbc || is_10bit || encoder_input) {
         LOG("DeriveImage: surface=0x%x layout is not a stable VAImage "
-            "(rgb=%d fbc=%d 10bit=%d)", surface_id, imported_rgb, fbc,
-            is_10bit);
+            "(rgb=%d fbc=%d 10bit=%d encoder=%d)", surface_id, imported_rgb,
+            fbc, is_10bit, encoder_input);
         rk_object_unref(&surface->base);
         return VA_STATUS_ERROR_OPERATION_FAILED;
     }

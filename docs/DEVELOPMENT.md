@@ -275,6 +275,12 @@ setup, before that. Two rules keep the alias honest:
   linear P010, while the decoded frame arrives as AFBC NV15 and RGA repacks it
   at MPP's stride; the two disagree. Consumers fall back to `vaGetImage`, whose
   readback resolves the layout per call.
+- **Encoder-input surfaces are refused.** A surface created with
+  `VASurfaceAttribUsageHint` set to `ENCODER` is written, not read: its content
+  arrives through `vaPutImage`, which validates pitches and offsets and
+  interleaves planar chroma into native NV12. Offering a derived alias made
+  GStreamer's encoder negotiate NV12 and then write its I420 source straight
+  through it, which encoded at 10.5 dB PSNR.
 - **Map and acquire re-resolve the surface.** If the pitch or chroma offset has
   changed since the image was derived, the call fails rather than reading
   pixels through the wrong geometry. If only the buffer changed, the stale
