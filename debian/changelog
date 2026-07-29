@@ -1,3 +1,25 @@
+rockchip-vaapi (1.0.11+ysp6) resolute; urgency=medium
+
+  * Complete the remaining Phase 2/4 roadmap gates: 1080p HEVC Main10 and VP9
+    Profile 2 throughput, same-process two-decode/two-encode concurrency,
+    native WebRTC peers, and the two-hour dual-codec encode soak.
+  * Accept canonical linear two-object NV12/P010 DMA-BUF imports with
+    per-object bounds, synchronization, owned-fd lifetime, accurate re-export,
+    and fail-closed modifier/offset/size validation.
+  * Add checked equal-row H.264 and HEVC multi-slice encoding through MPP,
+    retaining the deliberately unsupported arbitrary-map, B-frame, packed
+    header, tiled-import, and 10-bit encode boundaries.
+  * Derive completed and aligned provisional linear P010 images without
+    weakening refusals for imported, compressed, stale, or unaligned layouts.
+  * Add hash-pinned Firefox 152.0.6 and 153.0 Panfrost P010 chroma-import retry
+    patches and a sandbox-enabled hardware-decode gate that audits the live
+    RDD process in seccomp mode 2.
+  * Expand VLC and mpv display gates for Main10/HDR-capable paths and fail
+    explicitly when the active graphical session exposes no usable output.
+  * Correct Debian metadata, fork provenance, and RGA/DRM build dependencies.
+
+ -- Yi Ding <yi.s.ding@gmail.com>  Wed, 29 Jul 2026 05:47:13 -0700
+
 rockchip-vaapi (1.0.11+ysp5) resolute; urgency=medium
 
   * Refuse experimental HEVC Main10 and VP9 Profile 2 contexts narrower than

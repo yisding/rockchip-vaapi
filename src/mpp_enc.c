@@ -13,6 +13,7 @@
 #include "buffer.h"
 #include "convert.h"
 #include "log.h"
+#include "surface.h"
 
 static bool enc_set_s32(MppEncCfg cfg, const char *key, int32_t value)
 {
@@ -75,6 +76,53 @@ static uint32_t hevc_ctu_size(const RKContext *context)
     return log2_size <= 6 ? 1u << log2_size : 0;
 }
 
+static bool add_encoder_slice(RKContext *context, uint32_t address,
+                              uint32_t units, uint32_t units_per_row)
+{
+    if (!units || !units_per_row || address != context->enc_slice_units ||
+        address % units_per_row || units % units_per_row ||
+        (context->enc_slice_count &&
+         (context->enc_slice_last_units != context->enc_slice_unit_span ||
+          units > context->enc_slice_unit_span)) ||
+        units > UINT32_MAX - context->enc_slice_units)
+        return false;
+
+    if (!context->enc_slice_count)
+        context->enc_slice_unit_span = units;
+    context->enc_slice_count++;
+    context->enc_slice_units += units;
+    context->enc_slice_last_units = units;
+    return true;
+}
+
+static bool hevc_slices_compatible(
+    const VAEncSliceParameterBufferHEVC *first,
+    const VAEncSliceParameterBufferHEVC *next)
+{
+    return first->slice_type == next->slice_type &&
+           first->slice_pic_parameter_set_id ==
+               next->slice_pic_parameter_set_id &&
+           first->slice_qp_delta == next->slice_qp_delta &&
+           first->slice_cb_qp_offset == next->slice_cb_qp_offset &&
+           first->slice_cr_qp_offset == next->slice_cr_qp_offset &&
+           first->slice_beta_offset_div2 == next->slice_beta_offset_div2 &&
+           first->slice_tc_offset_div2 == next->slice_tc_offset_div2 &&
+           first->slice_fields.bits.dependent_slice_segment_flag ==
+               next->slice_fields.bits.dependent_slice_segment_flag &&
+           first->slice_fields.bits.slice_sao_luma_flag ==
+               next->slice_fields.bits.slice_sao_luma_flag &&
+           first->slice_fields.bits.slice_sao_chroma_flag ==
+               next->slice_fields.bits.slice_sao_chroma_flag &&
+           first->slice_fields.bits
+                   .slice_deblocking_filter_disabled_flag ==
+               next->slice_fields.bits
+                   .slice_deblocking_filter_disabled_flag &&
+           first->slice_fields.bits
+                   .slice_loop_filter_across_slices_enabled_flag ==
+               next->slice_fields.bits
+                   .slice_loop_filter_across_slices_enabled_flag;
+}
+
 static int32_t encoder_width(const RKContext *context)
 {
     return context->render_surface ? context->render_surface->width
@@ -105,6 +153,10 @@ static bool configure_encoder(RKContext *context)
     uint32_t rc_mode = mpp_rc_mode(context->rate_control);
     uint32_t fps_num = context->enc_fps_num ? context->enc_fps_num : 30;
     uint32_t fps_den = context->enc_fps_den ? context->enc_fps_den : 1;
+    int32_t split_mode = context->enc_slice_count > 1
+                       ? MPP_ENC_SPLIT_BY_CTU : MPP_ENC_SPLIT_NONE;
+    int32_t split_arg = context->enc_slice_count > 1
+                      ? (int32_t)context->enc_slice_unit_span : 0;
 
     if (!enc_set_s32(context->enc_cfg, "prep:width", width) ||
         !enc_set_s32(context->enc_cfg, "prep:height", height) ||
@@ -119,7 +171,10 @@ static bool configure_encoder(RKContext *context)
         !enc_set_s32(context->enc_cfg, "rc:fps_out_denom", (int32_t)fps_den) ||
         !enc_set_s32(context->enc_cfg, "rc:gop", gop) ||
         !enc_set_s32(context->enc_cfg, "rc:mode", (int32_t)rc_mode) ||
-        !enc_set_s32(context->enc_cfg, "rc:qp_init", qp)) {
+        !enc_set_s32(context->enc_cfg, "rc:qp_init", qp) ||
+        !enc_set_s32(context->enc_cfg, "split:mode", split_mode) ||
+        !enc_set_s32(context->enc_cfg, "split:arg", split_arg) ||
+        !enc_set_s32(context->enc_cfg, "split:out", 0)) {
         return false;
     }
 
@@ -329,30 +384,60 @@ VAStatus rk_mpp_enc_render_buffer(RKContext *context, RKBuffer *buffer)
         context->has_enc_pic = true;
         return VA_STATUS_SUCCESS;
     case VAEncSliceParameterBufferType:
-        if (buffer->num_elements != 1)
+        if (!buffer->num_elements)
             return VA_STATUS_ERROR_INVALID_BUFFER;
         if (context->coding == MPP_VIDEO_CodingAVC) {
-            if (bytes < sizeof(context->enc_slice))
+            if (buffer->size < sizeof(context->enc_slice))
                 return VA_STATUS_ERROR_INVALID_BUFFER;
-            memcpy(&context->enc_slice, buffer->data,
-                   sizeof(context->enc_slice));
+            uint32_t units_per_row = ((uint32_t)context->width + 15) / 16;
+            for (unsigned int i = 0; i < buffer->num_elements; i++) {
+                VAEncSliceParameterBufferH264 slice;
+                memcpy(&slice, (const uint8_t *)buffer->data +
+                               (size_t)i * buffer->size, sizeof(slice));
+                if ((context->enc_slice_count &&
+                     context->enc_slice.slice_type != slice.slice_type) ||
+                    !add_encoder_slice(context, slice.macroblock_address,
+                                       slice.num_macroblocks,
+                                       units_per_row))
+                    return VA_STATUS_ERROR_INVALID_PARAMETER;
+                if (context->enc_slice_count == 1)
+                    context->enc_slice = slice;
+            }
         } else {
-            if (bytes < sizeof(context->enc_hevc_slice))
+            if (buffer->size < sizeof(context->enc_hevc_slice))
                 return VA_STATUS_ERROR_INVALID_BUFFER;
-            memcpy(&context->enc_hevc_slice, buffer->data,
-                   sizeof(context->enc_hevc_slice));
-            LOG("HEVC encoder slice address=%u ctus=%u type=%u last=%u "
-                "qp_delta=%d sao=%u/%u",
-                context->enc_hevc_slice.slice_segment_address,
-                context->enc_hevc_slice.num_ctu_in_slice,
-                context->enc_hevc_slice.slice_type,
-                context->enc_hevc_slice.slice_fields.bits
-                    .last_slice_of_pic_flag,
-                context->enc_hevc_slice.slice_qp_delta,
-                context->enc_hevc_slice.slice_fields.bits
-                    .slice_sao_luma_flag,
-                context->enc_hevc_slice.slice_fields.bits
-                    .slice_sao_chroma_flag);
+            uint32_t ctu = hevc_ctu_size(context);
+            uint32_t units_per_row =
+                ctu ? ((uint32_t)context->render_surface->width + ctu - 1) /
+                          ctu
+                    : 0;
+            for (unsigned int i = 0; i < buffer->num_elements; i++) {
+                VAEncSliceParameterBufferHEVC slice;
+                memcpy(&slice, (const uint8_t *)buffer->data +
+                               (size_t)i * buffer->size, sizeof(slice));
+                if ((context->enc_slice_count &&
+                     (!hevc_slices_compatible(&context->enc_hevc_slice,
+                                              &slice) ||
+                      context->enc_hevc_slice.slice_fields.bits
+                          .last_slice_of_pic_flag)) ||
+                    !add_encoder_slice(context, slice.slice_segment_address,
+                                       slice.num_ctu_in_slice,
+                                       units_per_row))
+                    return VA_STATUS_ERROR_INVALID_PARAMETER;
+                if (context->enc_slice_count == 1)
+                    context->enc_hevc_slice = slice;
+                else if (slice.slice_fields.bits.last_slice_of_pic_flag)
+                    context->enc_hevc_slice.slice_fields.bits
+                        .last_slice_of_pic_flag = 1;
+                LOG("HEVC encoder slice address=%u ctus=%u type=%u last=%u "
+                    "qp_delta=%d sao=%u/%u",
+                    slice.slice_segment_address, slice.num_ctu_in_slice,
+                    slice.slice_type,
+                    slice.slice_fields.bits.last_slice_of_pic_flag,
+                    slice.slice_qp_delta,
+                    slice.slice_fields.bits.slice_sao_luma_flag,
+                    slice.slice_fields.bits.slice_sao_chroma_flag);
+            }
         }
         context->has_enc_slice = true;
         return VA_STATUS_SUCCESS;
@@ -395,8 +480,7 @@ VAStatus rk_mpp_enc_encode(RKContext *context)
     VABufferID coded_id;
     bool request_idr;
     if (context->coding == MPP_VIDEO_CodingAVC) {
-        if (context->enc_slice.macroblock_address != 0 ||
-            context->enc_slice.num_macroblocks !=
+        if (context->enc_slice_units !=
                 (uint32_t)(((context->width + 15) / 16) *
                            ((context->height + 15) / 16)))
             return VA_STATUS_ERROR_INVALID_PARAMETER;
@@ -409,13 +493,15 @@ VAStatus rk_mpp_enc_encode(RKContext *context)
         uint32_t ctu_count =
             ((uint32_t)context->render_surface->width + ctu - 1) / ctu *
             (((uint32_t)context->render_surface->height + ctu - 1) / ctu);
-        if (context->enc_hevc_slice.slice_segment_address != 0 ||
-            context->enc_hevc_slice.num_ctu_in_slice != ctu_count ||
+        if (context->enc_slice_units != ctu_count ||
             !context->enc_hevc_slice.slice_fields.bits.last_slice_of_pic_flag)
             return VA_STATUS_ERROR_INVALID_PARAMETER;
         coded_id = context->enc_hevc_pic.coded_buf;
         request_idr = context->enc_hevc_pic.pic_fields.bits.idr_pic_flag;
     }
+    LOG("encoder slice split count=%u units=%u span=%u",
+        context->enc_slice_count, context->enc_slice_units,
+        context->enc_slice_unit_span);
 
     RKBuffer *coded = buffer_acquire(context->driver, coded_id);
     if (!coded || coded->type != VAEncCodedBufferType) {
@@ -431,9 +517,13 @@ VAStatus rk_mpp_enc_encode(RKContext *context)
     MppPacket packet = NULL;
     RKSurface *surface = context->render_surface;
     pthread_mutex_lock(&surface->lock);
-    MppBuffer input = surface->import_buf && !surface->imported_rgb
+    bool import_ready = !surface->imported_multiplane ||
+                        rk_surface_normalize_multiplane_import(surface);
+    MppBuffer input = surface->import_buf && !surface->imported_rgb &&
+                      !surface->imported_multiplane
                     ? surface->import_buf : surface->priv_buf;
-    if (!input || MPP_FRAME_FMT_IS_YUV_10BIT(surface->fmt) ||
+    if (!import_ready || !input ||
+        MPP_FRAME_FMT_IS_YUV_10BIT(surface->fmt) ||
         (surface->imported_rgb &&
          !rk_convert_rgb_to_nv12(
              mpp_buffer_get_fd(surface->import_buf), surface->import_size,

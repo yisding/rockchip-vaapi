@@ -38,6 +38,10 @@ static void surface_destroy(void *opaque) {
         mpp_buffer_put(surface->import_buf);
     if (surface->import_fd >= 0)
         close(surface->import_fd);
+    if (surface->import_chroma_buf)
+        mpp_buffer_put(surface->import_chroma_buf);
+    if (surface->import_chroma_fd >= 0)
+        close(surface->import_chroma_fd);
     if (surface->decode_pool)
         rk_object_unref(&surface->decode_pool->base);
     if (surface->priv_buf)
@@ -82,7 +86,9 @@ static VAStatus import_surface_descriptor(
     if (!descriptor || descriptor->fourcc != surface->fourcc ||
         descriptor->width != (uint32_t)surface->width ||
         descriptor->height != (uint32_t)surface->height ||
-        descriptor->num_objects != 1 || descriptor->objects[0].fd < 0 ||
+        (descriptor->num_objects != 1 &&
+         (rgb || descriptor->num_objects != 2)) ||
+        descriptor->objects[0].fd < 0 ||
         descriptor->objects[0].size == 0 ||
         descriptor->objects[0].drm_format_modifier !=
             DRM_FORMAT_MOD_LINEAR ||
@@ -90,6 +96,13 @@ static VAStatus import_surface_descriptor(
         return VA_STATUS_ERROR_INVALID_PARAMETER;
 
     const uint32_t pitch = descriptor->layers[0].pitch[0];
+    bool multiplane = !rgb && descriptor->num_objects == 2;
+    if (multiplane &&
+        (descriptor->objects[1].fd < 0 ||
+         descriptor->objects[1].size == 0 ||
+         descriptor->objects[1].drm_format_modifier !=
+             DRM_FORMAT_MOD_LINEAR))
+        return VA_STATUS_ERROR_INVALID_PARAMETER;
     size_t required_size = 0;
     if (rgb) {
         required_size = (size_t)pitch * (uint32_t)surface->height;
@@ -102,20 +115,29 @@ static VAStatus import_surface_descriptor(
             return VA_STATUS_ERROR_INVALID_PARAMETER;
     } else {
         uint32_t bytes_per_sample = p010 ? 2u : 1u;
-        size_t chroma_offset =
-            (size_t)pitch * (uint32_t)surface->height;
-        required_size =
-            chroma_offset + (size_t)pitch *
-                                ((uint32_t)surface->height / 2);
+        uint32_t chroma_pitch = descriptor->layers[0].pitch[1];
+        size_t chroma_offset = multiplane ? 0
+            : (size_t)pitch * (uint32_t)surface->height;
+        required_size = multiplane
+            ? (size_t)pitch * (uint32_t)surface->height
+            : chroma_offset + (size_t)chroma_pitch *
+                                  ((uint32_t)surface->height / 2);
         if (descriptor->layers[0].drm_format != expected_drm_format ||
             descriptor->layers[0].num_planes != 2 ||
             descriptor->layers[0].object_index[0] != 0 ||
-            descriptor->layers[0].object_index[1] != 0 ||
+            descriptor->layers[0].object_index[1] !=
+                (multiplane ? 1u : 0u) ||
             descriptor->layers[0].offset[0] != 0 ||
             descriptor->layers[0].offset[1] != chroma_offset ||
-            descriptor->layers[0].pitch[1] != pitch ||
             pitch % bytes_per_sample != 0 ||
-            pitch / bytes_per_sample < (uint32_t)surface->width)
+            chroma_pitch % bytes_per_sample != 0 ||
+            (!multiplane && chroma_pitch != pitch) ||
+            pitch / bytes_per_sample < (uint32_t)surface->width ||
+            chroma_pitch / bytes_per_sample <
+                (uint32_t)surface->width ||
+            (multiplane &&
+             (size_t)chroma_pitch * ((uint32_t)surface->height / 2) >
+                 descriptor->objects[1].size))
             return VA_STATUS_ERROR_INVALID_PARAMETER;
     }
     if (required_size > descriptor->objects[0].size)
@@ -144,20 +166,59 @@ static VAStatus import_surface_descriptor(
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
 
+    int imported_chroma_fd = -1;
+    MppBuffer imported_chroma_buffer = NULL;
+    if (multiplane) {
+        imported_chroma_fd = dup(descriptor->objects[1].fd);
+        if (imported_chroma_fd < 0 ||
+            !dmabuf_cpu_sync(imported_chroma_fd, DMA_BUF_SYNC_START |
+                                                   DMA_BUF_SYNC_READ) ||
+            !dmabuf_cpu_sync(imported_chroma_fd, DMA_BUF_SYNC_END |
+                                                   DMA_BUF_SYNC_READ)) {
+            if (imported_chroma_fd >= 0)
+                close(imported_chroma_fd);
+            mpp_buffer_put(imported_buffer);
+            close(imported_fd);
+            return imported_chroma_fd < 0
+                 ? VA_STATUS_ERROR_ALLOCATION_FAILED
+                 : VA_STATUS_ERROR_INVALID_PARAMETER;
+        }
+        MppBufferInfo chroma_info = {
+            .type = MPP_BUFFER_TYPE_EXT_DMA,
+            .size = descriptor->objects[1].size,
+            .fd = imported_chroma_fd,
+        };
+        if (mpp_buffer_import(&imported_chroma_buffer,
+                              &chroma_info) != MPP_OK ||
+            !imported_chroma_buffer) {
+            close(imported_chroma_fd);
+            mpp_buffer_put(imported_buffer);
+            close(imported_fd);
+            return VA_STATUS_ERROR_ALLOCATION_FAILED;
+        }
+    }
+
     surface->import_buf = imported_buffer;
     surface->import_fd = imported_fd;
     surface->import_size = descriptor->objects[0].size;
     surface->import_pitch = pitch;
+    surface->import_chroma_buf = imported_chroma_buffer;
+    surface->import_chroma_fd = imported_chroma_fd;
+    surface->import_chroma_size =
+        multiplane ? descriptor->objects[1].size : 0;
+    surface->import_chroma_pitch =
+        multiplane ? descriptor->layers[0].pitch[1] : 0;
     surface->import_drm_format = descriptor->layers[0].drm_format;
     surface->imported_rgb = rgb;
-    if (!rgb) {
+    surface->imported_multiplane = multiplane;
+    if (!rgb && !multiplane) {
         surface->hstride = (int)(pitch / (p010 ? 2u : 1u));
         surface->vstride = surface->height;
     }
-    LOG("CreateSurfaces: imported %s %dx%d fd=%d size=%zu pitch=%u "
-        "drm_format=0x%x",
+    LOG("CreateSurfaces: imported %s %dx%d objects=%u fd=%d size=%zu "
+        "pitch=%u drm_format=0x%x",
         rgb ? "RGB" : p010 ? "P010" : "NV12",
-        surface->width, surface->height, imported_fd,
+        surface->width, surface->height, descriptor->num_objects, imported_fd,
         surface->import_size, pitch, surface->import_drm_format);
     return VA_STATUS_SUCCESS;
 }
@@ -187,6 +248,7 @@ static VAStatus create_surfaces(VADriverContextP ctx, int width, int height,
             goto rollback;
         rk_object_init(&surf->base, surface_destroy);
         surf->import_fd = -1;
+        surf->import_chroma_fd = -1;
         surf->width    = width;
         surf->height   = height;
         surf->fmt      = is_10bit ? MPP_FMT_YUV420SP_10BIT
@@ -228,7 +290,8 @@ static VAStatus create_surfaces(VADriverContextP ctx, int width, int height,
                 if (raw_fd >= 0) {
                     surf->priv_group = grp;
                     surf->priv_buf   = buf;
-                    if (!imports || surf->imported_rgb) {
+                    if (!imports || surf->imported_rgb ||
+                        surf->imported_multiplane) {
                         surf->hstride = (int)((width  + 15) & ~15);
                         surf->vstride = (int)((height + 15) & ~15);
                     }
@@ -277,6 +340,82 @@ rollback:
             rk_object_unref(&surface->base);
     }
     return failure_status;
+}
+
+bool rk_surface_normalize_multiplane_import(RKSurface *surface)
+{
+    if (!surface || !surface->imported_multiplane ||
+        !surface->import_buf || !surface->import_chroma_buf ||
+        !surface->priv_buf || surface->import_fd < 0 ||
+        surface->import_chroma_fd < 0)
+        return false;
+
+    bool p010 = MPP_FRAME_FMT_IS_YUV_10BIT(surface->fmt);
+    size_t bytes_per_sample = p010 ? 2u : 1u;
+    size_t row_bytes = (size_t)(unsigned int)surface->width *
+                       bytes_per_sample;
+    size_t destination_pitch =
+        (size_t)(unsigned int)surface->hstride * bytes_per_sample;
+    size_t destination_size = 0;
+    if (surface->width <= 0 || surface->height <= 0 ||
+        surface->hstride < surface->width ||
+        surface->vstride < surface->height ||
+        surface->import_pitch < row_bytes ||
+        surface->import_chroma_pitch < row_bytes ||
+        !rk_nv12_layout_size(destination_pitch,
+                             (size_t)(unsigned int)surface->vstride,
+                             &destination_size) ||
+        destination_size > mpp_buffer_get_size(surface->priv_buf))
+        return false;
+
+    int destination_fd = mpp_buffer_get_fd(surface->priv_buf);
+    bool y_started = dmabuf_cpu_sync(surface->import_fd,
+                                     DMA_BUF_SYNC_START |
+                                         DMA_BUF_SYNC_READ);
+    bool uv_started = y_started &&
+        dmabuf_cpu_sync(surface->import_chroma_fd,
+                        DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ);
+    bool destination_started = uv_started && destination_fd >= 0 &&
+        dmabuf_cpu_sync(destination_fd,
+                        DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE);
+    bool copied = false;
+    if (destination_started) {
+        const uint8_t *y = mpp_buffer_get_ptr(surface->import_buf);
+        const uint8_t *uv = mpp_buffer_get_ptr(surface->import_chroma_buf);
+        uint8_t *destination = mpp_buffer_get_ptr(surface->priv_buf);
+        if (y && uv && destination) {
+            memset(destination, 0, destination_size);
+            for (int row = 0; row < surface->height; row++)
+                memcpy(destination + (size_t)row * destination_pitch,
+                       y + (size_t)row * surface->import_pitch, row_bytes);
+            uint8_t *destination_uv =
+                destination + destination_pitch *
+                                  (size_t)(unsigned int)surface->vstride;
+            for (int row = 0; row < surface->height / 2; row++)
+                memcpy(destination_uv + (size_t)row * destination_pitch,
+                       uv + (size_t)row * surface->import_chroma_pitch,
+                       row_bytes);
+            copied = true;
+        }
+    }
+    bool sync_ok = true;
+    if (destination_started)
+        sync_ok &= dmabuf_cpu_sync(destination_fd,
+                                   DMA_BUF_SYNC_END |
+                                       DMA_BUF_SYNC_WRITE);
+    if (uv_started)
+        sync_ok &= dmabuf_cpu_sync(surface->import_chroma_fd,
+                                   DMA_BUF_SYNC_END |
+                                       DMA_BUF_SYNC_READ);
+    if (y_started)
+        sync_ok &= dmabuf_cpu_sync(surface->import_fd,
+                                   DMA_BUF_SYNC_END |
+                                       DMA_BUF_SYNC_READ);
+    if (copied && sync_ok)
+        LOG("surface: normalized two-object %s %dx%d into contiguous "
+            "stride=%dx%d", p010 ? "P010" : "NV12", surface->width,
+            surface->height, surface->hstride, surface->vstride);
+    return copied && sync_ok;
 }
 
 /* vaCreateSurfaces (old API, redirected) */
@@ -530,14 +669,17 @@ VAStatus rk_GetImage(VADriverContextP ctx, VASurfaceID surface_id,
     }
 
     pthread_mutex_lock(&s->lock);
-    MppBuffer source_buffer = s->import_buf ? s->import_buf
+    bool normalized = !s->imported_multiplane ||
+                      rk_surface_normalize_multiplane_import(s);
+    MppBuffer source_buffer = s->imported_multiplane ? s->priv_buf
+                            : s->import_buf ? s->import_buf
                             : s->backing_buf ? s->backing_buf
                             : s->frame ? mpp_frame_get_buffer(s->frame)
                             : s->priv_buf;
     bool full_frame = x == 0 && y == 0 && w == (unsigned int)s->width &&
                       h == (unsigned int)s->height &&
                       image->width >= w && image->height >= h;
-    if (!source_buffer || !full_frame) {
+    if (!normalized || !source_buffer || !full_frame) {
         pthread_mutex_unlock(&s->lock);
         rk_object_unref(&image->base);
         rk_object_unref(&s->base);

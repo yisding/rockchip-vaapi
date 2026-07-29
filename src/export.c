@@ -6,6 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <drm/drm_fourcc.h>
 #include <va/va_drmcommon.h>
 
 #include "convert.h"
@@ -50,6 +51,68 @@ VAStatus rk_ExportSurfaceHandle(VADriverContextP context, VASurfaceID id,
     }
 
     pthread_mutex_lock(&surface->lock);
+    bool imported_multiplane = surface->imported_multiplane;
+    if (imported_multiplane) {
+        int y_fd = dup(surface->import_fd);
+        int uv_fd = dup(surface->import_chroma_fd);
+        size_t y_size = surface->import_size;
+        size_t uv_size = surface->import_chroma_size;
+        uint32_t y_pitch = surface->import_pitch;
+        uint32_t uv_pitch = surface->import_chroma_pitch;
+        bool is_10bit = MPP_FRAME_FMT_IS_YUV_10BIT(surface->fmt);
+        int width = surface->width;
+        int height = surface->height;
+        pthread_mutex_unlock(&surface->lock);
+        if (y_fd < 0 || uv_fd < 0 || y_size > UINT32_MAX ||
+            uv_size > UINT32_MAX) {
+            if (y_fd >= 0)
+                close(y_fd);
+            if (uv_fd >= 0)
+                close(uv_fd);
+            rk_object_unref(&surface->base);
+            return VA_STATUS_ERROR_ALLOCATION_FAILED;
+        }
+
+        VADRMPRIMESurfaceDescriptor *desc = descriptor;
+        memset(desc, 0, sizeof(*desc));
+        desc->fourcc = is_10bit ? VA_FOURCC_P010 : VA_FOURCC_NV12;
+        desc->width = (uint32_t)width;
+        desc->height = (uint32_t)height;
+        desc->num_objects = 2;
+        desc->objects[0].fd = y_fd;
+        desc->objects[0].size = (uint32_t)y_size;
+        desc->objects[1].fd = uv_fd;
+        desc->objects[1].size = (uint32_t)uv_size;
+        bool composed =
+            (flags & VA_EXPORT_SURFACE_COMPOSED_LAYERS) != 0;
+        if (composed) {
+            desc->num_layers = 1;
+            desc->layers[0].drm_format =
+                is_10bit ? DRM_FORMAT_P010 : DRM_FORMAT_NV12;
+            desc->layers[0].num_planes = 2;
+            desc->layers[0].object_index[0] = 0;
+            desc->layers[0].pitch[0] = y_pitch;
+            desc->layers[0].object_index[1] = 1;
+            desc->layers[0].pitch[1] = uv_pitch;
+        } else {
+            desc->num_layers = 2;
+            desc->layers[0].drm_format =
+                is_10bit ? DRM_FORMAT_R16 : DRM_FORMAT_R8;
+            desc->layers[0].num_planes = 1;
+            desc->layers[0].object_index[0] = 0;
+            desc->layers[0].pitch[0] = y_pitch;
+            desc->layers[1].drm_format =
+                is_10bit ? DRM_FORMAT_GR1616 : DRM_FORMAT_GR88;
+            desc->layers[1].num_planes = 1;
+            desc->layers[1].object_index[0] = 1;
+            desc->layers[1].pitch[0] = uv_pitch;
+        }
+        LOG("ExportSurfaceHandle: two-object surface=0x%x %dx%d "
+            "pitch=%u/%u 10bit=%d", id, width, height, y_pitch,
+            uv_pitch, is_10bit);
+        rk_object_unref(&surface->base);
+        return VA_STATUS_SUCCESS;
+    }
     MppBuffer active_buffer = surface->import_buf ? surface->import_buf
                             : surface->backing_buf ? surface->backing_buf
                             : surface->frame ? mpp_frame_get_buffer(surface->frame)

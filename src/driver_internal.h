@@ -133,6 +133,10 @@ typedef struct {
     bool has_enc_seq;
     bool has_enc_pic;
     bool has_enc_slice;
+    uint32_t enc_slice_count;
+    uint32_t enc_slice_units;
+    uint32_t enc_slice_unit_span;
+    uint32_t enc_slice_last_units;
     uint32_t enc_bitrate;
     uint32_t enc_fps_num;
     uint32_t enc_fps_den;
@@ -160,8 +164,13 @@ struct RKSurface {
     int import_fd;
     size_t import_size;
     uint32_t import_pitch;
+    MppBuffer import_chroma_buf;
+    int import_chroma_fd;
+    size_t import_chroma_size;
+    uint32_t import_chroma_pitch;
     uint32_t import_drm_format;
     bool imported_rgb;
+    bool imported_multiplane;
     /* The application declared this surface as encoder input. Its content is
      * written through the checked vaPutImage path, never read back as decoded
      * pixels, so it must not be exposed through vaDeriveImage. */

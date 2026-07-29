@@ -36,6 +36,7 @@ UNIT_TESTS := tests/object_heap_test tests/frame_layout_test tests/h264_test \
 	tests/hevc_test tests/vp9_test tests/log_test
 HARDWARE_TESTS := tests/driver_objects_test
 RGB_ENCODE_TEST := tests/va_rgb_dmabuf_encode
+MULTIPLANE_ENCODE_TEST := tests/va_multiplane_dmabuf_encode
 HEVC_MPP_REPRO := tests/hevc_mpp_repro
 HEVC_SWEEP_MANIFEST := tests/hevc-sweep-vectors.tsv
 HEVC_SWEEP_DIR := tests/vectors/hevc-sweep
@@ -201,6 +202,9 @@ check-hevc-main10-hdr-experimental: $(TARGET) test
 check-vp9-profile2-experimental: $(TARGET) test
 	tests/check-vp9-profile2.sh
 
+check-10bit-throughput-experimental: $(TARGET) test
+	tests/check-10bit-throughput.sh
+
 check-gstreamer-va: $(TARGET) test
 	tests/check-gstreamer-va.sh
 
@@ -241,6 +245,27 @@ check-rgb-dmabuf-encode-experimental-sanitize: sanitize $(RGB_ENCODE_TEST)
 	UBSAN_OPTIONS=halt_on_error=1 \
 	DRIVER_DIR="$(abspath $(SAN_DIR))" tests/check-rgb-dmabuf-encode.sh
 
+check-multiplane-dmabuf-encode-experimental: $(TARGET) \
+		$(MULTIPLANE_ENCODE_TEST)
+	tests/check-multiplane-dmabuf-encode.sh
+
+check-multiplane-dmabuf-encode-experimental-sanitize: sanitize \
+		$(MULTIPLANE_ENCODE_TEST)
+	LD_PRELOAD="$(shell $(CC) -print-file-name=libasan.so)" \
+	ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
+	UBSAN_OPTIONS=halt_on_error=1 \
+	DRIVER_DIR="$(abspath $(SAN_DIR))" \
+		tests/check-multiplane-dmabuf-encode.sh
+
+check-multislice-encode-experimental: $(TARGET)
+	tests/check-multislice-encode.sh
+
+check-multislice-encode-experimental-sanitize: sanitize
+	LD_PRELOAD="$(shell $(CC) -print-file-name=libasan.so)" \
+	ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
+	UBSAN_OPTIONS=halt_on_error=1 \
+	DRIVER_DIR="$(abspath $(SAN_DIR))" tests/check-multislice-encode.sh
+
 check-webrtc-rtp-experimental: $(TARGET) test
 	tests/check-webrtc-rtp.sh
 
@@ -270,6 +295,25 @@ check-encode-soak-experimental-sanitize: sanitize
 
 check-encode-decode-concurrent: $(TARGET) test
 	tests/check-encode-decode-concurrent.sh
+
+check-encode-decode-same-process: $(TARGET) test
+	tests/check-encode-decode-same-process.sh
+
+check-encode-decode-same-process-sanitize: sanitize test
+	LD_PRELOAD="$(shell $(CC) -print-file-name=libasan.so)" \
+	ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
+	UBSAN_OPTIONS=halt_on_error=1 \
+	HW_LD_PRELOAD="$(shell $(CC) -print-file-name=libasan.so)" \
+	DRIVER_DIR="$(abspath $(SAN_DIR))" \
+		tests/check-encode-decode-same-process.sh
+
+check-encode-decode-same-process-tsan: $(TSAN_TARGET) test
+	TSAN_OPTIONS=halt_on_error=1 \
+	HW_LD_PRELOAD="$(shell $(CC) -print-file-name=libtsan.so)" \
+	SAME_PROCESS_DECODE_OUTPUT_MODE=discard \
+	SAME_PROCESS_GRAPH_MODE=simple \
+	DRIVER_DIR="$(abspath $(TSAN_DIR))" \
+		tests/check-encode-decode-same-process.sh
 
 check-synthetic: $(TARGET) test
 	TEST_SET=synthetic tests/validate.sh
@@ -316,6 +360,11 @@ tests/driver_objects_test: tests/driver_objects_test.c $(SRCS) \
 $(RGB_ENCODE_TEST): tests/va_rgb_dmabuf_encode.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(VA_CFLAGS) $(MPP_CFLAGS) \
 		tests/va_rgb_dmabuf_encode.c $(VA_CLIENT_LIBS) \
+		$(MPP_LIBS) -o $@
+
+$(MULTIPLANE_ENCODE_TEST): tests/va_multiplane_dmabuf_encode.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(VA_CFLAGS) $(MPP_CFLAGS) \
+		tests/va_multiplane_dmabuf_encode.c $(VA_CLIENT_LIBS) \
 		$(MPP_LIBS) -o $@
 
 check-driver-objects: $(HARDWARE_TESTS)
@@ -516,8 +565,8 @@ lint:
 
 clean:
 	rm -f $(OBJS) $(SAN_OBJS) $(TSAN_OBJS) $(TARGET) $(UNIT_TESTS) $(SAN_TESTS) \
-		$(TSAN_TESTS) $(HARDWARE_TESTS) $(RGB_ENCODE_TEST) $(HEVC_MPP_REPRO) \
-		$(AV1_MPP_CAPS) \
+		$(TSAN_TESTS) $(HARDWARE_TESTS) $(RGB_ENCODE_TEST) \
+		$(MULTIPLANE_ENCODE_TEST) $(HEVC_MPP_REPRO) $(AV1_MPP_CAPS) \
 		tests/driver_objects_test.san \
 		tests/driver_objects_test.tsan
 	rm -rf $(SAN_DIR) $(TSAN_DIR) $(FUZZ_DIR)
@@ -531,16 +580,23 @@ clean:
 	check-hevc-main10-narrow-fallback \
 	probe-mpp-main10-encode probe-av1-platform \
 	check-hevc-main10-experimental check-hevc-main10-hdr-experimental \
-	check-vp9-profile2-experimental check-gstreamer-va \
-	check-vlc-display check-firefox-decode \
+	check-vp9-profile2-experimental check-10bit-throughput-experimental \
+	check-gstreamer-va \
+	check-vlc-display check-mpv-display check-firefox-decode \
 	check-h264-encode-experimental check-h264-encode-experimental-sanitize \
 	check-hevc-encode-experimental check-hevc-encode-experimental-sanitize \
 	check-rgb-dmabuf-encode-experimental \
 	check-rgb-dmabuf-encode-experimental-sanitize \
+	check-multiplane-dmabuf-encode-experimental \
+	check-multiplane-dmabuf-encode-experimental-sanitize \
+	check-multislice-encode-experimental \
+	check-multislice-encode-experimental-sanitize \
 	check-webrtc-rtp-experimental check-webrtc-rtp-experimental-sanitize \
 	check-webrtc-peer-experimental check-webrtc-peer-experimental-sanitize \
 	check-encode-soak-experimental check-encode-soak-experimental-sanitize \
-	check-encode-decode-concurrent \
+	check-encode-decode-concurrent check-encode-decode-same-process \
+	check-encode-decode-same-process-sanitize \
+	check-encode-decode-same-process-tsan \
 	check-safe check-zero-copy check-zero-copy-sanitize \
 	check-concurrent-decode check-concurrent-decode-sanitize \
 	check-concurrent-decode-tsan check-soak test test-valgrind test-sanitize sanitize \

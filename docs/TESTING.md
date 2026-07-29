@@ -202,16 +202,26 @@ make probe-av1-platform
 FFMPEG=/usr/bin/ffmpeg make check-hevc-main10-experimental
 FFMPEG=/usr/bin/ffmpeg make check-hevc-main10-hdr-experimental
 FFMPEG=/usr/bin/ffmpeg make check-vp9-profile2-experimental
+FFMPEG=/usr/bin/ffmpeg make check-10bit-throughput-experimental
 FFMPEG=/usr/bin/ffmpeg make check-gstreamer-va
 FFMPEG=/usr/bin/ffmpeg make check-vlc-display
 FFMPEG=/usr/bin/ffmpeg make check-mpv-display
 FFMPEG=/usr/bin/ffmpeg make check-firefox-decode
+FIREFOX=/path/to/patched/firefox FIREFOX_RDD_SANDBOX=enabled \
+  FFMPEG=/usr/bin/ffmpeg make check-firefox-decode
 FFMPEG=/usr/bin/ffmpeg make check-h264-encode-experimental
 FFMPEG=/usr/bin/ffmpeg make check-hevc-encode-experimental
+FFMPEG=/usr/bin/ffmpeg make check-multiplane-dmabuf-encode-experimental
+FFMPEG=/usr/bin/ffmpeg make check-multiplane-dmabuf-encode-experimental-sanitize
+FFMPEG=/usr/bin/ffmpeg make check-multislice-encode-experimental
+FFMPEG=/usr/bin/ffmpeg make check-multislice-encode-experimental-sanitize
 FFMPEG=/usr/bin/ffmpeg make check-webrtc-rtp-experimental
 FFMPEG=/usr/bin/ffmpeg make check-webrtc-peer-experimental
 make check-encode-soak-experimental
 FFMPEG=/usr/bin/ffmpeg make check-encode-decode-concurrent
+FFMPEG=/usr/bin/ffmpeg make check-encode-decode-same-process
+FFMPEG=/usr/bin/ffmpeg make check-encode-decode-same-process-sanitize
+FFMPEG=/usr/bin/ffmpeg make check-encode-decode-same-process-tsan
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-conformance
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-sanitize
 ```
@@ -297,8 +307,17 @@ original-stream VUI/SEI metadata survives the VA hardware-frame path even
 though the private SPS reconstructed for MPP has no VUI. It does not replace
 the Firefox/mpv display-presentation gate.
 
-`check-vlc-display` plays generated H.264 High and HEVC Main clips through
-stock VLC with `--avcodec-hw=vaapi` and requires that VLC select its VA-API
+`check-10bit-throughput-experimental` generates 240-frame 1920x1080 HEVC
+Main10 and VP9 Profile 2 streams, downloads P010, and times the complete
+VA-API decode plus AFBC-to-RGA conversion path. It requires at least 60 fps,
+exact visible-frame count, no linear 10-bit fallback, and one audited
+conversion per decoded output. HEVC requires exactly 240 decoded frames; VP9
+allows additional hidden/reference outputs but requires conversions and
+assigned frames to match. The measured runs are 261.38 fps for HEVC (240
+visible/decoded) and 261.08 fps for VP9 (240 visible, 254 decoded).
+
+`check-vlc-display` plays generated H.264 High, HEVC Main, and HEVC Main10
+clips through stock VLC with `--avcodec-hw=vaapi` and requires that VLC select its VA-API
 hardware decoder, name this driver, call `vaDeriveImage`, and produce at least
 `MIN_FRAMES` external-pool frames with no driver error markers. It refuses to
 run without `DISPLAY` or `WAYLAND_DISPLAY`: headless VLC reports "no hw decoder
@@ -311,16 +330,19 @@ implements `vaDeriveImage` over the surface's own DMA-BUF and
 `vaAcquireBufferHandle` over that buffer; `tests/driver_objects_test` covers
 the layout, the aliasing (a write through the mapping is visible through a
 second map), the DRM PRIME handle, and the refusal of other memory types,
-normally and under ASan/UBSan and TSan.
+normally and under ASan/UBSan and TSan. Completed driver-owned P010 and an
+aligned provisional P010 converter probe are accepted; imported, stale, or
+unaligned provisional P010 layouts fail closed. The measured display run
+produces 118 H.264, 120 HEVC Main, and 120 HEVC Main10 external frames.
 
 VLC destroys its decoder mid-stream at exit with the last pictures still in
 flight. The driver reports that as a teardown-drain note and fails those
 fences rather than waiting forever; it is not an error and the gate does not
 treat it as one.
 
-`check-mpv-display` generates 20 H.264 High CIF frames at 352x288 and plays
-the complete clip through stock mpv 0.41.0 with `--hwdec=vaapi`, gpu-next,
-OpenGL, and the active Wayland context. It requires VA-API hardware decode,
+`check-mpv-display` first generates 20 H.264 High CIF frames at 352x288 and
+plays the complete clip through stock mpv 0.41.0 with `--hwdec=vaapi`,
+gpu-next, OpenGL, and the active Wayland context. It requires VA-API hardware decode,
 the VAAPI NV12 video-output path, exactly one MPP info-change, at least 20
 external-pool frames, and at least 20 352-to-384-byte RGA repacks. It rejects
 Panfrost's `WSI pitch not properly aligned`, EGL mapping/import failures,
@@ -332,20 +354,45 @@ copy: MPP still decodes into its external pool, layouts already aligned to 64
 bytes stay zero-copy through export, and only decoded driver-owned 8-bit NV12
 surfaces with an incompatible pitch are repacked once per surface fence.
 `tests/driver_objects_test` independently fills 352-stride NV12 luma/chroma,
-repacks to 384 stride, and compares every active output byte. The mpv result is
-an 8-bit presentation slice; 10-bit and HDR presentation remain open.
+repacks to 384 stride, and compares every active output byte. The gate then
+plays a generated HEVC Main10 HDR10 clip and requires VA-API P010 output,
+BT.2020/PQ input metadata, one AFBC conversion per frame, and successful EGL
+presentation. Passing this proves the HDR-tagged P010 presentation path, not
+physical HDR-monitor passthrough. The current GNOME session has no Wayland
+`wl_output`; Mutter's `GetCurrentState` also returns empty physical-monitor
+and logical-monitor arrays. The expanded gate is therefore
+environment-blocked before either case; the earlier 8-bit H.264 result remains
+the last completed mpv evidence.
 
-`check-firefox-decode` plays generated H.264 High and HEVC Main clips in stock
-Firefox with a throwaway profile and requires at least `MIN_FRAMES` external
-frames plus DMA-BUF exports, with no driver error markers. Like the VLC gate it
-refuses to run headless.
+`check-firefox-decode` selects H.264 High, HEVC Main, and/or HEVC Main10
+through `FIREFOX_CASES` and plays them in stock Firefox with a throwaway
+profile. It requires at least `MIN_FRAMES` external frames plus DMA-BUF
+exports, with no driver error markers. `KEEP_WORK=1` preserves the exact page,
+media, browser log, and driver log for boundary diagnosis. Like the VLC gate
+it refuses to run headless.
 
-It runs with `MOZ_DISABLE_RDD_SANDBOX=1` and says so in its own output. The
-stock Firefox binary cannot reach `/dev/mpp_service`, `/dev/rga` or
-`/dev/dma_heap` from a sandboxed RDD process; `contrib/firefox` holds a source
-patch that adds exactly those broker paths and ioctls, but it has to be applied
-to a Firefox source build. This gate therefore proves the decode and export
-path, not the sandbox story.
+By default it runs with `MOZ_DISABLE_RDD_SANDBOX=1` and says so in its own
+output. The stock Firefox binary cannot reach `/dev/mpp_service`, `/dev/rga`
+or `/dev/dma_heap` from a sandboxed RDD process; `contrib/firefox` holds
+version-pinned 152.0.6 and 153.0 source patches that add exactly those broker
+paths and ioctls, but they have to be applied to a Firefox source build. The
+default mode therefore proves the decode and export path, not the sandbox
+story. `FIREFOX_RDD_SANDBOX=enabled` instead removes the bypass and requires
+the live RDD process to be present with Linux seccomp filter mode 2 before the
+hardware evidence can pass. For Main10 it also enables Firefox's `Dmabuf` log
+and requires the measured Panfrost `EGL_BAD_MATCH` followed by the patched
+one-shot swapped-chroma retry.
+
+Stock Firefox 153 completes the H.264 and HEVC Main cases. Its Main10 case
+exports the standards-correct split P010 descriptor and reaches three hardware
+frames before falling back: Firefox creates the luma `R16` EGL image, then
+Panfrost rejects the chroma `GR1616` image with `EGL_BAD_MATCH`. The companion
+P010 patches preserve that first attempt and retry Firefox's existing RG/GR
+alternative once after a real creation failure. `check-firefox-rdd-patch`
+hash-pins all three relevant upstream files per version, applies both the RDD
+and P010 patches, and checks the retry contract. Source application and the
+152.0.6 release-object compile pass; the full package/sandboxed playback result
+is tracked separately.
 
 Chromium is not gated. On this stack Chromium 150 cannot initialize a GL
 context at all -- ANGLE reports "Could not create a backing OpenGL context" on
@@ -407,7 +454,22 @@ conversions, 48 MPP packets, standard FFmpeg decode, and at least 30 dB against
 a software BGRA-to-YUV reference. The measured normal and full-driver
 ASan/UBSan runs both produce 48/48 frames at 37.140921 dB. The object gate
 separately checks fd lifetime, re-export identity, and rejection of VA-managed
-RGB and multi-object descriptors.
+RGB and multi-object RGB descriptors.
+
+`check-multiplane-dmabuf-encode-experimental` imports linear NV12 with
+separate luma and chroma DMA-BUF objects through public libva, closes the
+application fds, and encodes 48 H.264 High frames. It requires an accurate
+two-object re-export, one private normalization per frame, 48 MPP packets,
+standard decode, and at least 40 dB against the reference; the measured result
+is 50.683977 dB normally and under ASan/UBSan. Object tests cover the same
+contract for P010 and reject too-small objects, nonzero plane offsets, and
+non-linear modifiers.
+
+`check-multislice-encode-experimental` supplies four contiguous equal-row
+slices per H.264 macroblock picture and HEVC CTU picture. It requires 12
+complete frames per codec, exactly four parser-visible slices per frame,
+standard decoder acceptance, and driver audit of the requested MPP row split.
+The sanitizer target repeats both paths with the full ASan/UBSan driver.
 
 `check-webrtc-rtp-experimental` runs 120 direct-I420 H.264 frames through
 `vah264enc`, `h264parse`, RTP payload/depay, and standard software decode. It
@@ -447,16 +509,26 @@ GStreamer pipelines at 30 fps for two hours by default. It samples combined
 RSS/fd counts from the actual pipeline processes after warmup, requires bounded
 span and no sustained growth, and audits exactly one MPP packet plus at least
 one I420-to-NV12 upload per frame for both codecs. Shorter
-`ENCODE_SOAK_SECONDS` values are explicitly smoke-only. The measured 60-second
-normal smoke completed 1,800 frames per codec with 0 KiB post-warmup RSS span
-and zero fd growth; a 30-second ASan/UBSan smoke completed 900 frames per
-codec. The gate also covers HEVC's visible 640x360 surface with an aligned
+`ENCODE_SOAK_SECONDS` values are explicitly smoke-only. The qualification run
+completed the full 7,200 seconds and 216,000 frames per codec. Combined RSS
+moved from 56,328 to 52,708 KiB with a 3,620 KiB total span and no growth; fd
+count remained exactly 60. A 30-second ASan/UBSan smoke completed 900 frames
+per codec. The gate also covers HEVC's visible 640x360 surface with an aligned
 640x368 VA context.
 
 `check-encode-decode-concurrent` runs 96-frame versions of both encoder gates
 in parallel with the shipping synthetic decode matrix. It requires all three
 processes to complete, providing a board-level overlap check between two MPP
 encoder contexts and independent H.264/VP9 decode contexts.
+
+`check-encode-decode-same-process` tightens that claim by creating two
+hardware decoders and two hardware encoders in one public-libav process. Each
+context must complete 120 frames, both decode workers must overlap, and both
+encoders must emit 120 packets. Normal and ASan/UBSan runs retain shared filter
+graphs and compare downloaded files. The TSan target uses independent simple
+graphs, separate encode sources, and direct raw decode sinks so uninstrumented
+libavfilter races do not mask driver races; it uses no TSan suppressions. All
+three variants pass.
 
 `make probe-mpp-main10-encode` is a bounded, libva-free diagnostic for the
 current HEVC Main10 encoder blocker. It configures MPP format id 1 with the
@@ -481,7 +553,8 @@ all five typed handle namespaces and stale-handle rejection, and creates nine
 simultaneous MPP decode contexts. It also checks immediate success for NV12
 and P010 placeholder surfaces, validates composed P010 and split R16/GR1616
 descriptors before decode, validates byte-exact linear P010 PRIME import and
-readback plus packed-RGB PRIME import/re-export and owned-fd lifetime, verifies
+readback in one- and two-object layouts plus packed-RGB PRIME import/re-export
+and owned-fd lifetime, verifies
 NV12/P010 `PutImage`/`GetImage` byte equality and coded-buffer segment mapping,
 rejects inconsistent RT/pixel formats, checks zero-timeout behavior for a
 pending fence, and checks failure signaling when that fence's context is
@@ -599,6 +672,15 @@ RGA submissions and zero kernel `no core match` messages. The complete pinned
 conformance gate then passed, including the guarded VP9 hidden-reference
 vector. These are installed-package correctness results; they do not substitute
 for a genuinely clean-image install or the two-hour resource soaks.
+
+The final `1.0.11+ysp6` driver/config packages build with the native Debian
+toolchain and pass Lintian plus the isolated clean install, upgrade, config
+purge, reinstall, and full-purge lifecycle. Against checksum-verified exact
+Published MPP `3381fd2c` and FFmpeg `33a651a55b` binaries, the complete
+risky-enabled shipping matrix is also green with the full ASan/UBSan driver:
+all pinned vectors, the H.264 reference/B-frame and 4K matrix, five VP9
+determinism runs, and VP8 software fallback. This is exact-package correctness
+evidence; host installation and installed-payload identity remain separate.
 
 On 2026-07-21, this board was booted into fixed kernel build `#3`, identified
 by kernel-notes SHA-256

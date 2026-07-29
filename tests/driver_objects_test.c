@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "convert.h"
+#include "driver_internal.h"
 
 extern VAStatus __vaDriverInit_1_20(VADriverContextP ctx);
 
@@ -85,14 +86,19 @@ static void test_experimental_h264_encode(struct VADriverVTable *v,
         { .type = VAConfigAttribRateControl },
         { .type = VAConfigAttribEncPackedHeaders },
         { .type = VAConfigAttribEncMaxSlices },
+        { .type = VAConfigAttribEncSliceStructure },
     };
     CHECK_STATUS(v->vaGetConfigAttributes(
                      ctx, VAProfileH264High, VAEntrypointEncSlice,
-                     attrs, 4), VA_STATUS_SUCCESS);
+                     attrs, 5), VA_STATUS_SUCCESS);
     if (attrs[0].value != VA_RT_FORMAT_YUV420 ||
         attrs[1].value != (VA_RC_CQP | VA_RC_CBR | VA_RC_VBR) ||
         attrs[2].value != VA_ENC_PACKED_HEADER_NONE ||
-        attrs[3].value != 1) {
+        attrs[3].value != 270 ||
+        attrs[4].value !=
+            (VA_ENC_SLICE_STRUCTURE_POWER_OF_TWO_ROWS |
+             VA_ENC_SLICE_STRUCTURE_EQUAL_ROWS |
+             VA_ENC_SLICE_STRUCTURE_EQUAL_MULTI_ROWS)) {
         fputs("experimental H.264 encode attributes are invalid\n", stderr);
         exit(1);
     }
@@ -205,17 +211,24 @@ static void test_experimental_hevc_encode(struct VADriverVTable *v,
         { .type = VAConfigAttribRateControl },
         { .type = VAConfigAttribEncHEVCFeatures },
         { .type = VAConfigAttribEncHEVCBlockSizes },
+        { .type = VAConfigAttribEncMaxSlices },
+        { .type = VAConfigAttribEncSliceStructure },
     };
     CHECK_STATUS(v->vaGetConfigAttributes(
                      ctx, VAProfileHEVCMain, VAEntrypointEncSlice,
-                     attrs, 4), VA_STATUS_SUCCESS);
+                     attrs, 6), VA_STATUS_SUCCESS);
     block_sizes.value = attrs[3].value;
     if (attrs[0].value != VA_RT_FORMAT_YUV420 ||
         attrs[1].value != (VA_RC_CQP | VA_RC_CBR | VA_RC_VBR) ||
         attrs[2].value != 0 ||
         block_sizes.bits.log2_max_coding_tree_block_size_minus3 != 3 ||
         block_sizes.bits.log2_min_coding_tree_block_size_minus3 != 3 ||
-        block_sizes.bits.log2_min_luma_coding_block_size_minus3 != 0) {
+        block_sizes.bits.log2_min_luma_coding_block_size_minus3 != 0 ||
+        attrs[4].value != 68 ||
+        attrs[5].value !=
+            (VA_ENC_SLICE_STRUCTURE_POWER_OF_TWO_ROWS |
+             VA_ENC_SLICE_STRUCTURE_EQUAL_ROWS |
+             VA_ENC_SLICE_STRUCTURE_EQUAL_MULTI_ROWS)) {
         fputs("experimental HEVC encode attributes are invalid\n", stderr);
         exit(1);
     }
@@ -736,6 +749,7 @@ static void test_surfaces(struct VADriverVTable *v, VADriverContextP ctx,
         },
     };
     VASurfaceID p010_surface;
+    VASurfaceID aligned_p010_surface;
     VASurfaceID rejected_p010_surface;
     CHECK_STATUS(v->vaCreateSurfaces2(
                      ctx, VA_RT_FORMAT_YUV420_10, 15, 16,
@@ -745,6 +759,12 @@ static void test_surfaces(struct VADriverVTable *v, VADriverContextP ctx,
                      ctx, VA_RT_FORMAT_YUV420_10, 16, 16, &p010_surface, 1,
                      &p010_format, 1),
                  VA_STATUS_SUCCESS);
+    CHECK_STATUS(v->vaCreateSurfaces2(
+                     ctx, VA_RT_FORMAT_YUV420_10, 128, 16,
+                     &aligned_p010_surface, 1, &p010_format, 1),
+                 VA_STATUS_SUCCESS);
+    const uint32_t p010_pitch = 16u * 2u;
+    const size_t p010_size = p010_pitch * 16u * 3u / 2u;
 
     CHECK_STATUS(v->vaMapBuffer(ctx, images[1].buf, (void **)&upload),
                  VA_STATUS_SUCCESS);
@@ -766,6 +786,81 @@ static void test_surfaces(struct VADriverVTable *v, VADriverContextP ctx,
     }
     CHECK_STATUS(v->vaUnmapBuffer(ctx, images[3].buf), VA_STATUS_SUCCESS);
     CHECK_STATUS(v->vaUnmapBuffer(ctx, images[1].buf), VA_STATUS_SUCCESS);
+
+    VAImage derived_p010;
+    CHECK_STATUS(v->vaDeriveImage(ctx, p010_surface, &derived_p010),
+                 VA_STATUS_ERROR_OPERATION_FAILED);
+    VAImage provisional_p010;
+    CHECK_STATUS(v->vaDeriveImage(ctx, aligned_p010_surface,
+                                 &provisional_p010), VA_STATUS_SUCCESS);
+    if (provisional_p010.format.fourcc != VA_FOURCC_P010 ||
+        provisional_p010.num_planes != 2 ||
+        provisional_p010.pitches[0] != 256 ||
+        provisional_p010.pitches[1] != 256 ||
+        provisional_p010.offsets[1] != 256u * 16u ||
+        provisional_p010.data_size != 256u * 16u * 3u / 2u) {
+        fputs("aligned provisional P010 derived layout is invalid\n", stderr);
+        exit(1);
+    }
+    RKSurface *provisional_surface =
+        surface_acquire(drv_from_ctx(ctx), aligned_p010_surface);
+    if (!provisional_surface) {
+        fputs("failed to acquire provisional P010 surface\n", stderr);
+        exit(1);
+    }
+    pthread_mutex_lock(&provisional_surface->lock);
+    provisional_surface->hstride = 192;
+    pthread_mutex_unlock(&provisional_surface->lock);
+    CHECK_STATUS(v->vaMapBuffer(ctx, provisional_p010.buf, (void **)&download),
+                 VA_STATUS_ERROR_OPERATION_FAILED);
+    pthread_mutex_lock(&provisional_surface->lock);
+    provisional_surface->hstride = 128;
+    pthread_mutex_unlock(&provisional_surface->lock);
+    rk_object_unref(&provisional_surface->base);
+    CHECK_STATUS(v->vaDestroyImage(ctx, provisional_p010.image_id),
+                 VA_STATUS_SUCCESS);
+    RKSurface *completed_p010 =
+        surface_acquire(drv_from_ctx(ctx), p010_surface);
+    if (!completed_p010) {
+        fputs("failed to acquire P010 surface for completed-decode test\n",
+              stderr);
+        exit(1);
+    }
+    pthread_mutex_lock(&completed_p010->lock);
+    completed_p010->decoded = true;
+    pthread_mutex_unlock(&completed_p010->lock);
+    rk_object_unref(&completed_p010->base);
+    CHECK_STATUS(v->vaDeriveImage(ctx, p010_surface, &derived_p010),
+                 VA_STATUS_SUCCESS);
+    if (derived_p010.format.fourcc != VA_FOURCC_P010 ||
+        derived_p010.num_planes != 2 ||
+        derived_p010.pitches[0] != p010_pitch ||
+        derived_p010.pitches[1] != p010_pitch ||
+        derived_p010.offsets[1] != p010_pitch * 16u ||
+        derived_p010.data_size != p010_size) {
+        fputs("completed P010 derived image layout is invalid\n", stderr);
+        exit(1);
+    }
+    CHECK_STATUS(v->vaMapBuffer(ctx, derived_p010.buf, (void **)&download),
+                 VA_STATUS_SUCCESS);
+    CHECK_STATUS(v->vaUnmapBuffer(ctx, derived_p010.buf), VA_STATUS_SUCCESS);
+    completed_p010 = surface_acquire(drv_from_ctx(ctx), p010_surface);
+    if (!completed_p010) {
+        fputs("failed to reacquire P010 surface for stale-layout test\n",
+              stderr);
+        exit(1);
+    }
+    pthread_mutex_lock(&completed_p010->lock);
+    completed_p010->hstride = 32;
+    pthread_mutex_unlock(&completed_p010->lock);
+    CHECK_STATUS(v->vaMapBuffer(ctx, derived_p010.buf, (void **)&download),
+                 VA_STATUS_ERROR_OPERATION_FAILED);
+    pthread_mutex_lock(&completed_p010->lock);
+    completed_p010->hstride = 16;
+    pthread_mutex_unlock(&completed_p010->lock);
+    rk_object_unref(&completed_p010->base);
+    CHECK_STATUS(v->vaDestroyImage(ctx, derived_p010.image_id),
+                 VA_STATUS_SUCCESS);
 
     memset(&descriptor, 0, sizeof(descriptor));
     CHECK_STATUS(v->vaExportSurfaceHandle(
@@ -810,11 +905,11 @@ static void test_surfaces(struct VADriverVTable *v, VADriverContextP ctx,
     close(descriptor.objects[0].fd);
     CHECK_STATUS(v->vaDestroySurfaces(ctx, &p010_surface, 1),
                  VA_STATUS_SUCCESS);
+    CHECK_STATUS(v->vaDestroySurfaces(ctx, &aligned_p010_surface, 1),
+                 VA_STATUS_SUCCESS);
 
     MppBufferGroup p010_group = NULL;
     MppBuffer p010_buffer = NULL;
-    const uint32_t p010_pitch = 16u * 2u;
-    const size_t p010_size = p010_pitch * 16u * 3u / 2u;
     if (mpp_buffer_group_get_internal(&p010_group, MPP_BUFFER_TYPE_DRM) !=
             MPP_OK ||
         mpp_buffer_get(p010_group, &p010_buffer, p010_size) != MPP_OK) {
@@ -885,6 +980,9 @@ static void test_surfaces(struct VADriverVTable *v, VADriverContextP ctx,
                      ctx, VA_RT_FORMAT_YUV420_10, 16, 16,
                      &p010_surface, 1, p010_import_attributes, 3),
                  VA_STATUS_SUCCESS);
+    VAImage imported_derived;
+    CHECK_STATUS(v->vaDeriveImage(ctx, p010_surface, &imported_derived),
+                 VA_STATUS_ERROR_OPERATION_FAILED);
     close(p010_application_fd);
     CHECK_STATUS(v->vaGetImage(ctx, p010_surface, 0, 0, 16, 16,
                               images[3].image_id), VA_STATUS_SUCCESS);
@@ -910,6 +1008,100 @@ static void test_surfaces(struct VADriverVTable *v, VADriverContextP ctx,
     close(descriptor.objects[0].fd);
     CHECK_STATUS(v->vaDestroySurfaces(ctx, &p010_surface, 1),
                  VA_STATUS_SUCCESS);
+
+    MppBuffer p010_y_buffer = NULL;
+    MppBuffer p010_uv_buffer = NULL;
+    const size_t p010_y_size = p010_pitch * 16u;
+    const size_t p010_uv_size = p010_pitch * 8u;
+    if (mpp_buffer_get(p010_group, &p010_y_buffer, p010_y_size) != MPP_OK ||
+        mpp_buffer_get(p010_group, &p010_uv_buffer, p010_uv_size) != MPP_OK) {
+        fputs("failed to allocate two-object P010 import buffers\n", stderr);
+        exit(1);
+    }
+    uint8_t *p010_y_bytes = mpp_buffer_get_ptr(p010_y_buffer);
+    uint8_t *p010_uv_bytes = mpp_buffer_get_ptr(p010_uv_buffer);
+    if (!p010_y_bytes || !p010_uv_bytes) {
+        fputs("failed to map two-object P010 import buffers\n", stderr);
+        exit(1);
+    }
+    for (size_t byte = 0; byte < p010_y_size; byte++)
+        p010_y_bytes[byte] = (uint8_t)(byte * 13u + 5u);
+    for (size_t byte = 0; byte < p010_uv_size; byte++)
+        p010_uv_bytes[byte] = (uint8_t)(byte * 31u + 9u);
+    int p010_y_fd = dup(mpp_buffer_get_fd(p010_y_buffer));
+    int p010_uv_fd = dup(mpp_buffer_get_fd(p010_uv_buffer));
+    if (p010_y_fd < 0 || p010_uv_fd < 0) {
+        perror("dup two-object P010");
+        exit(1);
+    }
+    p010_descriptor.num_objects = 2;
+    p010_descriptor.objects[0].fd = p010_y_fd;
+    p010_descriptor.objects[0].size = (uint32_t)p010_y_size;
+    p010_descriptor.objects[1].fd = p010_uv_fd;
+    p010_descriptor.objects[1].size = (uint32_t)p010_uv_size;
+    p010_descriptor.objects[1].drm_format_modifier =
+        DRM_FORMAT_MOD_LINEAR;
+    p010_descriptor.layers[0].object_index[1] = 1;
+    p010_descriptor.layers[0].offset[1] = 0;
+    p010_descriptor.objects[1].size = (uint32_t)p010_uv_size - 1u;
+    CHECK_STATUS(v->vaCreateSurfaces2(
+                     ctx, VA_RT_FORMAT_YUV420_10, 16, 16,
+                     &p010_surface, 1, p010_import_attributes, 3),
+                 VA_STATUS_ERROR_INVALID_PARAMETER);
+    p010_descriptor.objects[1].size = (uint32_t)p010_uv_size;
+    p010_descriptor.layers[0].offset[1] = 2;
+    CHECK_STATUS(v->vaCreateSurfaces2(
+                     ctx, VA_RT_FORMAT_YUV420_10, 16, 16,
+                     &p010_surface, 1, p010_import_attributes, 3),
+                 VA_STATUS_ERROR_INVALID_PARAMETER);
+    p010_descriptor.layers[0].offset[1] = 0;
+    p010_descriptor.objects[1].drm_format_modifier = 1;
+    CHECK_STATUS(v->vaCreateSurfaces2(
+                     ctx, VA_RT_FORMAT_YUV420_10, 16, 16,
+                     &p010_surface, 1, p010_import_attributes, 3),
+                 VA_STATUS_ERROR_INVALID_PARAMETER);
+    p010_descriptor.objects[1].drm_format_modifier =
+        DRM_FORMAT_MOD_LINEAR;
+    CHECK_STATUS(v->vaCreateSurfaces2(
+                     ctx, VA_RT_FORMAT_YUV420_10, 16, 16,
+                     &p010_surface, 1, p010_import_attributes, 3),
+                 VA_STATUS_SUCCESS);
+    close(p010_y_fd);
+    close(p010_uv_fd);
+    CHECK_STATUS(v->vaGetImage(ctx, p010_surface, 0, 0, 16, 16,
+                              images[3].image_id), VA_STATUS_SUCCESS);
+    CHECK_STATUS(v->vaMapBuffer(ctx, images[3].buf, (void **)&download),
+                 VA_STATUS_SUCCESS);
+    if (memcmp(p010_y_bytes, download, p010_y_size) != 0 ||
+        memcmp(p010_uv_bytes, download + p010_y_size,
+               p010_uv_size) != 0) {
+        fputs("two-object imported P010 readback changed bytes\n", stderr);
+        exit(1);
+    }
+    CHECK_STATUS(v->vaUnmapBuffer(ctx, images[3].buf), VA_STATUS_SUCCESS);
+    memset(&descriptor, 0, sizeof(descriptor));
+    CHECK_STATUS(v->vaExportSurfaceHandle(
+                     ctx, p010_surface,
+                     VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+                     VA_EXPORT_SURFACE_COMPOSED_LAYERS, &descriptor),
+                 VA_STATUS_SUCCESS);
+    if (descriptor.num_objects != 2 ||
+        descriptor.objects[0].fd < 0 || descriptor.objects[1].fd < 0 ||
+        descriptor.layers[0].object_index[0] != 0 ||
+        descriptor.layers[0].object_index[1] != 1 ||
+        descriptor.layers[0].offset[0] != 0 ||
+        descriptor.layers[0].offset[1] != 0 ||
+        descriptor.layers[0].pitch[0] != p010_pitch ||
+        descriptor.layers[0].pitch[1] != p010_pitch) {
+        fputs("two-object P010 export descriptor is invalid\n", stderr);
+        exit(1);
+    }
+    close(descriptor.objects[0].fd);
+    close(descriptor.objects[1].fd);
+    CHECK_STATUS(v->vaDestroySurfaces(ctx, &p010_surface, 1),
+                 VA_STATUS_SUCCESS);
+    mpp_buffer_put(p010_y_buffer);
+    mpp_buffer_put(p010_uv_buffer);
     mpp_buffer_put(p010_buffer);
     mpp_buffer_group_put(p010_group);
 

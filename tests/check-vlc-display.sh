@@ -69,7 +69,7 @@ generate()
 {
     "$FFMPEG" -nostdin -y -v error -f lavfi \
         -i testsrc2=size=1280x720:rate=30:duration=4 \
-        -c:v "$1" -profile:v "$2" -pix_fmt yuv420p "$3" \
+        -c:v "$1" -profile:v "$2" -pix_fmt "$3" "$4" \
         >"$WORK/generate.log" 2>&1
 }
 
@@ -77,10 +77,14 @@ play()
 {
     label=$1
     clip=$2
+    profiles=$3
+    expected_format=$4
     log=$WORK/$label.vlc.log
     driver_log=$WORK/$label.driver.log
 
-    if ! RK_VAAPI_LOG=$driver_log timeout --kill-after=5s "$VLC_TIMEOUT" \
+    if ! RK_VAAPI_EXPERIMENTAL_PROFILES=$profiles \
+            RK_VAAPI_LOG=$driver_log \
+            timeout --kill-after=5s "$VLC_TIMEOUT" \
             "$VLC" -I dummy --no-audio --avcodec-hw=vaapi --play-and-exit \
             -vvv "$clip" >"$log" 2>&1; then
         echo "FAIL  $label (VLC exited non-zero)"
@@ -107,12 +111,28 @@ play()
         return
     fi
 
-    frames=$(awk '/zero_copy=1/ && /external=1/ { count++ }
+    frames=$(awk '/external=1/ &&
+                  (/zero_copy=1/ || /converted_10bit=1/) { count++ }
                   END { print count + 0 }' "$driver_log")
     if [ "$frames" -lt "$MIN_FRAMES" ]; then
         echo "FAIL  $label (only $frames external frames, expected >= $MIN_FRAMES)"
         FAIL=1
         return
+    fi
+
+    if [ "$expected_format" = P010 ]; then
+        conversions=$(grep -c 'convert: NV15->P010.*afbc=1' \
+                           "$driver_log" || true)
+        derived=$(grep -c 'DeriveImage: surface=.* P010 ' \
+                      "$driver_log" || true)
+        if [ "$conversions" -lt "$MIN_FRAMES" ] ||
+           [ "$derived" -lt 1 ] ||
+           ! grep -q 'CreateContext: 10-bit output mode=AFBC_V2 profile=18' \
+                   "$driver_log"; then
+            echo "FAIL  $label (P010 audit conversions=$conversions derived=$derived)"
+            FAIL=1
+            return
+        fi
     fi
 
     bad=$(grep -cE "$ERROR_MARKERS" "$driver_log" || true)
@@ -127,10 +147,12 @@ play()
 }
 
 echo "== VLC display-session hardware decode =="
-generate libx264 high "$WORK/h264.mp4"
-play h264 "$WORK/h264.mp4"
-generate libx265 main "$WORK/hevc.mp4"
-play hevc "$WORK/hevc.mp4"
+generate libx264 high yuv420p "$WORK/h264.mp4"
+play h264 "$WORK/h264.mp4" "" NV12
+generate libx265 main yuv420p "$WORK/hevc.mp4"
+play hevc "$WORK/hevc.mp4" "" NV12
+generate libx265 main10 yuv420p10le "$WORK/hevc-main10.mp4"
+play hevc-main10 "$WORK/hevc-main10.mp4" hevc-main10 P010
 
 if [ "$FAIL" -ne 0 ]; then
     echo "FAILURES PRESENT"

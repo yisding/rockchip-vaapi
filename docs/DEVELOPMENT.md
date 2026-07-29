@@ -259,22 +259,23 @@ handle as a DRM PRIME fd, and import it as an EGLImage; while `vaDeriveImage`
 was a stub VLC dropped its hardware decoder module entirely and fell back to
 software after creating surfaces through this driver.
 
-`vaDeriveImage` returns a `VAImage` that aliases the surface's own linear NV12
-DMA-BUF rather than a fresh allocation: pitches and offsets are the surface's
-real layout, `data_size` is the image extent rather than the whole allocation
-(MPP's decode buffers reserve codec side data past the picture),
+`vaDeriveImage` returns a `VAImage` that aliases the surface's own linear
+NV12/P010 DMA-BUF rather than a fresh allocation: pitches and offsets are the
+surface's real layout, `data_size` is the image extent rather than the whole
+allocation (MPP's decode buffers reserve codec side data past the picture),
 `vaMapBuffer` mmaps that buffer with dma-buf CPU access brackets, and
 `vaAcquireBufferHandle` exports it as `DRM_PRIME`. The image holds a reference
 on the surface, so it stays valid after the caller drops theirs.
 
 A `VAImage` fixes its pitches once, but a surface's layout is only final after
 decode binds the real frame -- and consumers legitimately derive during pool
-setup, before that. Two rules keep the alias honest:
+setup, before that. Three rules keep the alias honest:
 
-- **10-bit surfaces are refused.** Their placeholder is sized for the declared
-  linear P010, while the decoded frame arrives as AFBC NV15 and RGA repacks it
-  at MPP's stride; the two disagree. Consumers fall back to `vaGetImage`, whose
-  readback resolves the layout per call.
+- **Provisional 10-bit surfaces require a stable stride.** Their placeholder
+  is linear P010, while the decoded frame arrives as AFBC NV15 and RGA repacks
+  it at MPP's 64-pixel-aligned stride. VLC derives during converter setup, so
+  an already 64-pixel-aligned placeholder is allowed; other provisional P010
+  layouts are refused. Completed linear P010 backing buffers are allowed.
 - **Encoder-input surfaces are refused.** A surface created with
   `VASurfaceAttribUsageHint` set to `ENCODER` is written, not read: its content
   arrives through `vaPutImage`, which validates pitches and offsets and
@@ -286,8 +287,8 @@ setup, before that. Two rules keep the alias honest:
   pixels through the wrong geometry. If only the buffer changed, the stale
   mapping is dropped and the current buffer is mapped instead.
 
-Imported RGB and still-compressed AFBC layouts are refused for the same reason,
-as is a request for any memory type other than DRM PRIME.
+Application-imported surfaces and still-compressed AFBC layouts are refused for
+the same reason, as is a request for any memory type other than DRM PRIME.
 
 Firefox calls `vaExportSurfaceHandle` with
 `VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2` to get a zero-copy handle to the
@@ -548,24 +549,30 @@ H.264 SPS/PPS or HEVC VPS/SPS/PPS on each IDR. Coded-buffer overflow fails
 closed.
 
 `vaCreateSurfaces2` also implements DRM PRIME 2 import for application
-surfaces. The accepted contract is deliberately narrow: one linear object, one
-composed layer, exact visible dimensions, zero packed-RGB offset, and checked
-pitches and object capacity. Linear NV12 and P010 require canonical Y/UV
-offsets; P010 pitches are byte pitches and are converted to the surface's pixel
-stride only after divisibility and width checks. For the currently advertised
-8-bit encode paths, NV12 is submitted directly. RGBA, RGBX, BGRA, and BGRX use
-an owned duplicate of the application fd and one synchronous RGA conversion
-into the driver's aligned NV12 buffer per encoded frame.
-Multi-object, tiled/modifier, undersized, mismatched, and non-DMA-BUF
-descriptors fail during surface creation. Imported surfaces reject
-`vaPutImage`, and imported RGB is advertised only when RGA was linked.
+surfaces. The accepted contract is deliberately narrow: one composed linear
+layer, exact visible dimensions, and checked pitches and object capacity.
+Linear NV12 and P010 accept either one canonical Y+UV object or separate
+zero-offset luma and chroma objects. P010 pitches are byte pitches and are
+converted to the surface's pixel stride only after divisibility and width
+checks. Two-object input is copied into private aligned backing under DMA-BUF
+CPU synchronization before submission and re-exports as an accurate
+two-object descriptor. For the currently advertised 8-bit encode paths,
+one-object NV12 is submitted directly. RGBA, RGBX, BGRA, and BGRX accept one
+zero-offset object, retain an owned fd duplicate, and use one synchronous RGA
+conversion into the driver's aligned NV12 buffer per encoded frame.
+Tiled/non-linear modifier, undersized, mismatched, and non-DMA-BUF descriptors
+fail during surface creation. Imported surfaces reject `vaPutImage`, and
+imported RGB is advertised only when RGA was linked.
 
-The current boundary remains progressive 8-bit input, one complete frame-level
-macroblock/CTU slice, MPP-managed references, and synchronous completion. P010
-encode, packed application headers, B-frames, multi-slice, and WebRTC encode
-are not advertised. This also avoids exercising the kernel's
-historically vulnerable multi-slice FIFO path. P010 surface import/readback is
-not a Main10 encode claim: the tested MPP `vepu5xx` HAL rejects
+The current boundary remains progressive 8-bit input, MPP-managed references,
+and synchronous completion. A picture may use one full-frame slice or
+contiguous equal-row macroblock/CTU slices; the final slice may contain the
+smaller row remainder. H.264 caps this at 270 slices and HEVC at 68, matching
+their VA parameter accumulators. The driver rejects gaps, overlaps,
+partial-row slices, unequal non-final heights, and totals that do not cover
+the frame before programming MPP's row split. P010 encode, packed application
+headers, and B-frames are not advertised. P010 surface import/readback is not
+a Main10 encode claim: the tested MPP `vepu5xx` HAL rejects
 `MPP_FMT_YUV420SP_10BIT`. The direct diagnostic and promotion criteria are in
 [`HEVC_MAIN10_ENCODE_BACKEND.md`](HEVC_MAIN10_ENCODE_BACKEND.md).
 
@@ -595,7 +602,14 @@ transport diagnostic; the Make target always selects `vah264enc`.
 contexts open together at 30 fps. It samples the actual `gst-launch` process
 RSS/fd counts and audits exact MPP packet counts plus checked I420 uploads. The
 default two-hour run is the qualification gate; shorter durations are reported
-only as smoke coverage.
+only as smoke coverage. The completed qualification ran for 7,200 seconds,
+encoded 216,000 frames per codec, held fds at 60, and showed no RSS growth.
+
+`check-encode-decode-same-process` creates two decoders and two encoders inside
+one public-libav process. It requires overlapping decode workers and 120
+frames per context. Normal and ASan/UBSan runs compare output; the TSan form
+uses independent simple filter graphs and direct raw sinks to avoid unrelated
+libavfilter races while preserving the driver/context concurrency claim.
 
 ---
 
@@ -622,10 +636,19 @@ seccomp boundary.
 
 For a hardened deployment, a distribution Firefox sandbox policy must permit
 the required MPP, RGA, and dma-heap operations in RDD. The driver and optional
-config package deliberately do not weaken that sandbox. A source-package patch
-for Firefox 153.0 is pinned and validated under `contrib/firefox`; it adds
-the missing broker paths only on systems where those nodes exist and
-allowlists the four MPP/RGA requests measured on the audited stack.
+config package deliberately do not weaken that sandbox. Source-package patches
+for Firefox 152.0.6 and 153.0 are pinned and validated under
+`contrib/firefox`; they add the missing broker paths only on systems where
+those nodes exist and allowlist the four MPP/RGA requests measured on the
+audited stack.
+
+Firefox/Panfrost has a separate 10-bit consumer boundary. The driver exports
+the standards-correct split P010 descriptor (`R16` luma and `GR1616` chroma),
+but Panfrost can enumerate linear `GR1616` and reject its actual EGL image
+creation with `EGL_BAD_MATCH`. The version-pinned companion patches preserve
+that first attempt and, only after the real failure, retry Firefox's existing
+RG/GR alternate-format path once. This belongs in Firefox because changing the
+VA descriptor to misreport its plane format would break the producer contract.
 
 ---
 
@@ -642,9 +665,9 @@ allowlists the four MPP/RGA requests measured on the audited stack.
   VP9 Profile 2 has a separate bit-exact 48-frame gate through the same
   conversion path. Both remain unadvertised until broader conformance and HDR
   gates pass. VP8 and AV1 are also unadvertised.
-- H.264 and HEVC encode are experimental and restricted to full-frame
-  NV12/I420/YV12 uploads normalized to NV12 with one slice. They are exposed
-  only through
+- H.264 and HEVC encode are experimental and restricted to progressive
+  NV12/I420/YV12 input normalized to NV12, with either a full-frame slice or
+  validated equal-row slices. They are exposed only through
   `RK_VAAPI_EXPERIMENTAL_ENCODE`.
 
 ---

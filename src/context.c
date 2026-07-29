@@ -295,6 +295,10 @@ VAStatus rk_BeginPicture(VADriverContextP ctx,
         c->render_surface = s;
         c->has_enc_pic = false;
         c->has_enc_slice = false;
+        c->enc_slice_count = 0;
+        c->enc_slice_units = 0;
+        c->enc_slice_unit_span = 0;
+        c->enc_slice_last_units = 0;
         pthread_mutex_unlock(&c->picture_lock);
         rk_object_unref(&c->base);
         return VA_STATUS_SUCCESS;
@@ -480,6 +484,10 @@ VAStatus rk_EndPicture(VADriverContextP ctx, VAContextID ctx_id) {
         c->render_surface = NULL;
         c->has_enc_pic = false;
         c->has_enc_slice = false;
+        c->enc_slice_count = 0;
+        c->enc_slice_units = 0;
+        c->enc_slice_unit_span = 0;
+        c->enc_slice_last_units = 0;
         pthread_mutex_unlock(&c->picture_lock);
         rk_object_unref(&render_surface->base);
         rk_object_unref(&c->base);

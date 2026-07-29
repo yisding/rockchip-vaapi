@@ -505,11 +505,21 @@ A focused source-stack VA-API run with both fixes produced 34 software and 34
 hardware frames with byte-identical per-frame MD5s. The manifest therefore
 advances both FATE names from `backend` to `exact`: the source expectation is
 now **144 exact, 17 non-Main skips, two size-contract refusals, and zero
-backend or driver failures**. This is 142 cases from the complete installed
-stack sweep plus the two focused-verified names, not a claim that the complete
-163-vector sweep has already been rerun with the new packages. Exporting and
-installing both dependencies, then rerunning that sweep, remains the release
-gate. The root-cause record is
+backend or driver failures**.
+
+The complete 163-vector sweep was then rerun against an isolated extraction of
+the exact Published arm64 packages: MPP
+`1.5.0+git20260729.3381fd2c+ds-0ubuntu1~rk1` and FFmpeg
+`7:8.0.3+rockchip+git20260729.33a651a55b-0ubuntu1~rk1`. Loader inspection
+confirmed that FFmpeg, the direct-MPP classifier, and this driver all resolved
+the extracted MPP library. The result matches every pinned class: **144 exact,
+17 skips, two size refusals, zero backend failures, and zero driver failures**.
+The report SHA-256 is
+`39c68fdf82773fb9bde47dbcde74abc3ea49271905b203aad1a1c81f1452cf89`.
+The full shipping-profile matrix is also green on the same packages with the
+audited kernel-crash vector enabled by its exact release and notes
+fingerprint. System-wide installation remains a package-lifecycle gate, not a
+decode-correctness gap. The root-cause record is
 [in the YSP findings repository](https://github.com/yisding/rock-5b-ysp/blob/main/findings/2026-07-29-hevc-nut-radl-and-unused-rps-reference-fixes.md).
 
 **Progress (2026-07-28, Main10 conformance widened):** `PROFILE=main10` runs
@@ -531,8 +541,17 @@ context creation, so FFmpeg falls back before MPP or RGA setup rather than
 failing mid-decode.
 
 Main10 stays unadvertised. Decode correctness is now well evidenced, but the
-narrow-picture hardware path remains unavailable, 10-bit throughput through
-RGA has not been measured, and HDR display presentation is still unvalidated.
+narrow-picture hardware path remains unavailable and HDR display presentation
+is still unvalidated.
+
+**Progress (2026-07-29, 10-bit throughput):**
+`make check-10bit-throughput-experimental` measures the complete 1920x1080
+hardware path rather than timing the decoder backend in isolation. HEVC Main10
+completed 240 visible and decoded frames at 261.38 fps. VP9 Profile 2 completed
+240 visible frames, 254 decoded frames, and 254 audited AFBC-to-RGA
+conversions at 261.08 fps; the additional outputs are legitimate hidden
+references. This closes the throughput question without changing the
+profiles' default-hidden status.
 
 **Progress (2026-07-26, HDR10 metadata slice):**
 `make check-hevc-main10-hdr-experimental` generates a 24-frame Main10 HDR10
@@ -559,12 +578,24 @@ NV12 and is valid in both composed P010 and split R16/GR1616 forms. The
 driver-object gate checks both descriptors normally and under ASan/UBSan; the
 HDR Main10 and shipping-profile hardware regressions remain green.
 
+**Progress (2026-07-29, P010 derive/display consumers):**
+`vaDeriveImage` now accepts completed driver-owned linear P010 surfaces and
+the 64-pixel/16-row-aligned provisional P010 layout used by VLC's converter
+probe. It still refuses imported P010, compressed backing, and stale or
+unaligned provisional layouts. Stock VLC hardware-decodes and presents
+H.264 High, HEVC Main, and HEVC Main10 with 118, 120, and 120 external frames.
+Firefox 153 hardware-decodes H.264 and HEVC Main, while stock Firefox Main10
+reaches three hardware frames and then falls back because Panfrost rejects
+Firefox's plane-1 `DRM_FORMAT_GR1616` EGL image with `EGL_BAD_MATCH`. The
+driver's standards-correct P010 split descriptor exports cleanly; this is a
+measured Firefox/Panfrost consumer boundary, not a VA driver failure.
+
 **Gate:** ✅ HEVC Main bit-exact vs software on conformance vectors (8/8 pinned;
-142/163 in the complete installed-stack sweep plus two focused fixed-source
-NUT names, 144/163 pinned expectation, zero driver failures) and advertised by
-default; complete fixed-package sweep pending;
-✅ HEVC Main10 / VP9 P2 bit-exact after P010 repacking; HDR HEVC playing
-correctly in a display session remains open.
+144/163 complete exact-PPA-package sweep, 17 profile skips, two size refusals,
+zero backend/driver failures) and advertised by default;
+✅ HEVC Main10 / VP9 P2 bit-exact after P010 repacking and measured above
+260 fps at 1080p; ✅ VLC Main10 decode/presentation; Firefox/Panfrost Main10
+consumer patch validation and physical HDR presentation remain open.
 
 ### Phase 3 — Production hardening & the app matrix  (~2–3 wk)
 
@@ -701,6 +732,17 @@ piece was the dma-heap broker path. Patch application is checked against exact
 upstream source hashes. Building/installing the Firefox package and validating
 RDD playback in a real display session remain open.
 
+**Progress (2026-07-29, Firefox/Panfrost P010 source fix):** Firefox's
+existing DMA-BUF code already swaps GR/RG chroma formats when modifier
+enumeration reports the advertised format unsupported, but Panfrost enumerates
+linear GR1616 and rejects only the real `eglCreateImage` call. Version-pinned
+152.0.6 and 153.0 patches preserve GR1616 as the standards-correct first
+attempt, consume the first EGL error, and retry the same existing RG/GR
+alternative once. Both patches apply to exact official source preimages under
+the hash-pinned contract gate. The 152.0.6 change also compiles in its release
+unified object; full package and sandboxed playback validation are still
+pending and are not inferred from source application.
+
 **Progress (2026-07-27, structured logging):** The opt-in driver log now emits
 single-record structured text or newline-delimited JSON with realtime
 nanoseconds, PID/TID, severity, source, line, function, and an escaped message.
@@ -711,7 +753,9 @@ normal, ASan/UBSan, TSan, and Valgrind tests cover filtering, JSON control
 characters, nested lifecycle, and 800 concurrent records without interleaving.
 
 **Gate:** the app matrix passes on-device — ✅ stock FFmpeg, GStreamer `va`,
-VLC, and Firefox; ✅ mpv 8-bit H.264 decode/presentation (10-bit/HDR open);
+VLC including Main10, and Firefox H.264/HEVC Main; ✅ mpv 8-bit H.264
+decode/presentation (current Main10/HDR rerun blocked by the session having no
+Wayland output and Mutter reporting no physical or logical monitors);
 ⬜ Chromium (blocked on its GL stack here); ✅ conformance suite green; clean
 soak; ✅ `.deb` + config packages install, upgrade and purge cleanly in an
 isolated root, ⬜ enabling HW decode from a genuinely clean image is untested.
@@ -745,16 +789,18 @@ produces parser-clean 48/48 Main-profile streams at 45.19, 44.46, and 40.91 dB;
 `vah265enc` passes at 45.31 dB. Normal and ASan/UBSan app gates pass for both
 codecs. Concurrent 96-frame H.264 and HEVC encoder runs also pass while the
 complete shipping synthetic decode matrix runs in parallel. The implementation
-intentionally exposes one full-frame slice only; planar upload support is
-recorded below, while P010 encode, full WebRTC, multi-slice, and long encode
-soak remain open.
+initially exposed one full-frame slice only; planar upload support is recorded
+below. At that point P010 encode, full WebRTC, multi-slice, and long encode
+soak remained open; the later progress entries close all but the
+backend-blocked P010 encode path.
 
 **Progress (2026-07-27, P010 contract and Main10 backend boundary):** Linear
-single-object P010 DRM PRIME 2 surfaces now enforce canonical two-plane
-offsets, even 4:2:0 dimensions, byte-pitch divisibility, pixel width, object
-capacity, and owned-fd lifetime. The object gate covers byte-exact P010
-upload/readback and imported-surface readback. This does not advertise P010
-encode. A driver experiment converted P010 through RGA and reached MPP as
+P010 DRM PRIME 2 surfaces enforce canonical two-plane offsets, even 4:2:0
+dimensions, byte-pitch divisibility, pixel width, object capacity, and owned-fd
+lifetime. The original one-object gate covers byte-exact P010 upload/readback
+and imported-surface readback; the later two-object gate applies the same
+checks to separate luma/chroma objects. This does not advertise P010 encode. A
+driver experiment converted P010 through RGA and reached MPP as
 `MPP_FMT_YUV420SP_10BIT`, where RK3588's `vepu5xx_set_fmt` rejected format 1
 and produced no packet. The official MPP `vepu5xx` format table likewise maps
 that format to its unsupported sentinel. `make probe-mpp-main10-encode`
@@ -780,8 +826,9 @@ and an owned fd duplicate. Compatible NV12 is submitted directly; packed RGB
 is converted into aligned NV12 by RGA before every encode. A public-libva BGRA
 gate closes the application's descriptor fd, encodes and standard-decodes
 48/48 H.264 High frames at 37.14 dB, and requires exactly 48 RGA conversions
-and MPP packets normally and under ASan/UBSan. Multi-object and non-linear
-modifier layouts remain unsupported and fail closed.
+and MPP packets normally and under ASan/UBSan. At that point multi-object and
+non-linear modifier layouts remained unsupported; the later two-object linear
+YUV gate closes the former, while non-linear layouts still fail closed.
 
 **Progress (2026-07-27, native WebRTC peer transport):** The earlier
 120-frame direct-I420 `vah264enc` RTP path still produces 604 packets at a
@@ -814,7 +861,33 @@ visible surface. A targeted 640x360 five-path HEVC gate passes afterward.
 Concurrent live H.264+HEVC smoke then completed 1,800 frames per codec over 60
 seconds with post-warmup RSS fixed at 58,792 KiB and fds fixed at 60. A
 30-second full-driver ASan/UBSan run completed 900 frames per codec. The
-default two-hour qualification run remains open.
+default two-hour qualification run was still open at that point and is closed
+by the later 2026-07-29 result.
+
+**Progress (2026-07-29, multi-object, multi-slice, concurrency, and soak):**
+Linear NV12 imports may now use separate luma and chroma DMA-BUF objects. The
+driver validates each object's canonical zero offset, pitch, modifier, and
+capacity, normalizes privately with DMA synchronization, and exports an
+accurate two-object descriptor. A public-libva H.264 gate completes 48/48
+frames at 50.683977 dB normally and under ASan/UBSan; undersized, nonzero
+offset, and non-linear descriptors fail closed.
+
+H.264 and HEVC encode configs advertise equal-row multi-slice modes. The
+driver validates contiguous full rows with equal slice heights except for a
+smaller final remainder, then programs MPP's macroblock/CTU split. Normal and
+ASan/UBSan gates produce 12 frames with exactly four parser-clean slices per
+frame for both codecs.
+
+A single public-libav process now runs two hardware decoders and two hardware
+encoders concurrently. Each context completes 120 frames; normal and
+ASan/UBSan runs compare downloaded output, while TSan uses independent simple
+graphs and raw sinks to avoid unrelated FFmpeg filter races. All three pass
+with two decode workers overlapping and 240 encode packets.
+
+Finally, the full 7,200-second H.264+HEVC encode soak completed 216,000 frames
+per codec. Combined RSS moved from 56,328 to 52,708 KiB (3,620 KiB total span,
+no growth), and fd count stayed exactly 60. This supersedes the earlier
+60-second smoke and closes the long encode qualification.
 
 **Gate:** encode → standard-decoder round-trip within a PSNR bound;
 interoperable bitstreams (ffmpeg/browsers decode them); GStreamer `vah264enc` /
@@ -859,9 +932,10 @@ concurrent with decode contexts are race-free.
 
 ## Risks & open questions
 
-- **External buffer group parity:** resolved for shipping H.264 and VP9 on the
-  pinned MPP/ROCK 5B stack. HEVC must repeat the parity gate when its decode
-  path lands; the internal-group ref-holding fallback remains zero-copy.
+- **External buffer group parity:** resolved for shipping H.264, VP9, and HEVC
+  on the pinned MPP/ROCK 5B stack. The exact Published MPP/FFmpeg package root
+  passes the complete HEVC sweep and the normal plus ASan/UBSan shipping
+  matrices; the internal-group ref-holding fallback remains zero-copy.
 - **10-bit exactness:** resolved for the generated HEVC Main10 and VP9 Profile
   2 AFBC paths, pinned Main10 weighted-prediction and official VP9 Profile 2
   vectors, and the 24-frame HDR10 vector. RGA performs a pure NV15-to-P010
@@ -878,8 +952,8 @@ concurrent with decode contexts are race-free.
   the shipping Chromium, don't assume.
 - **MPP threading contract:** the dedicated-worker model is validated for the
   normal single-decoder H.264/VP9 matrix, nine simultaneous idle MPP contexts,
-  and two active H.264/VP9 contexts in one process under normal, ASan/UBSan,
-  and TSan builds.
+  two active H.264/VP9 contexts, and a same-process two-decode/two-encode
+  workload under normal, ASan/UBSan, and TSan builds.
 
 ## Status
 
@@ -892,22 +966,24 @@ concurrent with decode contexts are race-free.
   decoders, sanitizer gates, and the multi-hour 4K resource soak are green.
 - Phase 2: **HEVC Main is complete and shipping.** `VAProfileHEVCMain` is
   advertised by default as of 2026-07-28: all eight pinned vectors are
-  bit-exact normally and under ASan/UBSan. The complete installed-stack sweep
-  has 142 of 163 HEVC Main candidates bit-exact with zero driver failures; the
-  fixed-source MPP/FFmpeg focus run adds both byte-identical NUT names, making
-  144/163 the pinned expectation pending package installation and a complete
-  rerun. The direct-MPP TILES failure is gone on the current stack and
+  bit-exact normally and under ASan/UBSan. The complete sweep with the exact
+  Published MPP `3381fd2c` and FFmpeg `33a651a55b` arm64 packages has 144 of
+  163 candidates bit-exact, 17 profile skips, two advertised-size refusals,
+  and zero backend or driver failures. Both byte-identical NUT names return
+  34 exact frames. System installation remains a package-lifecycle gate. The
+  direct-MPP TILES failure is gone on the current stack and
   `TILES_A_Cisco_2.bit` is bit-exact. The remainder of the phase is 10-bit: the
   generated 48-frame Main10/Profile 2, pinned 256-frame Main10, official
   10-frame Profile 2, and 24-frame Main10 HDR10 AFBC-to-P010 gates are
-  bit-exact and static BT.2020/PQ HDR metadata is preserved, but both 10-bit
-  profiles stay hidden until broader 10-bit conformance and HDR display
-  presentation are validated.
+  bit-exact, 1080p throughput exceeds 260 fps for both codecs, and static
+  BT.2020/PQ HDR metadata is preserved. Both 10-bit profiles stay hidden until
+  broader app/physical HDR display presentation is validated.
 - Phase 3: in progress; five app-matrix slices now pass on-device. Stock FFmpeg
   is the conformance gate itself, the stock GStreamer 1.28 `va` plugin
   system-memory gate is byte-exact for H.264, HEVC Main10, and VP9 Profiles
-  0/2, and stock VLC 3.0.23 and Firefox 153.0 both hardware-decode H.264 High
-  and HEVC Main in a real display session with clean driver logs
+  0/2. Stock VLC 3.0.23 hardware-decodes H.264 High, HEVC Main, and HEVC
+  Main10; stock Firefox 153.0 hardware-decodes H.264 High and HEVC Main in a
+  real display session with clean driver logs
   (`check-vlc-display`, `check-firefox-decode`). Stock mpv 0.41.0 also renders
   the 8-bit H.264 CIF path through Wayland/Panfrost after a selective
   352-to-384-byte NV12 export repack (`check-mpv-display`). The display gates
@@ -917,17 +993,21 @@ concurrent with decode contexts are race-free.
   thread-, and leak-tested, and clean-image package lifecycle validation is
   green, and the Firefox RDD source patch is rebased and hash-pinned to 153.0.
   `vaDeriveImage` and `vaAcquireBufferHandle` are implemented over the
-  surface's own DMA-BUF, which is what unblocked VLC; they deliberately refuse
-  10-bit, still-compressed, imported-RGB and encoder-input surfaces, and
-  re-check the surface's layout on every use.
-  Open: no patched Firefox has been built, so the sandbox contract is verified
-  by hash and application only; Chromium cannot
+  surface's own DMA-BUF, which is what unblocked VLC; completed linear P010
+  and aligned provisional converter probes are accepted, while imported,
+  still-compressed, stale-layout, imported-RGB, and encoder-input surfaces
+  fail closed. Stock Firefox Main10 is measured to fall back at Panfrost's
+  GR1616 EGL import, and exact-source 152.0.6/153.0 retry patches pass the
+  contract gate; the 152.0.6 release object compiles.
+  Open: the patched Firefox package and sandboxed playback gate are not yet
+  complete; Chromium cannot
   initialize a GL context on this Mali-G610/Panfrost stack, so no Chromium
   claim is made; mpv 10-bit/HDR display presentation and fresh-image hardware
   decode remain untested. Installed `1.0.11+ysp5` matches
   its deb payload and passes the narrow Main10 fallback plus complete normal
   pinned conformance gates; the installed-package gap is no longer open.
-- Phase 4: in progress; experimental one-slice H.264 Main/High and HEVC Main
+- Phase 4: complete for the deliberately advertised experimental scope;
+  H.264 Main/High and HEVC Main
   encode pass FFmpeg and GStreamer CQP/CBR/VBR interoperability, parser, and
   PSNR gates normally and under ASan/UBSan. Both 96-frame encoder gates pass
   together with the shipping decode matrix. Checked I420/YV12 uploads are
@@ -937,11 +1017,19 @@ concurrent with decode contexts are race-free.
   MPP `vepu5xx` rejecting its compact 10-bit input format. The native two-peer
   `vah264enc` WebRTC gate covers SDP/ICE/DTLS/SRTP and passes 120 frames at
   41.061795 dB normally and with the full ASan/UBSan driver.
-  Multi-object/tiled imports, multi-slice, and long encode qualification also
-  remain open; H.264 WebRTC-compatible RTP packetization and paced dual-codec
-  soak smoke are green. Its two missing GStreamer test packages were supplied
-  from an extracted arm64 package root rather than installed system-wide.
-- Phase 5: planned.
+  Separate-object linear NV12 import passes public-libva normal and sanitizer
+  gates; tiled/non-linear imports still fail closed. Equal-row H.264/HEVC
+  multi-slice produces exactly four parser-clean slices per frame normally and
+  under ASan/UBSan. A same-process two-decode/two-encode workload passes
+  normally, under ASan/UBSan, and under TSan. The full two-hour dual-codec
+  encode soak completes 216,000 frames per codec with flat fds and no RSS
+  growth. H.264 WebRTC-compatible RTP packetization is green. Its two missing
+  GStreamer test packages were supplied from an extracted arm64 package root
+  rather than installed system-wide.
+- Phase 5: in progress; final `1.0.11+ysp6` driver/config binaries pass build,
+  Lintian, and the isolated package lifecycle. Host installation, final
+  Firefox package/runtime proof, tag, GitHub Release, and PPA publication
+  remain.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement
 map and driver-review finding as the decision/evidence record.

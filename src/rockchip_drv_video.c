@@ -238,11 +238,17 @@ static VAStatus rk_GetConfigAttributes(VADriverContextP ctx,
             list[i].value = encode ? 1u : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribEncMaxSlices:
-            list[i].value = encode ? 1u : VA_ATTRIB_NOT_SUPPORTED;
+            list[i].value = !encode ? VA_ATTRIB_NOT_SUPPORTED
+                          : profile == VAProfileHEVCMain
+                          ? (RK_MAX_HEIGHT + 63u) / 64u
+                          : (RK_MAX_HEIGHT + 15u) / 16u;
             break;
         case VAConfigAttribEncSliceStructure:
-            list[i].value = encode ? VA_ENC_SLICE_STRUCTURE_ARBITRARY_MACROBLOCKS
-                                   : VA_ATTRIB_NOT_SUPPORTED;
+            list[i].value = encode
+                          ? VA_ENC_SLICE_STRUCTURE_POWER_OF_TWO_ROWS |
+                            VA_ENC_SLICE_STRUCTURE_EQUAL_ROWS |
+                            VA_ENC_SLICE_STRUCTURE_EQUAL_MULTI_ROWS
+                          : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribEncQualityRange:
             list[i].value = encode ? 1u : VA_ATTRIB_NOT_SUPPORTED;

@@ -1,8 +1,9 @@
 Source: rockchip-vaapi
 Section: libs
 Priority: optional
-Maintainer: Eduardo García-Mádico Portabella <woodyst@gmail.com>
+Maintainer: Yi Ding <yi.s.ding@gmail.com>
 Build-Depends: debhelper-compat (= 13),
+               libdrm-dev,
                libva-dev (>= 2.0),
                librockchip-mpp-dev,
                librga-dev,
@@ -10,6 +11,9 @@ Build-Depends: debhelper-compat (= 13),
                gcc
 Standards-Version: 4.6.2
 Rules-Requires-Root: no
+Homepage: https://github.com/yisding/rockchip-vaapi
+Vcs-Git: https://github.com/yisding/rockchip-vaapi.git
+Vcs-Browser: https://github.com/yisding/rockchip-vaapi
 
 Package: rockchip-vaapi
 Architecture: arm64
@@ -20,8 +24,9 @@ Description: VA-API driver for Rockchip RK3588 via MPP
  Hardware video acceleration driver that bridges the VA-API (libva)
  interface to Rockchip MPP (librockchip-mpp1) for the RK3588/RK3576 SoC.
  .
- Enables validated H.264 and VP9 hardware decode via DRM PRIME 2 DMA-BUF
- surface export. Experimental HEVC and 10-bit profiles remain opt-in.
+ Enables validated H.264, HEVC Main, and VP9 hardware decode via DRM PRIME 2
+ DMA-BUF surface export. HEVC Main10 and VP9 Profile 2 decode plus H.264/HEVC
+ encode remain opt-in while their wider application gates are completed.
  .
  Install rockchip-vaapi-config or select the driver per application.
 

@@ -56,6 +56,10 @@ static bool surface_linear_layout(RKSurface *surface, int *fd_out,
                                   size_t *chroma_offset_out)
 {
     pthread_mutex_lock(&surface->lock);
+    if (surface->imported_multiplane) {
+        pthread_mutex_unlock(&surface->lock);
+        return false;
+    }
     MppBuffer active = surface->import_buf ? surface->import_buf
                      : surface->backing_buf ? surface->backing_buf
                      : surface->frame ? mpp_frame_get_buffer(surface->frame)
@@ -541,8 +545,8 @@ VAStatus rk_CreateImage(VADriverContextP context, VAImageFormat *format,
  * as an EGLImage. Refusing it made VLC drop its hardware decoder module
  * entirely and fall back to software.
  *
- * Only the driver's own linear NV12/P010 surfaces are derivable. Imported RGB
- * and AFBC layouts are not describable as a VAImage, so they fail closed. */
+ * Only the driver's own linear NV12/P010 surfaces are derivable. Application
+ * imports and AFBC layouts fail closed. */
 VAStatus rk_DeriveImage(VADriverContextP context, VASurfaceID surface_id,
                         VAImage *image)
 {
@@ -572,7 +576,12 @@ VAStatus rk_DeriveImage(VADriverContextP context, VASurfaceID surface_id,
     unsigned int width = (unsigned int)surface->width;
     unsigned int height = (unsigned int)surface->height;
     bool is_10bit = MPP_FRAME_FMT_IS_YUV_10BIT(surface->fmt);
+    bool imported = surface->import_buf != NULL;
     bool imported_rgb = surface->imported_rgb;
+    bool imported_multiplane = surface->imported_multiplane;
+    bool decoded = surface->decoded;
+    int horizontal_stride = surface->hstride;
+    int vertical_stride = surface->vstride;
     /* surface->fmt is MPP's frame format, which stays AFBC even after a 10-bit
      * frame has been repacked into a driver-owned linear P010 buffer. Only a
      * surface still bound to the MPP frame itself can actually be compressed;
@@ -583,17 +592,26 @@ VAStatus rk_DeriveImage(VADriverContextP context, VASurfaceID surface_id,
 
     /* A VAImage fixes its pitches once, but a surface's layout is only final
      * after decode binds the real frame -- and consumers legitimately derive
-     * during pool setup, before that. 10-bit is the class where the two
-     * reliably disagree: the placeholder is sized for its declared linear
-     * P010, while the decoded frame arrives as AFBC NV15 and RGA repacks it at
-     * MPP's stride. Refuse it and let the consumer use vaGetImage, whose
-     * readback resolves the layout per call. Map and acquire re-check the rest
-     * against the surface, so a stale image fails instead of returning pixels
-     * from the wrong geometry. */
-    if (imported_rgb || fbc || is_10bit || encoder_input) {
+     * during pool setup, before that. 10-bit is the class where the two can
+     * disagree: the placeholder is linear P010, while the decoded frame
+     * arrives as AFBC NV15 and RGA repacks it at MPP's 64-pixel-aligned
+     * stride. Permit the provisional image only when its placeholder already
+     * satisfies that alignment contract; this is required by VLC's converter
+     * probe. Map and acquire re-check the layout on every use, so a later
+     * stride change still fails rather than exposing stale geometry. */
+    bool stable_provisional_p010 = is_10bit && !decoded &&
+        horizontal_stride >= (int)width &&
+        (horizontal_stride % 64) == 0 &&
+        vertical_stride >= (int)height &&
+        (vertical_stride % 16) == 0;
+    if (imported || imported_rgb || imported_multiplane || fbc ||
+        (is_10bit && !decoded && !stable_provisional_p010) ||
+        encoder_input) {
         LOG("DeriveImage: surface=0x%x layout is not a stable VAImage "
-            "(rgb=%d fbc=%d 10bit=%d encoder=%d)", surface_id, imported_rgb,
-            fbc, is_10bit, encoder_input);
+            "(imported=%d rgb=%d multiplane=%d fbc=%d 10bit=%d decoded=%d "
+            "provisional_stable=%d encoder=%d)", surface_id, imported,
+            imported_rgb, imported_multiplane, fbc, is_10bit, decoded,
+            stable_provisional_p010, encoder_input);
         rk_object_unref(&surface->base);
         return VA_STATUS_ERROR_OPERATION_FAILED;
     }

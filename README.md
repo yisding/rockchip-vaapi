@@ -56,11 +56,12 @@ decoder gates, and two-hour 4K resource soak are also complete; see
 - **Pinned real conformance vectors and CI plumbing.** The gate now uses ITU-T
   H.264 and official libvpx VP9 vectors with payload checksums, and normal plus
   sanitized AArch64 builds are cross-compiled in CI.
-- **HEVC Main, conformance-gated.** The complete installed-stack sweep has 142
-  of the 163 HEVC Main candidates bit-exact against software decode with zero
-  driver failures. Focused validation with the fixed MPP and FFmpeg source
-  stack adds the byte-identical `NUT_A_ericsson_4/5` names at 34/34 clean,
-  byte-exact frames, advancing the pinned source expectation to **144/163**.
+- **HEVC Main, conformance-gated.** The complete sweep with the exact
+  checksum-verified PPA MPP `3381fd2c` and FFmpeg `33a651a55b` binaries has
+  **144 of 163** HEVC Main candidates bit-exact against software decode,
+  including both byte-identical `NUT_A_ericsson_4/5` names at 34/34 clean
+  frames. The remainder is 17 out-of-profile skips and two advertised-size
+  refusals, with zero backend or driver failures.
   The classes live in `tests/hevc-sweep-vectors.tsv` and are re-runnable as
   `make check-hevc-conformance-sweep`. A libva-free MPP runner and
   control-gated prefix reducer separate backend failures from driver failures;
@@ -83,9 +84,13 @@ decoder gates, and two-hour 4K resource soak are also complete; see
   and the installed driver passes the complete eight-vector pinned conformance
   gate plus the 64-pixel Main10 software-fallback audit on the production
   6.18.40 kernel.
-  Packaging and installing MPP `3381fd2c` plus an FFmpeg line containing
-  upstream fix `265d39e551`, followed by the complete 163-vector rerun, remain
-  the release gate for replacing the installed-stack 142/163 measurement.
+  Packaging MPP `3381fd2c` plus an FFmpeg line containing upstream fix
+  `265d39e551` is complete in the YSP PPA. An isolated extraction of the exact
+  Published arm64 packages passes the complete 163-vector sweep and full
+  shipping-profile matrix normally and with the complete ASan/UBSan driver.
+  Final driver/config version `1.0.11+ysp6` also builds and passes Lintian plus
+  the isolated clean install/upgrade/purge lifecycle; installing those
+  binaries system-wide remains the package-lifecycle gate.
 
 ---
 
@@ -101,14 +106,19 @@ Key features:
 
 - H.264, HEVC Main and VP9 hardware decode with byte-exact regression checking
 - DRM PRIME 2 surface export directly from retained MPP external-pool DMA-BUFs
-- `vaDeriveImage` over the surface's own DMA-BUF, so VLC's OpenGL VA-API
+- `vaDeriveImage` over linear NV12/P010 surface DMA-BUFs, including safe
+  64-pixel-aligned provisional P010 converter probes, so VLC's OpenGL VA-API
   converters can import decoded frames as EGLImages
 - App gates on-device for stock FFmpeg, GStreamer `va`, VLC 3.0.23,
   Firefox 153.0, and mpv 0.41.0. The display gates refuse to run headless;
   mpv additionally proves Panfrost can EGL-import a repacked 64-byte-aligned
   CIF NV12 pitch without falling back to a software download
+- Measured 10-bit decode throughput above 260 fps for 1080p HEVC Main10 and
+  VP9 Profile 2 through the audited MPP AFBC-to-RGA P010 path
 - Experimental H.264 High encode through `h264_vaapi` and GStreamer
-  `vah264enc`, with CQP/CBR/VBR round-trip PSNR gates
+  `vah264enc`, with CQP/CBR/VBR round-trip PSNR gates, equal-row multi-slice,
+  linear two-object DMA-BUF input, same-process decode/encode stress, and a
+  completed two-hour dual-codec soak
 - Compatible with Firefox 128+ (VA-API PDM path, RDD process)
 - Implements the full VA-API 1.20 vtable (`__vaDriverInit_1_20`)
 
@@ -128,7 +138,7 @@ Key features:
 | H.264 | Constrained Baseline | not offered | pinned SVA vector is corrupt in MPP; software fallback |
 | VP9 | Profile 0 | full normal + ASan/UBSan gates bit-exact | hidden-reference vector included on audited kernel |
 | VP9 | Profile 2 (under development) | not offered | generated 48-frame and official libvpx 10-frame gates are P010 bit-exact through MPP AFBC + RGA |
-| HEVC | Main | full normal + ASan/UBSan gates bit-exact | 8/8 pinned vectors; 142/163 FATE Main candidates in the complete installed-stack sweep, plus focused fixed-source validation of the two byte-identical NUT names (144/163 pinned expectation), with zero driver failures |
+| HEVC | Main | full normal + ASan/UBSan gates bit-exact | 8/8 pinned vectors; 144/163 FATE candidates byte-exact with exact Published PPA MPP/FFmpeg binaries, 17 out-of-profile skips, two size refusals, and zero backend/driver failures |
 | HEVC | Main10 (under development) | not offered | 10 of 11 FATE Main10 vectors, plus generated, weighted-prediction and HDR10 gates, are P010 bit-exact through MPP AFBC + RGA; BT.2020/PQ and static HDR metadata survive hardware decode. RGA3 refuses sources below its minimum width, so a 64-pixel-wide picture fails closed |
 | VP8 | — | not offered | crashes in the generic path; needs debugging |
 | AV1 | — | not offered | VA-API hands headerless tile data; MPP needs full OBUs; see the [support plan](docs/AV1_SUPPORT_PLAN.md) and non-submitting platform probe |
@@ -141,23 +151,26 @@ Experimental encode is hidden by default. Setting
 `RK_VAAPI_EXPERIMENTAL_ENCODE=h264`, `hevc`, or `h264,hevc` exposes
 frame-level `VAEntrypointEncSlice` for H.264 Main/High and HEVC Main. NV12 is
 the native MPP input; checked I420 and YV12 image uploads are converted into
-that storage. Both paths cover one complete frame slice, MPP-generated headers,
-CQP/CBR/VBR, FFmpeg interoperability, direct-I420 GStreamer
+that storage. Both paths cover either one complete frame slice or validated
+equal-row slices, MPP-generated headers, CQP/CBR/VBR, FFmpeg interoperability,
+direct-I420 GStreamer
 `vah264enc`/`vah265enc`, ASan/UBSan, and concurrent encode/decode. Imported
-linear NV12 DMA-BUFs can be submitted directly, and single-object linear
+linear NV12 DMA-BUFs can be submitted directly from one object or from
+separate luma/chroma objects; single-object linear
 RGBA/RGBX/BGRA/BGRX DMA-BUFs are converted through RGA into aligned NV12 before
-encode. Linear P010 DMA-BUF import and byte-exact image readback are supported
-as a surface contract, but P010 encode remains unadvertised because the
-RK3588 MPP `vepu5xx` encoder HAL rejects its compact 10-bit input format; see
+encode. Non-linear modifier layouts still fail closed. Linear P010 DMA-BUF
+import and byte-exact image readback are supported as a surface contract, but
+P010 encode remains unadvertised because the RK3588 MPP `vepu5xx` encoder HAL
+rejects its compact 10-bit input format; see
 [`docs/HEVC_MAIN10_ENCODE_BACKEND.md`](docs/HEVC_MAIN10_ENCODE_BACKEND.md).
 The native two-peer WebRTC harness now covers SDP offer/answer, trickle ICE,
-DTLS-SRTP state, and H.264 media transfer; its software transport control
-passes, while the combined `vah264enc` normal and sanitizer qualification
-remains open. The separate hardware H.264 RTP pay/depay gate passes with
-1,200-byte MTU enforcement. Multi-slice, tiled or multi-object imports, and
-long encode soak also remain open. Paced dual-codec encode smoke runs pass
-with flat post-warmup RSS/fd counts; the two-hour qualification run remains
-open.
+DTLS-SRTP state, and H.264 media transfer; the combined `vah264enc` normal and
+sanitizer qualification passes. The separate hardware H.264 RTP pay/depay gate
+passes with 1,200-byte MTU enforcement. H.264 and HEVC equal-row multi-slice
+encode produce exactly four parser-clean slices per frame. A 7,200-second
+dual-codec encode soak completed 216,000 frames per codec with no fd growth
+and decreasing RSS, and a single-process two-decode/two-encode gate passes
+normally, under ASan/UBSan, and under TSan.
 
 ## Dependencies
 
@@ -199,8 +212,8 @@ packages, then exercises their clean install, upgrade, and purge lifecycle in
 an isolated root.
 
 Firefox additionally needs a distribution sandbox policy that permits the RDD
-process to use Rockchip MPP, RGA, and dma-heap devices. A version-pinned
-Firefox 153.0 source patch and validator are provided in
+process to use Rockchip MPP, RGA, and dma-heap devices. Version-pinned Firefox
+152.0.6 and 153.0 source patches and validators are provided in
 [`contrib/firefox`](contrib/firefox/README.md). Disabling the RDD sandbox is
 only appropriate as a short, per-process diagnostic because it broadens the
 attack surface for untrusted media. With a suitable policy, enable:
