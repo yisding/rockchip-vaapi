@@ -1,3 +1,16 @@
+rockchip-vaapi (1.0.11+ysp5) resolute; urgency=medium
+
+  * Refuse experimental HEVC Main10 and VP9 Profile 2 contexts narrower than
+    RGA3's 68-pixel AFBC active-width minimum at VA context creation, allowing
+    applications to fall back to software before decode starts.
+  * Keep a matching AFBC NV15-to-P010 geometry guard immediately before RGA
+    submission for changed or cropped frame geometry.
+  * Add a focused 64x240 fallback gate proving all 48 frames software-decode
+    after one context refusal, with no RGA conversion or kernel no-core-match
+    message, plus 64/68-pixel object and supported-width regression coverage.
+
+ -- Yi Ding <yi.s.ding@gmail.com>  Wed, 29 Jul 2026 01:06:59 -0700
+
 rockchip-vaapi (1.0.11+ysp4) resolute; urgency=medium
 
   * Advertise VAProfileHEVCMain by default. All eight pinned FATE vectors are
