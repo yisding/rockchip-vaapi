@@ -723,3 +723,11 @@ downloaded frames cleanly. The paced 4K soak then ran for 7,200 seconds and
 KiB finally with a 47,844 KiB span; fd head/tail medians were 55/55 with a
 24-fd transient span, and every pool/worker lifecycle matched. The complete
 risky-enabled Phase 0 normal and ASan/UBSan gates were green again afterward.
+
+On 2026-07-29, the repaired gate was rerun for the full 7,200 seconds against
+the checksum-verified exact Published MPP `3381fd2c` and FFmpeg `33a651a55b`
+package root. It completed 216,005 external 4K frames. RSS moved from 169,248
+KiB to 139,776 KiB with a 53,592 KiB span and no growth; fd head/tail medians
+moved from 57 to 54 with a bounded 29-fd span. This is exact-PPA-package
+runtime evidence; host installation and installed-payload identity remain
+separate.

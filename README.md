@@ -15,7 +15,10 @@ ROCK 5B (RK3588, vendor MPP stack on a 6.18 kernel) with a software-vs-VAAPI
 `framemd5` bit-exactness harness (`tests/validate.sh`). The full normal and
 ASan/UBSan gates are green on the audited fixed kernel build. The Phase 1
 object model, module split, zero-copy worker/fence architecture, concurrent
-decoder gates, and two-hour 4K resource soak are also complete; see
+decoder gates, and two-hour 4K resource soak are also complete. The repaired
+soak gate was repeated for 7,200 seconds against the exact checksum-verified
+Published MPP `3381fd2c` and FFmpeg `33a651a55b` package root, completing
+216,005 4K frames with no RSS or fd growth; see
 [docs/TESTING.md](docs/TESTING.md):
 
 - **Fixed multi-reference / B-frame H.264 corruption.** VA-API never passes

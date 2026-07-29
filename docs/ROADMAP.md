@@ -304,6 +304,14 @@ a 468 KiB span, against 47,844 KiB in the run recorded above -- and fd
 head/tail medians both 54. The gate still reports it as a smoke run, because
 the Phase 1 exit criterion is 7,200 seconds.
 
+**Follow-up (2026-07-29, exact Published package root):** The repaired gate
+completed the full 7,200-second exit duration against checksum-verified
+Published MPP `3381fd2c` and FFmpeg `33a651a55b` packages extracted from the
+live PPA. It decoded 216,005 external 4K frames; RSS moved from 169,248 KiB to
+139,776 KiB with a 53,592 KiB transient span and no growth, while fd
+head/tail medians moved from 57 to 54 with a bounded 29-fd span. This closes
+the exact-package long-runtime gate independently of host installation.
+
 **Follow-up (2026-07-28, three fixed ceilings removed):** Widening the HEVC
 conformance evidence (Phase 2 below) exposed three limits in this core that
 were not reachable from the H.264/VP9 matrix. All three are fixed and none was
