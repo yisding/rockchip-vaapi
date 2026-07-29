@@ -197,12 +197,18 @@ VAStatus rk_CreateContext(VADriverContextP ctx,
             rk_object_unref(&c->base);
             return VA_STATUS_ERROR_ALLOCATION_FAILED;
         }
-        if (coding == MPP_VIDEO_CodingHEVC) {
+        /* H.264 and HEVC outputs are routed back to their surface by token, so
+         * MPP's display reordering buys this driver nothing and costs it: the
+         * decoder holds finished pictures waiting for later input, which shows
+         * up as extra latency and as frames stranded at teardown when an
+         * application stops feeding it. VP9 is excluded because its routing is
+         * the submission-order FIFO. */
+        if (coding == MPP_VIDEO_CodingHEVC || coding == MPP_VIDEO_CodingAVC) {
             RK_U32 immediate_out = 1;
             if (c->mpi->control(c->mpp, MPP_DEC_SET_IMMEDIATE_OUT,
                                 &immediate_out) != MPP_OK) {
-                LOG_ERROR("CreateContext: HEVC immediate-output "
-                          "configuration failed");
+                LOG_ERROR("CreateContext: immediate-output configuration "
+                          "failed");
                 rk_object_unref(&c->base);
                 return VA_STATUS_ERROR_ALLOCATION_FAILED;
             }

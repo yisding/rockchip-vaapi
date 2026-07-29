@@ -418,6 +418,71 @@ static void test_images(struct VADriverVTable *v, VADriverContextP ctx,
     }
 }
 
+/* vaDeriveImage aliases the surface's own DMA-BUF, and its buffer must hand
+ * back a DRM PRIME fd. VLC's GL converters depend on both; without them VLC
+ * drops its hardware decoder entirely. */
+static void test_derive_image(struct VADriverVTable *v, VADriverContextP ctx)
+{
+    VASurfaceAttrib attrib = {
+        .type = VASurfaceAttribPixelFormat,
+        .flags = VA_SURFACE_ATTRIB_SETTABLE,
+        .value.type = VAGenericValueTypeInteger,
+        .value.value.i = VA_FOURCC_NV12,
+    };
+    VASurfaceID surface;
+    CHECK_STATUS(v->vaCreateSurfaces2(ctx, VA_RT_FORMAT_YUV420, 64, 64,
+                                      &surface, 1, &attrib, 1),
+                 VA_STATUS_SUCCESS);
+
+    VAImage derived;
+    CHECK_STATUS(v->vaDeriveImage(ctx, surface, &derived), VA_STATUS_SUCCESS);
+    if (derived.format.fourcc != VA_FOURCC_NV12 || derived.num_planes != 2 ||
+        derived.width != 64 || derived.height != 64 ||
+        derived.pitches[0] < 64 ||
+        derived.offsets[1] != derived.pitches[0] * 64u ||
+        derived.data_size < derived.offsets[1] + derived.offsets[1] / 2) {
+        fputs("derived image layout is not the surface's own layout\n", stderr);
+        exit(1);
+    }
+
+    /* The mapping is the surface memory, so a write through it must be
+     * visible through a second map of the same buffer. */
+    unsigned char *pixels = NULL;
+    CHECK_STATUS(v->vaMapBuffer(ctx, derived.buf, (void **)&pixels),
+                 VA_STATUS_SUCCESS);
+    pixels[0] = 0xa5;
+    pixels[derived.offsets[1]] = 0x5a;
+    CHECK_STATUS(v->vaUnmapBuffer(ctx, derived.buf), VA_STATUS_SUCCESS);
+    pixels = NULL;
+    CHECK_STATUS(v->vaMapBuffer(ctx, derived.buf, (void **)&pixels),
+                 VA_STATUS_SUCCESS);
+    if (pixels[0] != 0xa5 || pixels[derived.offsets[1]] != 0x5a) {
+        fputs("derived image mapping does not alias the surface\n", stderr);
+        exit(1);
+    }
+    CHECK_STATUS(v->vaUnmapBuffer(ctx, derived.buf), VA_STATUS_SUCCESS);
+
+    VABufferInfo info = { .mem_type = VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME };
+    CHECK_STATUS(v->vaAcquireBufferHandle(ctx, derived.buf, &info),
+                 VA_STATUS_SUCCESS);
+    if (info.mem_type != VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME ||
+        info.mem_size < derived.data_size || (int)info.handle < 0) {
+        fputs("acquired buffer handle is not a usable DRM PRIME fd\n", stderr);
+        exit(1);
+    }
+    CHECK_STATUS(v->vaReleaseBufferHandle(ctx, derived.buf),
+                 VA_STATUS_SUCCESS);
+
+    VABufferInfo unsupported = {
+        .mem_type = VA_SURFACE_ATTRIB_MEM_TYPE_USER_PTR
+    };
+    CHECK_STATUS(v->vaAcquireBufferHandle(ctx, derived.buf, &unsupported),
+                 VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE);
+
+    CHECK_STATUS(v->vaDestroyImage(ctx, derived.image_id), VA_STATUS_SUCCESS);
+    CHECK_STATUS(v->vaDestroySurfaces(ctx, &surface, 1), VA_STATUS_SUCCESS);
+}
+
 static void test_surfaces(struct VADriverVTable *v, VADriverContextP ctx,
                           VASurfaceID surfaces[SURFACE_COUNT],
                           VAImage images[IMAGE_COUNT])
@@ -978,6 +1043,7 @@ int main(void)
     test_configs(&vtable, &ctx, configs);
     test_buffers(&vtable, &ctx, buffers);
     test_images(&vtable, &ctx, images);
+    test_derive_image(&vtable, &ctx);
     test_surfaces(&vtable, &ctx, surfaces, images);
     test_contexts(&vtable, &ctx, configs[0], surfaces, contexts);
 

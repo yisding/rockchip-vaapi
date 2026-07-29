@@ -205,6 +205,7 @@ FFMPEG=/usr/bin/ffmpeg make check-hevc-main10-experimental
 FFMPEG=/usr/bin/ffmpeg make check-hevc-main10-hdr-experimental
 FFMPEG=/usr/bin/ffmpeg make check-vp9-profile2-experimental
 FFMPEG=/usr/bin/ffmpeg make check-gstreamer-va
+FFMPEG=/usr/bin/ffmpeg make check-vlc-display
 FFMPEG=/usr/bin/ffmpeg make check-h264-encode-experimental
 FFMPEG=/usr/bin/ffmpeg make check-hevc-encode-experimental
 FFMPEG=/usr/bin/ffmpeg make check-webrtc-rtp-experimental
@@ -260,6 +261,27 @@ mastering-display, and MaxCLL/MaxFALL metadata. This proves that libavcodec's
 original-stream VUI/SEI metadata survives the VA hardware-frame path even
 though the private SPS reconstructed for MPP has no VUI. It does not replace
 the Firefox/mpv display-presentation gate.
+
+`check-vlc-display` plays generated H.264 High and HEVC Main clips through
+stock VLC with `--avcodec-hw=vaapi` and requires that VLC select its VA-API
+hardware decoder, name this driver, call `vaDeriveImage`, and produce at least
+`MIN_FRAMES` external-pool frames with no driver error markers. It refuses to
+run without `DISPLAY` or `WAYLAND_DISPLAY`: headless VLC reports "no hw decoder
+modules matched", falls back to software, and never loads this driver, so a
+headless pass would be evidence of nothing.
+
+VLC's OpenGL VA-API converters derive an image from the decoded surface, take
+its buffer handle as a DRM PRIME fd, and import that as an EGLImage. The driver
+implements `vaDeriveImage` over the surface's own DMA-BUF and
+`vaAcquireBufferHandle` over that buffer; `tests/driver_objects_test` covers
+the layout, the aliasing (a write through the mapping is visible through a
+second map), the DRM PRIME handle, and the refusal of other memory types,
+normally and under ASan/UBSan and TSan.
+
+VLC destroys its decoder mid-stream at exit with the last pictures still in
+flight. The driver reports that as a teardown-drain note and fails those
+fences rather than waiting forever; it is not an error and the gate does not
+treat it as one.
 
 `check-vp9-profile2-experimental` generates a lossless 48-frame VP9 Profile 2
 stream at 320x240 and runs the checksum-pinned official WebM/libvpx

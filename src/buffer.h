@@ -16,6 +16,9 @@ VAStatus rk_BufferSetNumElements(VADriverContextP context, VABufferID id,
 VAStatus rk_MapBuffer(VADriverContextP context, VABufferID id, void **data);
 VAStatus rk_UnmapBuffer(VADriverContextP context, VABufferID id);
 VAStatus rk_DestroyBuffer(VADriverContextP context, VABufferID id);
+VAStatus rk_buffer_acquire_handle(VADriverContextP context, VABufferID id,
+                                  VABufferInfo *info);
+VAStatus rk_buffer_release_handle(VADriverContextP context, VABufferID id);
 VAStatus rk_buffer_store_coded(RKBuffer *buffer, const void *data, size_t size,
                                uint32_t status);
 VAStatus rk_BufferInfo(VADriverContextP context, VABufferID id,

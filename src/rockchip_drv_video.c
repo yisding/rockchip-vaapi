@@ -566,10 +566,10 @@ static VAStatus rk_QuerySurfaceAttrs(VADriverContextP ctx, VAConfigID config,
 
 static VAStatus rk_AcquireBufferHandle(VADriverContextP ctx,
                                         VABufferID buf_id, VABufferInfo *buf_info)
-{ return VA_STATUS_ERROR_UNIMPLEMENTED; }
+{ return rk_buffer_acquire_handle(ctx, buf_id, buf_info); }
 
 static VAStatus rk_ReleaseBufferHandle(VADriverContextP ctx, VABufferID buf_id)
-{ return VA_STATUS_SUCCESS; }
+{ return rk_buffer_release_handle(ctx, buf_id); }
 
 static VAStatus rk_CreateMFContext(VADriverContextP ctx,
                                     VAMFContextID *mfe_context)

@@ -533,6 +533,32 @@ modules matched`, falls back to software, and never loads this driver. There is
 no Wayland/X11 socket in the session. A valid VLC gate therefore requires a
 real display/DRM session; headless playback success is not hardware evidence.
 
+**Progress (2026-07-28, VLC display session closed):** The 2026-07-26 probe
+found VLC loading no hardware decoder in a headless login. With a real GNOME
+Wayland session and its Xwayland display, the actual blocker turned out to be
+the driver, not the environment: VLC's OpenGL VA-API converter derives an image
+from the decoded surface and imports its buffer handle as an EGLImage, and both
+`vaDeriveImage` and `vaAcquireBufferHandle` were stubs. VLC therefore dropped
+`glconv_vaapi_x11`, reported "no hw decoder modules matched", and fell back to
+software after creating 38 surfaces through this driver.
+
+`vaDeriveImage` now returns a VAImage that aliases the surface's own linear
+NV12/P010 DMA-BUF, with mapping bracketed by dma-buf CPU synchronization, and
+`vaAcquireBufferHandle` exports that buffer as DRM PRIME. Imported RGB and AFBC
+layouts fail closed because they are not describable as a VAImage. Stock VLC
+3.0.23 now reports `using hw decoder module "vaapi"` and `Using Rockchip MPP
+VA-API Driver 0.1 for hardware decoding`, and `make check-vlc-display` gates
+H.264 High and HEVC Main playback on that plus external-pool frame counts and
+a clean driver log. The gate refuses to run headless.
+
+Building it also closed two decode-path gaps. MPP's display reordering was
+holding finished H.264 pictures for later input even though this driver routes
+outputs back to their surface by token, so immediate output is now enabled for
+H.264 as well as HEVC -- validated against the full conformance, 1,440-frame
+zero-copy, and two-context concurrent gates. Teardown now also signals
+end-of-stream to MPP and stops as soon as MPP marks the stream ended, instead
+of always waiting out its deadline.
+
 **Progress (2026-07-27, packaging slice):** Debian packaging now declares its
 RGA build dependency and produces separate `rockchip-vaapi` and
 `rockchip-vaapi-config` packages. The optional config package selects the

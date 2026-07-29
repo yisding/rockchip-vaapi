@@ -99,6 +99,7 @@ typedef struct {
     bool worker_started;
     bool worker_stop;
     bool worker_drain;
+    bool saw_eos;
 
     /* Grown on demand: HEVC conformance streams such as CAINIT_G carry more
      * than a hundred slices in one picture, and a fixed ceiling would turn a
@@ -179,6 +180,15 @@ typedef struct RKBuffer {
     VACodedBufferSegment coded_segment;
     bool coded_ready;
     bool coded_failed;
+
+    /* Set only on the buffer vaDeriveImage hands back. It aliases a surface's
+     * DMA-BUF instead of owning heap memory, so map/unmap go through mmap with
+     * CPU access brackets and vaAcquireBufferHandle can export the fd. */
+    RKSurface *derived_surface;
+    int derived_fd;
+    size_t derived_size;
+    void *derived_map;
+    int acquired_fd;
 } RKBuffer;
 
 typedef struct {

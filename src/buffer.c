@@ -8,13 +8,23 @@
 #include <errno.h>
 #include <linux/dma-buf.h>
 #include <sys/ioctl.h>
+#include <va/va_drmcommon.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 #include "driver_internal.h"
 #include "frame_layout.h"
+#include "surface.h"
 
 static void buffer_destroy(void *opaque)
 {
     RKBuffer *buffer = opaque;
+    if (buffer->derived_map)
+        munmap(buffer->derived_map, buffer->derived_size);
+    if (buffer->acquired_fd >= 0)
+        close(buffer->acquired_fd);
+    if (buffer->derived_surface)
+        rk_object_unref(&buffer->derived_surface->base);
     free(buffer->data);
     free(buffer);
 }
@@ -57,6 +67,8 @@ VAStatus rk_CreateBuffer(VADriverContextP context, VAContextID context_id,
     buffer->size = size;
     buffer->num_elements = num_elements;
     buffer->capacity = bytes;
+    buffer->derived_fd = -1;
+    buffer->acquired_fd = -1;
     buffer->data = malloc(bytes ? bytes : 1u);
     if (!buffer->data) {
         rk_object_unref(&buffer->base);
@@ -124,6 +136,35 @@ VAStatus rk_MapBuffer(VADriverContextP context, VABufferID id, void **data)
     RKBuffer *buffer = buffer_acquire(driver, id);
     if (!buffer)
         return VA_STATUS_ERROR_INVALID_BUFFER;
+
+    /* A derived image's memory is the surface's DMA-BUF, so map it directly
+     * and bracket the CPU access. Without the sync the mapping can read stale
+     * lines the hardware wrote behind the cache. */
+    if (buffer->derived_surface) {
+        if (!buffer->derived_map) {
+            void *mapped = mmap(NULL, buffer->derived_size,
+                                PROT_READ | PROT_WRITE, MAP_SHARED,
+                                buffer->derived_fd, 0);
+            if (mapped == MAP_FAILED) {
+                LOG("MapBuffer: derived mmap failed fd=%d size=%zu errno=%d",
+                    buffer->derived_fd, buffer->derived_size, errno);
+                rk_object_unref(&buffer->base);
+                return VA_STATUS_ERROR_OPERATION_FAILED;
+            }
+            buffer->derived_map = mapped;
+        }
+        if (!dmabuf_cpu_sync(buffer->derived_fd,
+                             DMA_BUF_SYNC_START | DMA_BUF_SYNC_RW)) {
+            LOG("MapBuffer: derived sync start failed fd=%d errno=%d",
+                buffer->derived_fd, errno);
+            rk_object_unref(&buffer->base);
+            return VA_STATUS_ERROR_OPERATION_FAILED;
+        }
+        *data = buffer->derived_map;
+        rk_object_unref(&buffer->base);
+        return VA_STATUS_SUCCESS;
+    }
+
     *data = buffer->type == VAEncCodedBufferType
           ? (void *)&buffer->coded_segment : buffer->data;
     rk_object_unref(&buffer->base);
@@ -155,8 +196,78 @@ VAStatus rk_buffer_store_coded(RKBuffer *buffer, const void *data, size_t size,
 
 VAStatus rk_UnmapBuffer(VADriverContextP context, VABufferID id)
 {
-    (void)context;
-    (void)id;
+    RKDriver *driver = drv_from_ctx(context);
+    RKBuffer *buffer = buffer_acquire(driver, id);
+    if (!buffer)
+        return VA_STATUS_ERROR_INVALID_BUFFER;
+
+    /* Keep the mapping for the next vaMapBuffer; only close the CPU access
+     * window so the hardware may write again. */
+    VAStatus status = VA_STATUS_SUCCESS;
+    if (buffer->derived_surface && buffer->derived_map &&
+        !dmabuf_cpu_sync(buffer->derived_fd,
+                         DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW)) {
+        LOG("UnmapBuffer: derived sync end failed fd=%d errno=%d",
+            buffer->derived_fd, errno);
+        status = VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+    rk_object_unref(&buffer->base);
+    return status;
+}
+
+VAStatus rk_buffer_acquire_handle(VADriverContextP context, VABufferID id,
+                                  VABufferInfo *info)
+{
+    RKDriver *driver = drv_from_ctx(context);
+    if (!info)
+        return VA_STATUS_ERROR_INVALID_PARAMETER;
+
+    RKBuffer *buffer = buffer_acquire(driver, id);
+    if (!buffer)
+        return VA_STATUS_ERROR_INVALID_BUFFER;
+    if (!buffer->derived_surface) {
+        rk_object_unref(&buffer->base);
+        return VA_STATUS_ERROR_UNSUPPORTED_BUFFERTYPE;
+    }
+    /* Only DRM PRIME is offered. A caller asking for a GEM name or a generic
+     * pointer gets a real error rather than a handle it cannot use. */
+    if (info->mem_type != 0 &&
+        info->mem_type != VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME) {
+        LOG("AcquireBufferHandle: unsupported mem_type 0x%x",
+            (unsigned)info->mem_type);
+        rk_object_unref(&buffer->base);
+        return VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE;
+    }
+    if (buffer->acquired_fd < 0) {
+        buffer->acquired_fd = dup(buffer->derived_fd);
+        if (buffer->acquired_fd < 0) {
+            LOG("AcquireBufferHandle: dup(%d) failed errno=%d",
+                buffer->derived_fd, errno);
+            rk_object_unref(&buffer->base);
+            return VA_STATUS_ERROR_ALLOCATION_FAILED;
+        }
+    }
+
+    memset(info, 0, sizeof(*info));
+    info->handle = (uintptr_t)buffer->acquired_fd;
+    info->type = buffer->type;
+    info->mem_type = VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME;
+    info->mem_size = buffer->derived_size;
+    rk_object_unref(&buffer->base);
+    return VA_STATUS_SUCCESS;
+}
+
+VAStatus rk_buffer_release_handle(VADriverContextP context, VABufferID id)
+{
+    RKDriver *driver = drv_from_ctx(context);
+    RKBuffer *buffer = buffer_acquire(driver, id);
+    if (!buffer)
+        return VA_STATUS_ERROR_INVALID_BUFFER;
+    if (buffer->acquired_fd >= 0) {
+        close(buffer->acquired_fd);
+        buffer->acquired_fd = -1;
+    }
+    rk_object_unref(&buffer->base);
     return VA_STATUS_SUCCESS;
 }
 
@@ -332,16 +443,152 @@ VAStatus rk_CreateImage(VADriverContextP context, VAImageFormat *format,
     return VA_STATUS_SUCCESS;
 }
 
+/* Build a VAImage that aliases the surface's own DMA-BUF rather than copying
+ * into a fresh allocation. VLC's OpenGL VA-API converters need this: they
+ * derive an image, take its buffer handle as a DRM PRIME fd, and import that
+ * as an EGLImage. Refusing it made VLC drop its hardware decoder module
+ * entirely and fall back to software.
+ *
+ * Only the driver's own linear NV12/P010 surfaces are derivable. Imported RGB
+ * and AFBC layouts are not describable as a VAImage, so they fail closed. */
 VAStatus rk_DeriveImage(VADriverContextP context, VASurfaceID surface_id,
                         VAImage *image)
 {
     RKDriver *driver = drv_from_ctx(context);
+    if (!image)
+        return VA_STATUS_ERROR_INVALID_PARAMETER;
+
     RKSurface *surface = surface_acquire(driver, surface_id);
     if (!surface)
         return VA_STATUS_ERROR_INVALID_SURFACE;
-    (void)image;
-    rk_object_unref(&surface->base);
-    return VA_STATUS_ERROR_OPERATION_FAILED;
+
+    /* A consumer deriving an image expects the decoded frame, and may not have
+     * synced first. Mirror vaExportSurfaceHandle and settle the surface. */
+    pthread_mutex_lock(&surface->lock);
+    bool needs_sync = !surface->decoded && surface->ctx_id != 0;
+    pthread_mutex_unlock(&surface->lock);
+    if (needs_sync) {
+        VAStatus sync_status = rk_SyncSurface(context, surface_id);
+        if (sync_status != VA_STATUS_SUCCESS) {
+            rk_object_unref(&surface->base);
+            return sync_status;
+        }
+    }
+
+    pthread_mutex_lock(&surface->lock);
+    MppBuffer active = surface->import_buf ? surface->import_buf
+                     : surface->backing_buf ? surface->backing_buf
+                     : surface->frame ? mpp_frame_get_buffer(surface->frame)
+                     : surface->priv_buf;
+    int fd = active ? mpp_buffer_get_fd(active) : -1;
+    size_t object_size = active ? mpp_buffer_get_size(active) : 0;
+    unsigned int hstride = surface->hstride ? (unsigned int)surface->hstride
+                                            : (unsigned int)surface->width;
+    unsigned int vstride = surface->vstride ? (unsigned int)surface->vstride
+                                            : (unsigned int)surface->height;
+    unsigned int width = (unsigned int)surface->width;
+    unsigned int height = (unsigned int)surface->height;
+    bool is_10bit = MPP_FRAME_FMT_IS_YUV_10BIT(surface->fmt);
+    bool imported_rgb = surface->imported_rgb;
+    bool fbc = MPP_FRAME_FMT_IS_FBC(surface->fmt);
+    pthread_mutex_unlock(&surface->lock);
+
+    if (imported_rgb || fbc) {
+        LOG("DeriveImage: surface=0x%x layout is not a plain VAImage "
+            "(rgb=%d fbc=%d)", surface_id, imported_rgb, fbc);
+        rk_object_unref(&surface->base);
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+    if (fd < 0 || object_size == 0 || object_size > UINT_MAX ||
+        width > USHRT_MAX || height > USHRT_MAX) {
+        LOG("DeriveImage: surface=0x%x not derivable (fd=%d size=%zu)",
+            surface_id, fd, object_size);
+        rk_object_unref(&surface->base);
+        return VA_STATUS_ERROR_INVALID_SURFACE;
+    }
+
+    /* The luma pitch is the surface's byte stride; P010 carries two bytes per
+     * sample and MPP already reports the byte stride for it. */
+    unsigned int luma_pitch = hstride;
+    size_t chroma_offset = (size_t)luma_pitch * vstride;
+    size_t required = chroma_offset + chroma_offset / 2;
+    if (required > object_size) {
+        LOG("DeriveImage: surface=0x%x layout %ux%u needs %zu of %zu bytes",
+            surface_id, luma_pitch, vstride, required, object_size);
+        rk_object_unref(&surface->base);
+        return VA_STATUS_ERROR_INVALID_SURFACE;
+    }
+
+    VABufferID buffer_id;
+    VAStatus status = rk_CreateBuffer(context, 0, VAImageBufferType, 0, 0,
+                                      NULL, &buffer_id);
+    if (status != VA_STATUS_SUCCESS) {
+        rk_object_unref(&surface->base);
+        return status;
+    }
+
+    RKBuffer *buffer = buffer_acquire(driver, buffer_id);
+    RKImage *image_object = buffer ? calloc(1, sizeof(*image_object)) : NULL;
+    if (!image_object) {
+        if (buffer)
+            rk_object_unref(&buffer->base);
+        rk_DestroyBuffer(context, buffer_id);
+        rk_object_unref(&surface->base);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
+
+    /* The buffer keeps the surface alive: the image outlives the caller's
+     * surface reference, and its memory is the surface's. */
+    buffer->derived_surface = surface;
+    buffer->derived_fd = fd;
+    buffer->derived_size = object_size;
+    buffer->capacity = object_size;
+    buffer->size = (unsigned int)object_size;
+    buffer->num_elements = 1;
+
+    rk_object_init(&image_object->base, image_destroy);
+    image_object->buffer_id = buffer_id;
+    image_object->buffer = buffer;
+    image_object->fourcc = is_10bit ? VA_FOURCC_P010 : VA_FOURCC_NV12;
+    image_object->width = width;
+    image_object->height = height;
+    image_object->num_planes = 2;
+    image_object->pitches[0] = luma_pitch;
+    image_object->pitches[1] = luma_pitch;
+    image_object->offsets[0] = 0;
+    image_object->offsets[1] = (unsigned int)chroma_offset;
+
+    uint32_t image_id;
+    pthread_mutex_lock(&driver->object_lock);
+    bool inserted = rk_object_heap_insert(&driver->image_heap,
+                                          &image_object->base, &image_id);
+    pthread_mutex_unlock(&driver->object_lock);
+    if (!inserted) {
+        rk_object_unref(&image_object->base);
+        rk_DestroyBuffer(context, buffer_id);
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    }
+
+    memset(image, 0, sizeof(*image));
+    image->image_id = (VAImageID)image_id;
+    image->buf = buffer_id;
+    image->format.fourcc = image_object->fourcc;
+    image->format.byte_order = VA_LSB_FIRST;
+    image->format.bits_per_pixel = is_10bit ? 24 : 12;
+    image->width = (unsigned short)width;
+    image->height = (unsigned short)height;
+    image->num_planes = 2;
+    image->pitches[0] = image_object->pitches[0];
+    image->pitches[1] = image_object->pitches[1];
+    image->offsets[0] = image_object->offsets[0];
+    image->offsets[1] = image_object->offsets[1];
+    image->data_size = (unsigned int)object_size;
+
+    LOG("DeriveImage: surface=0x%x %ux%u %s pitch=%u chroma_offset=%zu "
+        "size=%zu fd=%d", surface_id, width, height,
+        is_10bit ? "P010" : "NV12", luma_pitch, chroma_offset, object_size,
+        fd);
+    return VA_STATUS_SUCCESS;
 }
 
 VAStatus rk_DestroyImage(VADriverContextP context, VAImageID id)

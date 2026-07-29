@@ -598,6 +598,11 @@ static bool drain_output_frame(RKContext *c)
     MppFrame frame = NULL;
     MPP_RET ret = c->mpi->decode_get_frame(c->mpp, &frame);
     if (ret == MPP_OK && frame) {
+        /* MPP marks the last frame after an end-of-stream packet. Reading it
+         * is the only positive signal that nothing more is coming; without it
+         * a teardown drain can only wait out its deadline. */
+        if (mpp_frame_get_eos(frame))
+            c->saw_eos = true;
         if (assign_mpp_frame(frame, c) && c->outstanding_frames > 0)
             c->outstanding_frames--;
         return true;
@@ -1167,10 +1172,38 @@ static bool worker_drain_one(RKContext *c)
     return drain_output_frame(c);
 }
 
+/* Tell MPP no more input is coming. Codecs without immediate-output -- H.264
+ * and VP9 here -- hold decoded pictures for display reordering and will not
+ * release the last few without this, so a teardown drain would wait out its
+ * deadline and fail fences whose frames were already decoded. */
+static void worker_signal_eos(RKContext *c)
+{
+    uint8_t stub = 0;
+    MppPacket packet = NULL;
+
+    if (mpp_packet_init(&packet, &stub, sizeof(stub)) != MPP_OK)
+        return;
+    mpp_packet_set_pos(packet, &stub);
+    mpp_packet_set_length(packet, 0);
+    mpp_packet_set_eos(packet);
+    MPP_RET ret = MPP_NOK;
+    for (int tries = 0; tries < 50; tries++) {
+        ret = c->mpi->decode_put_packet(c->mpp, packet);
+        if (ret == MPP_OK)
+            break;
+        if (!drain_output_frame(c) && monotonic_ns() > c->drain_deadline_ns)
+            break;
+    }
+    LOG("decode worker: end-of-stream marker put ret=%d outstanding=%u",
+        ret, c->outstanding_frames);
+    mpp_packet_deinit(&packet);
+}
+
 /* Wall time a teardown drain may spend waiting on MPP before the remaining
- * fences are failed. Bounds vaDestroyContext against a wedged backend without
- * cutting a healthy flush short. */
-#define WORKER_DRAIN_TIMEOUT_NS ((int64_t)3000000000)
+ * fences are failed. With immediate output a healthy backend returns finished
+ * pictures in milliseconds, so this only has to cover a hiccup -- it must not
+ * become a second of latency on every vaDestroyContext. */
+#define WORKER_DRAIN_TIMEOUT_NS ((int64_t)1000000000)
 
 /* Wall time the worker tolerates with frames outstanding and no output at all
  * before it declares every pending decode failed. vaSyncSurface has no
@@ -1217,6 +1250,7 @@ void *rk_mpp_dec_worker_main(void *opaque)
 {
     RKContext *c = opaque;
     int64_t stalled_since_ns = 0;
+    bool signalled_eos = false;
     LOG("decode worker: started coding=%d", (int)c->coding);
 
     for (;;) {
@@ -1237,13 +1271,22 @@ void *rk_mpp_dec_worker_main(void *opaque)
         bool draining = c->worker_drain;
         bool drain_expired = draining &&
                              monotonic_ns() > c->drain_deadline_ns;
-        if (draining && (drain_expired ||
+        if (draining && (drain_expired || c->saw_eos ||
                          (!c->job_head && c->outstanding_frames == 0))) {
             unsigned int stranded = c->outstanding_frames;
+            bool ended = c->saw_eos;
             pthread_mutex_unlock(&c->work_lock);
+            /* Not necessarily a fault: a player that stops mid-stream
+             * destroys its context with pictures it never intends to consume,
+             * and MPP will not produce them without more input. Their fences
+             * are failed below, so a caller that does still want them gets a
+             * real VAStatus rather than a wait that never ends. */
             if (drain_expired)
-                LOG_WARNING("decode worker: drain timed out with %u frames "
-                         "outstanding", stranded);
+                LOG("decode worker: teardown drain ended with %u frame(s) the "
+                    "backend had not produced", stranded);
+            else if (ended && stranded)
+                LOG("decode worker: backend ended the stream with %u frames "
+                    "it never produced", stranded);
             break;
         }
 
@@ -1255,6 +1298,13 @@ void *rk_mpp_dec_worker_main(void *opaque)
             job->next = NULL;
         }
         pthread_mutex_unlock(&c->work_lock);
+
+        /* Every queued packet has now been submitted, so this is the first
+         * point at which an end-of-stream marker is correct. */
+        if (draining && !job && !signalled_eos) {
+            signalled_eos = true;
+            worker_signal_eos(c);
+        }
 
         if (job) {
             worker_submit_job(c, job);
