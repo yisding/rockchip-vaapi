@@ -7,18 +7,25 @@
 # 8-bit 4:2:0, decodes each through direct MPP and then through VA-API, and
 # reports which ones are bit-exact against software.
 #
-# Direct MPP runs first on purpose. A vector that the backend itself cannot
-# decode is a backend finding, not a driver finding, and must not be laundered
-# through the VA-API gate as though the driver had been proven wrong.
+# Every candidate is also submitted to MPP directly, but only to attribute a
+# failure. A VA-API failure on a stream the backend could not decode either is
+# a backend finding and must not be laundered as a driver defect; the reverse
+# does not hold, because the direct-MPP frame count legitimately differs on
+# output-order streams where libavcodec, not MPP, decides what is output.
 #
 # Output is a TSV report plus manifest-ready rows for the bit-exact vectors.
 # Nothing here edits the manifest; promoting a vector stays a human decision.
+#
+# Set EXPECTATIONS to a pinned manifest to run it as a gate instead of a
+# survey: every candidate's class must match the manifest's decode_path column
+# and the script exits non-zero on the first divergence in either direction.
 #
 # Usage:
 #   tests/sweep-hevc-conformance.sh CANDIDATE_DIR [REPORT_DIR]
 #
 # Environment:
-#   FFMPEG FFPROBE REPRO RENDER_NODE FFMPEG_TIMEOUT DRIVER_DIR BASE_URL JOBS
+#   FFMPEG FFPROBE REPRO RENDER_NODE FFMPEG_TIMEOUT DRIVER_DIR BASE_URL
+#   EXPECTATIONS
 
 set -u
 
@@ -31,6 +38,7 @@ DRIVER_DIR=${DRIVER_DIR:-$REPO_ROOT}
 REPRO=${REPRO:-$SCRIPT_DIR/hevc_mpp_repro}
 RENDER_NODE=${RENDER_NODE:-/dev/dri/renderD128}
 BASE_URL=${BASE_URL:-https://fate-suite.ffmpeg.org/hevc-conformance}
+EXPECTATIONS=${EXPECTATIONS:-}
 
 if [ $# -lt 1 ] || [ $# -gt 2 ]; then
     echo "usage: $0 CANDIDATE_DIR [REPORT_DIR]" >&2
@@ -66,6 +74,10 @@ if ! "$FFMPEG" -hide_banner -hwaccels 2>/dev/null |
 fi
 if [ ! -e "$RENDER_NODE" ]; then
     echo "error: render node $RENDER_NODE is missing" >&2
+    exit 2
+fi
+if [ -n "$EXPECTATIONS" ] && [ ! -f "$EXPECTATIONS" ]; then
+    echo "error: expectations manifest $EXPECTATIONS is missing" >&2
     exit 2
 fi
 
@@ -106,10 +118,41 @@ classify()
         -of default=nw=1:nk=1 "$1" 2>/dev/null | tr '\n' ' '
 }
 
+# The manifest's decode_path column carries the expected class for each
+# pinned vector. Unknown names and unexpected classes both fail: a vector that
+# newly passes is as much a change to record as one that newly fails.
+expected_class()
+{
+    [ -n "$EXPECTATIONS" ] || return 0
+    awk -F'\t' -v want="$1" '$1 !~ /^#/ && $2 == want {print $8; found=1}
+                             END {if (!found) print "unpinned"}' \
+        "$EXPECTATIONS"
+}
+
 report()
 {
     printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" >>"$REPORT"
     printf '%-8s %-44s %s\n' "$1" "$2" "$5"
+
+    [ -n "$EXPECTATIONS" ] || return 0
+    want=$(expected_class "$2")
+    if [ "$1" != "$want" ]; then
+        printf 'MISMATCH %s: expected %s, got %s\n' "$2" "$want" "$1"
+        UNEXPECTED=$((UNEXPECTED + 1))
+    fi
+}
+
+# A VA-API failure on a stream direct MPP could not decode either is a backend
+# finding. Only a failure the backend handled cleanly is attributable here.
+report_failure()
+{
+    if [ "$5" = yes ]; then
+        DRIVER_FAILED=$((DRIVER_FAILED + 1))
+        report driver "$1" "$2" "$3" "$4"
+    else
+        BACKEND_FAILED=$((BACKEND_FAILED + 1))
+        report backend "$1" "$2" "$3" "$4 (direct MPP also failed: $5)"
+    fi
 }
 
 TOTAL=0
@@ -118,6 +161,7 @@ BACKEND_FAILED=0
 DRIVER_FAILED=0
 UNSUPPORTED=0
 EXACT=0
+UNEXPECTED=0
 
 for input in "$CANDIDATE_DIR"/*.bit "$CANDIDATE_DIR"/*.bin; do
     [ -f "$input" ] || continue
@@ -144,15 +188,16 @@ for input in "$CANDIDATE_DIR"/*.bit "$CANDIDATE_DIR"/*.bin; do
     fi
     frames=$(grep -vc '^#' "$sw")
 
-    # Direct MPP first: separate backend failures from driver failures.
+    # Direct MPP is a classifier, not a gate. It reports how many frames the
+    # backend emits for the original Annex-B stream, which differs from the
+    # VA-API path for output-order cases -- libavcodec decides what to output
+    # there, MPP does not. So record the result and still compare through
+    # VA-API; the backend verdict only says whether a VA-API failure is ours.
+    backend_ok=yes
     if "$REPRO" "$input" "$frames" >"$WORK/repro.log" 2>&1; then
         :
     else
-        repro_status=$?
-        BACKEND_FAILED=$((BACKEND_FAILED + 1))
-        report backend "$name" "$frames" - \
-            "direct MPP decode failed (exit $repro_status)"
-        continue
+        backend_ok="no(exit $?)"
     fi
 
     # libavcodec applies only the right/bottom crop to a hardware frame and
@@ -180,21 +225,20 @@ for input in "$CANDIDATE_DIR"/*.bit "$CANDIDATE_DIR"/*.bin; do
                     "$WORK/hw.log" | sed 's/.*\] //')"
             continue
         fi
-        DRIVER_FAILED=$((DRIVER_FAILED + 1))
-        report driver "$name" "$frames" - "VA-API decode errored"
+        report_failure "$name" "$frames" - "VA-API decode errored" \
+            "$backend_ok"
         continue
     fi
     if ! cmp -s "$sw" "$hw"; then
         differing=$(diff "$sw" "$hw" | grep -c '^<' || true)
-        DRIVER_FAILED=$((DRIVER_FAILED + 1))
-        report driver "$name" "$frames" "$differing" \
-            "$differing of $frames frames differ"
+        report_failure "$name" "$frames" "$differing" \
+            "$differing of $frames frames differ" "$backend_ok"
         continue
     fi
 
     EXACT=$((EXACT + 1))
     sha=$(sha256sum "$input" | awk '{print $1}')
-    report exact "$name" "$frames" 0 "bit-exact"
+    report exact "$name" "$frames" 0 "bit-exact (direct-mpp=$backend_ok)"
     printf 'hevc\t%s\t%s\t%s/%s\t%s\t-\t%s\tvaapi\tsafe\n' \
         "$name" "$name" "$BASE_URL" "$name" "$sha" "$sha" >>"$ROWS"
 done
@@ -204,5 +248,20 @@ echo "candidates=$TOTAL skipped=$SKIPPED backend-failed=$BACKEND_FAILED" \
      "unsupported=$UNSUPPORTED driver-failed=$DRIVER_FAILED bit-exact=$EXACT"
 echo "report:        $REPORT"
 echo "manifest rows: $ROWS"
+
+if [ -n "$EXPECTATIONS" ]; then
+    # A pinned run must also cover every pinned vector, so a manifest entry
+    # whose file is absent cannot pass unnoticed.
+    pinned=$(awk -F'\t' '$1 !~ /^#/ && NF >= 8' "$EXPECTATIONS" | wc -l)
+    if [ "$TOTAL" -ne "$pinned" ]; then
+        echo "error: ran $TOTAL candidates for $pinned pinned vectors" >&2
+        exit 1
+    fi
+    if [ "$UNEXPECTED" -ne 0 ]; then
+        echo "error: $UNEXPECTED vectors diverged from the pinned manifest" >&2
+        exit 1
+    fi
+    echo "ALL PINNED CLASSES MATCH"
+fi
 
 [ "$DRIVER_FAILED" -eq 0 ]

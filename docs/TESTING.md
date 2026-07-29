@@ -150,6 +150,37 @@ Archives remain under the ignored `tests/vectors/.downloads/` cache. Vector
 payloads are also ignored; only their URLs, member names, checksums, codec, and
 risk classification are committed.
 
+## Widening the pinned set
+
+`tests/validate.sh` only runs what the manifest already pins.
+`tests/sweep-hevc-conformance.sh` is the step before that: point it at a
+directory of candidate streams and it reports which ones are bit-exact,
+emitting manifest-ready rows for those.
+
+```sh
+mkdir -p ~/Code/tmp/hevc-sweep/vectors
+# fetch candidates from https://fate-suite.ffmpeg.org/hevc-conformance/
+make tests/hevc_mpp_repro
+tests/sweep-hevc-conformance.sh ~/Code/tmp/hevc-sweep/vectors
+```
+
+Each candidate is classified in four steps: `ffprobe` rejects anything that is
+not the profile under test, software decode establishes the reference, direct
+MPP records whether the backend handles the original Annex-B stream at all,
+and VA-API output is compared byte-for-byte against software.
+
+Direct MPP is a classifier, not a gate. Its frame count legitimately differs
+from the VA-API path on output-order streams, where libavcodec decides what is
+output and MPP does not, so every candidate is still compared through VA-API.
+The backend verdict only decides attribution: a VA-API failure on a stream the
+backend also could not decode is reported as `backend`, and only a failure the
+backend handled cleanly is reported as `driver`. A picture larger than the
+advertised size constraints is reported as `unsup` -- refusing it is the
+documented contract, and FFmpeg falls back to software.
+
+The script never edits the manifest. Promoting a vector stays a decision a
+maintainer makes after reading the report.
+
 ## ROCK 5B hardware gate
 
 On a ROCK 5B with the vendor MPP stack and a VA-capable system FFmpeg:

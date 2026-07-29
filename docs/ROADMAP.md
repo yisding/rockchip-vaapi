@@ -293,6 +293,28 @@ Phase 0 gate was rerun on the final tree: all pinned vectors, supplemental
 H.264 matrix, 4K case, five VP9 determinism runs, and software fallback passed
 both normally and with the complete ASan/UBSan driver.
 
+**Follow-up (2026-07-28, three fixed ceilings removed):** Widening the HEVC
+conformance evidence (Phase 2 below) exposed three limits in this core that
+were not reachable from the H.264/VP9 matrix. All three are fixed and none was
+a codec-specific problem:
+
+- `RenderPicture` capped one picture at 64 buffers, so a legal many-slice
+  stream became `VA_STATUS_ERROR_MAX_NUM_EXCEEDED`. The pending list now grows;
+  the remaining ceiling only bounds hostile input.
+- Context teardown cancelled in-flight decodes. VA surfaces belong to the
+  display, not the context, and applications legitimately destroy a decode
+  context on a sequence change and then sync surfaces the old context was still
+  filling — `SLIST_B_Sony_8.bit` failed this way in three of six runs. Teardown
+  now drains submitted work under a 3-second deadline, so a wedged backend
+  still cannot block `vaDestroyContext`.
+- The external buffer pool was a fixed 24 frames and cannot be sized up front:
+  surfaces are created independently of the context, and FFmpeg passes no
+  render targets to `vaCreateContext`. Frame-threaded FFmpeg allocated 29
+  surfaces, every pool buffer ended up bound to a surface the application still
+  held, and MPP waited forever for a free one — a hard deadlock that hung the
+  process. The pool now grows on demand to a 64-frame ceiling and reports a
+  real error instead of stalling if a consumer holds even that many.
+
 - Split the monolith into the module layout above; introduce the object heap.
 - Implement the **external-buffer-group zero-copy model** and delete the
   per-frame memcpy.
@@ -421,6 +443,28 @@ layouts and toggles cross-tile filtering. Confirmation on a healthy backend is
 pending: the 2026-07-27 KASAN kernel failed the known-good control with
 `ENODEV`/`EIO`, and the reducer correctly stopped without attributing that
 failure to TILES. See `docs/HEVC_TILES_BACKEND.md`.
+
+**Progress (2026-07-28, TILES backend fixed and the sweep widened):** On the
+current stack -- kernel `6.18.40-ysp-rockchip64` (notes
+`db18acdddf7ba9de84590a5816911ed2d929643980057d639a90c2b1337d900c`,
+package `6.18.40+rk3588av1fwport20260725-0ubuntu1~rk2`) with
+`librockchip-mpp 1.5.0+git20260727.d8c6b88a` -- `make check-hevc-tiles-backend`
+passes: the known-good control, the complete 100-frame TILES vector, and the
+reduced two-picture same-ID PPS core all decode cleanly through direct MPP. The
+`errinfo=1` that blocked `TILES_A_Cisco_2.bit` is gone. The experimental HEVC
+Main gate is consequently **8/8 bit-exact**, deterministic across three runs
+and green with the complete ASan/UBSan driver.
+
+`tests/sweep-hevc-conformance.sh` then widened the evidence from the eight
+pinned vectors to all 163 HEVC Main candidates in the FFmpeg FATE conformance
+suite. It found nine failures, of which one was a comparison artifact and four
+were fixed driver limits; see the Phase 1 note below. After those fixes the
+sweep is **134 bit-exact, zero driver failures**. The remainder are 17
+candidates that are not Main 8-bit 4:2:0, `PICSIZE_A_Bossen_1.bit` at
+1056x8440 which the driver correctly refuses against its advertised
+7680x4320 constraint, and streams direct MPP cannot decode either.
+`make check-hevc-conformance-sweep` pins every class in
+`tests/hevc-sweep-vectors.tsv` and fails on divergence in either direction.
 
 **Progress (2026-07-26, HDR10 metadata slice):**
 `make check-hevc-main10-hdr-experimental` generates a 24-frame Main10 HDR10
@@ -642,6 +686,13 @@ concurrent with decode contexts are race-free.
   `/dev/mpp_service`, whose BSP-side input validation is below mainline. Treat
   every VA buffer as hostile input; fuzz the bitstream reconstructors. Document
   the sandbox trade-off honestly (it does not disappear — it moves).
+  `make test-fuzz` covers the H.264, HEVC, and VP9 reconstructors with
+  libFuzzer under ASan/UBSan, filling whole parameter structures from fuzzer
+  bytes rather than only mutating bitstreams. It found an out-of-range shift in
+  the HEVC slice rewriter, which had trusted an earlier parameter-set call to
+  have bounded the picture parameters; both entry points now validate their own
+  syntax bounds. A coverage-minimized seed corpus plus named reproducers is
+  replayed as a deterministic regression check before every campaign.
 - **Docs:** keep `DEVELOPMENT.md` (architecture), this roadmap (plan), and a
   `TESTING.md` (how to run the gates) current as the source of truth.
 

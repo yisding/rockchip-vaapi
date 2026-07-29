@@ -37,6 +37,8 @@ UNIT_TESTS := tests/object_heap_test tests/frame_layout_test tests/h264_test \
 HARDWARE_TESTS := tests/driver_objects_test
 RGB_ENCODE_TEST := tests/va_rgb_dmabuf_encode
 HEVC_MPP_REPRO := tests/hevc_mpp_repro
+HEVC_SWEEP_MANIFEST := tests/hevc-sweep-vectors.tsv
+HEVC_SWEEP_DIR := tests/vectors/hevc-sweep
 AV1_MPP_CAPS := tests/av1_mpp_caps
 DEB_OUTPUT_DIR ?= $(abspath ..)
 DEB_VERSION = $(shell dpkg-parsechangelog -SVersion)
@@ -152,6 +154,17 @@ $(HEVC_MPP_REPRO): tests/hevc_mpp_repro.c
 
 check-hevc-tiles-backend: $(HEVC_MPP_REPRO)
 	EXPECTED_RESULT=fixed tests/minimize-hevc-tiles.sh
+
+fetch-hevc-sweep-vectors:
+	MANIFEST="$(HEVC_SWEEP_MANIFEST)" VECTOR_DIR="$(HEVC_SWEEP_DIR)" \
+		tests/fetch-vectors.sh
+
+# The complete HEVC Main candidate set from the FFmpeg FATE conformance suite,
+# pinned by class. Long-running; not part of `check`.
+check-hevc-conformance-sweep: $(TARGET) $(HEVC_MPP_REPRO) \
+		fetch-hevc-sweep-vectors
+	EXPECTATIONS="$(HEVC_SWEEP_MANIFEST)" \
+		tests/sweep-hevc-conformance.sh "$(HEVC_SWEEP_DIR)"
 
 probe-mpp-main10-encode:
 	tests/probe-mpp-main10-encode.sh
@@ -487,7 +500,8 @@ clean:
 .PHONY: all install package check-package-install fetch-vectors \
 	check check-conformance check-synthetic \
 	check-hevc-experimental check-hevc-experimental-sanitize \
-	check-hevc-tiles-backend probe-mpp-main10-encode probe-av1-platform \
+	check-hevc-tiles-backend fetch-hevc-sweep-vectors \
+	check-hevc-conformance-sweep probe-mpp-main10-encode probe-av1-platform \
 	check-hevc-main10-experimental check-hevc-main10-hdr-experimental \
 	check-vp9-profile2-experimental check-gstreamer-va \
 	check-h264-encode-experimental check-h264-encode-experimental-sanitize \

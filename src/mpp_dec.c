@@ -1172,9 +1172,51 @@ static bool worker_drain_one(RKContext *c)
  * cutting a healthy flush short. */
 #define WORKER_DRAIN_TIMEOUT_NS ((int64_t)3000000000)
 
+/* Wall time the worker tolerates with frames outstanding and no output at all
+ * before it declares every pending decode failed. vaSyncSurface has no
+ * timeout, so a backend that stops responding would otherwise hang the calling
+ * media process forever. Failing the fences turns that into a real VAStatus
+ * the application can fall back from. Measured on the FATE conformance
+ * candidates MPP cannot decode -- NUT_A, OPFLAG, NoOutPrior and friends --
+ * where the process previously had to be killed. */
+#define WORKER_STALL_TIMEOUT_NS ((int64_t)10000000000)
+
+/* Fail every route the worker still owns. Worker-thread context only: routes
+ * are created and consumed there, and rk_mpp_dec_stop touches them after the
+ * join. */
+static unsigned int fail_pending_routes(RKContext *c)
+{
+    unsigned int failed = 0;
+
+    RKFrameRoute *route = c->h264_routes;
+    c->h264_routes = NULL;
+    while (route) {
+        RKFrameRoute *next = route->next;
+        rk_mpp_dec_fail_surface(route->surface, route->fence);
+        frame_route_destroy(route);
+        route = next;
+        failed++;
+    }
+
+    route = c->generic_head;
+    c->generic_head = NULL;
+    c->generic_tail = NULL;
+    while (route) {
+        RKFrameRoute *next = route->next;
+        rk_mpp_dec_fail_surface(route->surface, route->fence);
+        frame_route_destroy(route);
+        route = next;
+        failed++;
+    }
+
+    c->outstanding_frames = 0;
+    return failed;
+}
+
 void *rk_mpp_dec_worker_main(void *opaque)
 {
     RKContext *c = opaque;
+    int64_t stalled_since_ns = 0;
     LOG("decode worker: started coding=%d", (int)c->coding);
 
     for (;;) {
@@ -1217,8 +1259,21 @@ void *rk_mpp_dec_worker_main(void *opaque)
         if (job) {
             worker_submit_job(c, job);
             rk_mpp_dec_job_destroy(job);
-        } else {
-            (void)worker_drain_one(c);
+            stalled_since_ns = 0;
+        } else if (worker_drain_one(c)) {
+            stalled_since_ns = 0;
+        } else if (c->outstanding_frames > 0 && !draining) {
+            int64_t now = monotonic_ns();
+            if (!stalled_since_ns) {
+                stalled_since_ns = now;
+            } else if (now - stalled_since_ns > WORKER_STALL_TIMEOUT_NS) {
+                unsigned int failed = fail_pending_routes(c);
+                LOG_WARNING("decode worker: backend produced no output for "
+                            "%llds; failed %u outstanding decode(s)",
+                            (long long)(WORKER_STALL_TIMEOUT_NS / 1000000000),
+                            failed);
+                stalled_since_ns = 0;
+            }
         }
     }
 
@@ -1299,24 +1354,7 @@ void rk_mpp_dec_stop(RKContext *c)
         job = next;
     }
 
-    RKFrameRoute *route = c->h264_routes;
-    c->h264_routes = NULL;
-    while (route) {
-        RKFrameRoute *next = route->next;
-        rk_mpp_dec_fail_surface(route->surface, route->fence);
-        frame_route_destroy(route);
-        route = next;
-    }
-    route = c->generic_head;
-    c->generic_head = NULL;
-    c->generic_tail = NULL;
-    while (route) {
-        RKFrameRoute *next = route->next;
-        rk_mpp_dec_fail_surface(route->surface, route->fence);
-        frame_route_destroy(route);
-        route = next;
-    }
-    c->outstanding_frames = 0;
+    (void)fail_pending_routes(c);
 
     pthread_mutex_lock(&c->picture_lock);
     RKSurface *render_surface = c->render_surface;
