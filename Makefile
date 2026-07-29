@@ -64,6 +64,16 @@ TSAN_TESTS   := tests/object_heap_test.tsan tests/log_test.tsan
 TSAN_DIR     := tests/.tsan-driver
 TSAN_TARGET  := $(TSAN_DIR)/$(TARGET)
 TSAN_OBJS    := $(SRCS:.c=.tsan.o)
+FUZZ_CC      ?= clang
+FUZZ_CFLAGS  ?= -O1 -g3 -fno-omit-frame-pointer \
+	-fsanitize=fuzzer,address,undefined
+FUZZ_DIR     := tests/.fuzz
+FUZZ_SEED_DIR := tests/fuzz-seeds
+FUZZ_TARGETS := $(FUZZ_DIR)/h264_fuzz $(FUZZ_DIR)/hevc_fuzz \
+	$(FUZZ_DIR)/vp9_fuzz
+FUZZ_RUNS    ?= 20000
+FUZZ_FLAGS   ?= -runs=$(FUZZ_RUNS) -max_len=4096 -timeout=5 \
+	-rss_limit_mb=2048 -seed=1414 -print_final_stats=1
 
 DRIVER_COMPILE = $(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) -fPIC \
 	$(VA_CFLAGS) $(MPP_CFLAGS) $(RGA_CFLAGS) -Isrc
@@ -74,6 +84,8 @@ SAN_TEST_COMPILE = $(CC) $(CPPFLAGS) $(SAN_CFLAGS) $(WARNINGS) \
 	$(VA_CFLAGS) -Isrc
 TSAN_DRIVER_COMPILE = $(CC) $(CPPFLAGS) $(TSAN_CFLAGS) $(WARNINGS) -fPIC \
 	$(VA_CFLAGS) $(MPP_CFLAGS) $(RGA_CFLAGS) -Isrc
+FUZZ_COMPILE = $(FUZZ_CC) $(CPPFLAGS) $(FUZZ_CFLAGS) $(WARNINGS) \
+	$(VA_CFLAGS) -Isrc
 
 all: $(TARGET)
 
@@ -403,6 +415,40 @@ tests/log_test.tsan: tests/log_test.c src/log.c src/log.h
 test-tsan: $(TSAN_TESTS)
 	@set -e; for test_binary in $(TSAN_TESTS); do ./$$test_binary; done
 
+$(FUZZ_DIR)/h264_fuzz: tests/h264_fuzz.c src/h264.c src/h264.h src/bs.h
+	mkdir -p $(FUZZ_DIR)
+	$(FUZZ_COMPILE) tests/h264_fuzz.c src/h264.c -o $@
+
+$(FUZZ_DIR)/hevc_fuzz: tests/hevc_fuzz.c src/hevc.c src/hevc.h src/bs.h
+	mkdir -p $(FUZZ_DIR)
+	$(FUZZ_COMPILE) tests/hevc_fuzz.c src/hevc.c -o $@
+
+$(FUZZ_DIR)/vp9_fuzz: tests/vp9_fuzz.c src/vp9.c src/vp9.h
+	mkdir -p $(FUZZ_DIR)
+	$(FUZZ_COMPILE) tests/vp9_fuzz.c src/vp9.c -o $@
+
+test-fuzz: $(FUZZ_TARGETS)
+	@set -e; for fuzz_binary in $(FUZZ_TARGETS); do \
+		fuzz_name=$$(basename $$fuzz_binary); \
+		seed_dir=$(FUZZ_SEED_DIR)/$$fuzz_name; \
+		corpus_dir=$(FUZZ_DIR)/corpus/$$fuzz_name; \
+		if [ -z "$$(ls -A $$seed_dir 2>/dev/null)" ]; then \
+			echo "test-fuzz: missing seed corpus $$seed_dir" >&2; \
+			exit 1; \
+		fi; \
+		rm -rf $$corpus_dir; mkdir -p $$corpus_dir; \
+		cp -a $$seed_dir/. $$corpus_dir/; \
+		echo "== $$fuzz_name: replaying $$(ls -1 $$seed_dir | wc -l) seeds"; \
+		ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
+		UBSAN_OPTIONS=halt_on_error=1 \
+		$$fuzz_binary -artifact_prefix=$(FUZZ_DIR)/ $$seed_dir/*; \
+		echo "== $$fuzz_name: fuzzing $(FUZZ_RUNS) runs"; \
+		ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
+		UBSAN_OPTIONS=halt_on_error=1 \
+		$$fuzz_binary $(FUZZ_FLAGS) -artifact_prefix=$(FUZZ_DIR)/ \
+			$$corpus_dir; \
+	done
+
 sanitize: $(SAN_TARGET) test-sanitize
 
 check-sanitize: sanitize
@@ -436,7 +482,7 @@ clean:
 		$(AV1_MPP_CAPS) \
 		tests/driver_objects_test.san \
 		tests/driver_objects_test.tsan
-	rm -rf $(SAN_DIR) $(TSAN_DIR)
+	rm -rf $(SAN_DIR) $(TSAN_DIR) $(FUZZ_DIR)
 
 .PHONY: all install package check-package-install fetch-vectors \
 	check check-conformance check-synthetic \
@@ -456,5 +502,5 @@ clean:
 	check-concurrent-decode check-concurrent-decode-sanitize \
 	check-concurrent-decode-tsan check-soak test test-valgrind test-sanitize sanitize \
 	check-sanitize \
-	test-tsan check-sanitize-safe check-driver-objects \
+	test-tsan test-fuzz check-sanitize-safe check-driver-objects \
 	check-driver-objects-sanitize check-driver-objects-tsan lint clean

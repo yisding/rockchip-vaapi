@@ -13,6 +13,7 @@ make test
 make sanitize
 make test-tsan
 make test-valgrind
+make test-fuzz
 make lint
 make check-firefox-rdd-patch
 make check-package-install
@@ -60,6 +61,45 @@ dependencies before running it.
 `make test-tsan` stress-tests concurrent object insertion, lookup, removal,
 and refcounted destruction under ThreadSanitizer. The full two-decoder TSan
 gate remains a Phase 1 exit requirement.
+
+## Bitstream reconstructor fuzzing
+
+`make test-fuzz` builds three libFuzzer targets against the reconstruction and
+parsing code that consumes VA buffers — `tests/h264_fuzz.c`,
+`tests/hevc_fuzz.c`, and `tests/vp9_fuzz.c` — with ASan, UBSan, and leak
+detection enabled. The driver runs inside a browser media process, so every VA
+picture/slice/IQ-matrix buffer is treated as hostile input: the harnesses fill
+whole parameter structures from fuzzer bytes rather than only mutating
+bitstreams, and they abort if a writer reports more bytes than the caller's
+buffer could hold.
+
+Each target runs in two stages. The committed seed corpus under
+`tests/fuzz-seeds/<target>/` is replayed first as a deterministic regression
+check, then a `FUZZ_RUNS`-long campaign (20,000 by default) runs from a scratch
+copy of it. Crash and UBSan artifacts are written under `tests/.fuzz/`. Raise
+the campaign length for a real hunt:
+
+```sh
+make test-fuzz FUZZ_RUNS=5000000
+```
+
+The seed corpora are coverage-minimized (`-merge=1`) outputs of longer
+campaigns plus named reproducers for bugs the fuzzer found.
+`tests/fuzz-seeds/hevc_fuzz/slice-rewrite-ctb-log2-shift` is the input that
+first reached an out-of-range shift in the HEVC slice rewriter; the rewriter
+now validates its own picture-parameter syntax bounds instead of trusting an
+earlier parameter-set call to have rejected them.
+
+libFuzzer needs Clang's sanitizer runtime archives, which Debian and Ubuntu
+ship separately from the compiler. Install the package matching the Clang you
+build with, for example:
+
+```sh
+sudo apt install clang libclang-rt-21-dev
+```
+
+Without it the link fails with `cannot find ... libclang_rt.fuzzer.a`. Use
+`FUZZ_CC` to select a different Clang.
 
 When changing driver-wide compile wiring, also build the instrumented driver
 artifacts directly:

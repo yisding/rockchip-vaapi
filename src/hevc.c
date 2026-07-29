@@ -384,29 +384,44 @@ static bool tile_spacing_is_uniform(const VAPictureParameterBufferHEVC *pp)
     return true;
 }
 
+/*
+ * The syntax bounds every reconstruction path depends on before it may shift,
+ * size, or loop on a picture-parameter field. VA buffers are hostile input, so
+ * each entry point checks these itself rather than trusting an earlier call.
+ */
+static bool validate_slice_syntax_bounds(const VAPictureParameterBufferHEVC *pp)
+{
+    if (!pp || !valid_picture(&pp->CurrPic) ||
+        !pp->pic_width_in_luma_samples || !pp->pic_height_in_luma_samples ||
+        pp->log2_min_luma_coding_block_size_minus3 > 3 ||
+        pp->log2_diff_max_min_luma_coding_block_size > 3 ||
+        pp->log2_max_pic_order_cnt_lsb_minus4 > 12 ||
+        pp->num_short_term_ref_pic_sets > 64 ||
+        pp->num_long_term_ref_pic_sps > HEVC_MAX_LONG_TERM_SPS ||
+        pp->num_extra_slice_header_bits > 7)
+        return false;
+
+    unsigned int ctb_log2 = pp->log2_min_luma_coding_block_size_minus3 + 3 +
+                            pp->log2_diff_max_min_luma_coding_block_size;
+    return ctb_log2 <= 6;
+}
+
 static bool validate_picture_parameters(const VAPictureParameterBufferHEVC *pp,
                                         const VAIQMatrixBufferHEVC *iq,
                                         int profile_idc, HEVCRPS *rps)
 {
     if (!pp || !rps || (profile_idc != 1 && profile_idc != 2) ||
-        !valid_picture(&pp->CurrPic) || !pp->pic_width_in_luma_samples ||
-        !pp->pic_height_in_luma_samples ||
+        !validate_slice_syntax_bounds(pp) ||
         pp->pic_fields.bits.chroma_format_idc != 1 ||
         pp->pic_fields.bits.separate_colour_plane_flag ||
         pp->sps_max_dec_pic_buffering_minus1 > 15 ||
         pp->bit_depth_luma_minus8 != pp->bit_depth_chroma_minus8 ||
         (profile_idc == 1 && pp->bit_depth_luma_minus8 != 0) ||
         (profile_idc == 2 && pp->bit_depth_luma_minus8 > 2) ||
-        pp->log2_min_luma_coding_block_size_minus3 > 3 ||
-        pp->log2_diff_max_min_luma_coding_block_size > 3 ||
         pp->log2_min_transform_block_size_minus2 > 3 ||
         pp->log2_diff_max_min_transform_block_size > 3 ||
-        pp->log2_max_pic_order_cnt_lsb_minus4 > 12 ||
-        pp->num_short_term_ref_pic_sets > 64 ||
-        pp->num_long_term_ref_pic_sps > HEVC_MAX_LONG_TERM_SPS ||
         pp->num_ref_idx_l0_default_active_minus1 > 14 ||
         pp->num_ref_idx_l1_default_active_minus1 > 14 ||
-        pp->num_extra_slice_header_bits > 7 ||
         pp->init_qp_minus26 < -26 || pp->init_qp_minus26 > 25 ||
         pp->pps_cb_qp_offset < -12 || pp->pps_cb_qp_offset > 12 ||
         pp->pps_cr_qp_offset < -12 || pp->pps_cr_qp_offset > 12 ||
@@ -423,8 +438,7 @@ static bool validate_picture_parameters(const VAPictureParameterBufferHEVC *pp,
                             pp->log2_diff_max_min_luma_coding_block_size;
     unsigned int min_cb_size = 1u << min_cb_log2;
     unsigned int ctb_size = hevc_ctb_size(pp);
-    if (ctb_log2 > 6 ||
-        pp->pic_width_in_luma_samples % min_cb_size != 0 ||
+    if (pp->pic_width_in_luma_samples % min_cb_size != 0 ||
         pp->pic_height_in_luma_samples % min_cb_size != 0 ||
         pp->log2_parallel_merge_level_minus2 > ctb_log2 - 2 ||
         (pp->pic_fields.bits.cu_qp_delta_enabled_flag &&
@@ -723,7 +737,7 @@ int rk_hevc_rewrite_slice_nal(uint8_t *buf, size_t buf_size,
                               const VAPictureParameterBufferHEVC *pp,
                               const VASliceParameterBufferHEVC *sp)
 {
-    if (!buf || !data || !pp)
+    if (!buf || !data || !validate_slice_syntax_bounds(pp))
         return -1;
 
     size_t prefix = nal_offset(data, size);

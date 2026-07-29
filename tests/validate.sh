@@ -81,6 +81,22 @@ if [ "$FFMPEG_TIMEOUT" != 0 ] && ! command -v timeout >/dev/null 2>&1; then
     exit 2
 fi
 
+# Every case in this gate compares hardware output against software decode. A
+# PATH that resolves to an FFmpeg built without VAAPI (a Homebrew or static
+# build ahead of the distro one is the common case) would report per-vector
+# decode failures that look like driver bugs. Refuse before touching hardware.
+ffmpeg_path=$(command -v "$FFMPEG" 2>/dev/null)
+if [ -z "$ffmpeg_path" ]; then
+    echo "error: FFMPEG '$FFMPEG' not found" >&2
+    exit 2
+fi
+if ! "$FFMPEG" -hide_banner -hwaccels 2>/dev/null |
+     grep -qx '[[:space:]]*vaapi[[:space:]]*'; then
+    echo "error: $ffmpeg_path was built without VAAPI support" >&2
+    echo "error: set FFMPEG to an FFmpeg whose -hwaccels lists vaapi" >&2
+    exit 2
+fi
+
 WORK=$(mktemp -d "$REPO_ROOT/.test-work.validate.XXXXXX") || exit 1
 # shellcheck disable=SC2317,SC2329 # Invoked by the EXIT trap.
 cleanup()
