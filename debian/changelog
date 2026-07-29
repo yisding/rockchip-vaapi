@@ -1,3 +1,35 @@
+rockchip-vaapi (1.0.11+ysp4) resolute; urgency=medium
+
+  * Advertise VAProfileHEVCMain by default. All eight pinned FATE vectors are
+    bit-exact normally and under ASan/UBSan, and 142 of the 163 HEVC Main
+    candidates in the FFmpeg FATE conformance suite are bit-exact with no
+    driver failures; the rest are two streams MPP itself cannot decode and two
+    pictures beyond the advertised 7680x4320 constraint.
+  * Implement vaDeriveImage and vaAcquireBufferHandle over the surface's own
+    DMA-BUF, so VLC's OpenGL VA-API converters can import decoded frames as
+    EGLImages. Stock VLC 3.0.23 now hardware-decodes H.264 and HEVC Main
+    instead of falling back to software.
+  * Grow the per-picture buffer list instead of capping it at 64, so
+    many-slice streams no longer fail with MAX_NUM_EXCEEDED.
+  * Drain submitted work at context teardown instead of cancelling it. VA
+    surfaces outlive their context, and applications legitimately destroy a
+    decoder on a sequence change and then sync surfaces it was still filling.
+  * Grow the decode buffer pool on demand. A frame-threaded consumer holding
+    more surfaces than the fixed pool could deadlock the process outright.
+  * Fail outstanding decodes when the backend stops responding, so a wedged
+    MPP returns a real VAStatus instead of hanging the calling media process.
+  * Reproduce explicit long-term reference entries from the stream rather than
+    rebuilding them from VA state, and bound init_qp_minus26 by luma bit depth
+    so legal Main10 streams are no longer rejected.
+  * Add libFuzzer coverage for the H.264, HEVC and VP9 reconstructors, with a
+    committed seed corpus replayed as a regression check.
+  * Add pinned HEVC Main and Main10 conformance sweeps, and display-session
+    hardware-decode gates for VLC and Firefox.
+  * Rebase the hash-pinned Firefox RDD sandbox patch onto 153.0, keeping
+    152.0.6 selectable.
+
+ -- Yi Ding <yi.s.ding@gmail.com>  Tue, 28 Jul 2026 22:15:00 -0700
+
 rockchip-vaapi (1.0.11+ysp3) resolute; urgency=medium
 
   * Complete the Phase 1 external-buffer decode architecture, generation

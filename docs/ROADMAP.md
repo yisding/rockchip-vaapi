@@ -630,8 +630,11 @@ reference-counted across VA displays and closes/reopens cleanly. Dedicated
 normal, ASan/UBSan, TSan, and Valgrind tests cover filtering, JSON control
 characters, nested lifecycle, and 800 concurrent records without interleaving.
 
-**Gate:** the app matrix passes on-device; conformance suite green; clean soak;
-`.deb` + config packages install and enable HW decode from a clean image.
+**Gate:** the app matrix passes on-device — ✅ stock FFmpeg, GStreamer `va`,
+VLC and Firefox; ⬜ Chromium (blocked on its GL stack here) and mpv (not
+installed); ✅ conformance suite green; clean soak; ✅ `.deb` + config packages
+install, upgrade and purge cleanly in an isolated root, ⬜ enabling HW decode
+from a genuinely clean image is untested.
 
 ### Phase 4 — Encode (`VAEntrypointEncSlice`)  (~3–4 wk)
 
@@ -836,7 +839,9 @@ concurrent with decode contexts are race-free.
   control; combined `vah264enc` normal/sanitizer qualification remains open.
   Multi-object/tiled imports, multi-slice, and long encode qualification also
   remain open; H.264 WebRTC-compatible RTP packetization and paced dual-codec
-  soak smoke are green.
+  soak smoke are green. The two-peer WebRTC gate cannot run on this host at
+  all: it needs GstWebRTC introspection from `gir1.2-gst-plugins-bad-1.0`,
+  which is not installed.
 - Phase 5: planned.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement
