@@ -293,6 +293,17 @@ Phase 0 gate was rerun on the final tree: all pinned vectors, supplemental
 H.264 matrix, 4K case, five VP9 determinism runs, and software fallback passed
 both normally and with the complete ASan/UBSan driver.
 
+**Follow-up (2026-07-28, the soak audit was broken):** `check-soak`,
+`check-zero-copy` and `check-concurrent-decode` all counted external frames by
+matching the literal string `zero_copy=1 external=1`, which stopped appearing
+when `converted_10bit` was inserted between those fields on 2026-07-25. They
+failed closed rather than passing wrongly, but none of them can have passed
+since. With the audit repaired, a 1,800-second paced 4K soak completed 54,005
+external frames with post-warmup RSS moving from 164,876 KiB to 165,344 KiB --
+a 468 KiB span, against 47,844 KiB in the run recorded above -- and fd
+head/tail medians both 54. The gate still reports it as a smoke run, because
+the Phase 1 exit criterion is 7,200 seconds.
+
 **Follow-up (2026-07-28, three fixed ceilings removed):** Widening the HEVC
 conformance evidence (Phase 2 below) exposed three limits in this core that
 were not reachable from the H.264/VP9 matrix. All three are fixed and none was
