@@ -47,6 +47,86 @@ static void image_destroy(void *opaque)
     free(image);
 }
 
+/* Resolve the buffer a surface is currently bound to, together with the layout
+ * that buffer implies. Callers use this both to describe a derived image and to
+ * re-check that the description still holds. */
+static bool surface_linear_layout(RKSurface *surface, int *fd_out,
+                                  size_t *object_size_out,
+                                  unsigned int *pitch_out,
+                                  size_t *chroma_offset_out)
+{
+    pthread_mutex_lock(&surface->lock);
+    MppBuffer active = surface->import_buf ? surface->import_buf
+                     : surface->backing_buf ? surface->backing_buf
+                     : surface->frame ? mpp_frame_get_buffer(surface->frame)
+                     : surface->priv_buf;
+    int fd = active ? mpp_buffer_get_fd(active) : -1;
+    size_t object_size = active ? mpp_buffer_get_size(active) : 0;
+    unsigned int hstride = surface->hstride ? (unsigned int)surface->hstride
+                                            : (unsigned int)surface->width;
+    unsigned int vstride = surface->vstride ? (unsigned int)surface->vstride
+                                            : (unsigned int)surface->height;
+    bool ten_bit = MPP_FRAME_FMT_IS_YUV_10BIT(surface->fmt);
+    pthread_mutex_unlock(&surface->lock);
+
+    if (fd < 0 || object_size == 0)
+        return false;
+
+    /* hstride is a pixel stride, so P010's byte pitch is twice it. This is the
+     * same convention vaExportSurfaceHandle uses for its layer pitches. */
+    unsigned int pitch = ten_bit ? hstride * 2 : hstride;
+    size_t chroma_offset = (size_t)pitch * vstride;
+    if (chroma_offset + chroma_offset / 2 > object_size)
+        return false;
+
+    *fd_out = fd;
+    *object_size_out = object_size;
+    *pitch_out = pitch;
+    *chroma_offset_out = chroma_offset;
+    return true;
+}
+
+/* A derived image fixes its pitches, but decode can rebind a surface to a
+ * different buffer with a different stride. Re-resolve before every use and
+ * refuse when the description no longer matches, so a consumer that derived
+ * during pool setup never reads pixels through the wrong geometry. */
+static bool derived_still_valid(RKBuffer *buffer)
+{
+    int fd = -1;
+    size_t object_size = 0;
+    unsigned int pitch = 0;
+    size_t chroma_offset = 0;
+
+    if (!surface_linear_layout(buffer->derived_surface, &fd, &object_size,
+                               &pitch, &chroma_offset)) {
+        LOG("derived image: surface no longer has a linear layout");
+        return false;
+    }
+    if (pitch != buffer->derived_pitch ||
+        chroma_offset != buffer->derived_chroma_offset) {
+        LOG("derived image: layout changed under it "
+            "(pitch %u->%u chroma_offset %zu->%zu)",
+            buffer->derived_pitch, pitch, buffer->derived_chroma_offset,
+            chroma_offset);
+        return false;
+    }
+    if (fd != buffer->derived_fd) {
+        /* Same geometry, different buffer: drop the stale mapping and let the
+         * caller map the buffer the surface actually holds now. */
+        if (buffer->derived_map) {
+            munmap(buffer->derived_map, buffer->derived_size);
+            buffer->derived_map = NULL;
+        }
+        if (buffer->acquired_fd >= 0) {
+            close(buffer->acquired_fd);
+            buffer->acquired_fd = -1;
+        }
+        buffer->derived_fd = fd;
+        buffer->derived_size = object_size;
+    }
+    return true;
+}
+
 VAStatus rk_CreateBuffer(VADriverContextP context, VAContextID context_id,
                          VABufferType type, unsigned int size,
                          unsigned int num_elements, void *data,
@@ -141,6 +221,10 @@ VAStatus rk_MapBuffer(VADriverContextP context, VABufferID id, void **data)
      * and bracket the CPU access. Without the sync the mapping can read stale
      * lines the hardware wrote behind the cache. */
     if (buffer->derived_surface) {
+        if (!derived_still_valid(buffer)) {
+            rk_object_unref(&buffer->base);
+            return VA_STATUS_ERROR_OPERATION_FAILED;
+        }
         if (!buffer->derived_map) {
             void *mapped = mmap(NULL, buffer->derived_size,
                                 PROT_READ | PROT_WRITE, MAP_SHARED,
@@ -238,9 +322,17 @@ VAStatus rk_buffer_acquire_handle(VADriverContextP context, VABufferID id,
         rk_object_unref(&buffer->base);
         return VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE;
     }
+    if (!derived_still_valid(buffer)) {
+        rk_object_unref(&buffer->base);
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
     if (buffer->acquired_fd < 0) {
         buffer->acquired_fd = dup(buffer->derived_fd);
-        if (buffer->acquired_fd < 0) {
+        if (!derived_still_valid(buffer)) {
+        rk_object_unref(&buffer->base);
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+    if (buffer->acquired_fd < 0) {
             LOG("AcquireBufferHandle: dup(%d) failed errno=%d",
                 buffer->derived_fd, errno);
             rk_object_unref(&buffer->base);
@@ -475,49 +567,48 @@ VAStatus rk_DeriveImage(VADriverContextP context, VASurfaceID surface_id,
         }
     }
 
+
     pthread_mutex_lock(&surface->lock);
-    MppBuffer active = surface->import_buf ? surface->import_buf
-                     : surface->backing_buf ? surface->backing_buf
-                     : surface->frame ? mpp_frame_get_buffer(surface->frame)
-                     : surface->priv_buf;
-    int fd = active ? mpp_buffer_get_fd(active) : -1;
-    size_t object_size = active ? mpp_buffer_get_size(active) : 0;
-    unsigned int hstride = surface->hstride ? (unsigned int)surface->hstride
-                                            : (unsigned int)surface->width;
-    unsigned int vstride = surface->vstride ? (unsigned int)surface->vstride
-                                            : (unsigned int)surface->height;
     unsigned int width = (unsigned int)surface->width;
     unsigned int height = (unsigned int)surface->height;
     bool is_10bit = MPP_FRAME_FMT_IS_YUV_10BIT(surface->fmt);
     bool imported_rgb = surface->imported_rgb;
-    bool fbc = MPP_FRAME_FMT_IS_FBC(surface->fmt);
+    /* surface->fmt is MPP's frame format, which stays AFBC even after a 10-bit
+     * frame has been repacked into a driver-owned linear P010 buffer. Only a
+     * surface still bound to the MPP frame itself can actually be compressed;
+     * once backing_buf holds the conversion result the layout is linear. */
+    bool fbc = surface->frame != NULL && MPP_FRAME_FMT_IS_FBC(surface->fmt);
     pthread_mutex_unlock(&surface->lock);
 
-    if (imported_rgb || fbc) {
-        LOG("DeriveImage: surface=0x%x layout is not a plain VAImage "
-            "(rgb=%d fbc=%d)", surface_id, imported_rgb, fbc);
+    /* A VAImage fixes its pitches once, but a surface's layout is only final
+     * after decode binds the real frame -- and consumers legitimately derive
+     * during pool setup, before that. 10-bit is the class where the two
+     * reliably disagree: the placeholder is sized for its declared linear
+     * P010, while the decoded frame arrives as AFBC NV15 and RGA repacks it at
+     * MPP's stride. Refuse it and let the consumer use vaGetImage, whose
+     * readback resolves the layout per call. Map and acquire re-check the rest
+     * against the surface, so a stale image fails instead of returning pixels
+     * from the wrong geometry. */
+    if (imported_rgb || fbc || is_10bit) {
+        LOG("DeriveImage: surface=0x%x layout is not a stable VAImage "
+            "(rgb=%d fbc=%d 10bit=%d)", surface_id, imported_rgb, fbc,
+            is_10bit);
         rk_object_unref(&surface->base);
         return VA_STATUS_ERROR_OPERATION_FAILED;
     }
-    if (fd < 0 || object_size == 0 || object_size > UINT_MAX ||
-        width > USHRT_MAX || height > USHRT_MAX) {
-        LOG("DeriveImage: surface=0x%x not derivable (fd=%d size=%zu)",
-            surface_id, fd, object_size);
+    int fd = -1;
+    size_t object_size = 0;
+    unsigned int luma_pitch = 0;
+    size_t chroma_offset = 0;
+    if (!surface_linear_layout(surface, &fd, &object_size, &luma_pitch,
+                               &chroma_offset) ||
+        object_size > UINT_MAX || width > USHRT_MAX || height > USHRT_MAX) {
+        LOG("DeriveImage: surface=0x%x has no describable linear layout",
+            surface_id);
         rk_object_unref(&surface->base);
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
-
-    /* The luma pitch is the surface's byte stride; P010 carries two bytes per
-     * sample and MPP already reports the byte stride for it. */
-    unsigned int luma_pitch = hstride;
-    size_t chroma_offset = (size_t)luma_pitch * vstride;
     size_t required = chroma_offset + chroma_offset / 2;
-    if (required > object_size) {
-        LOG("DeriveImage: surface=0x%x layout %ux%u needs %zu of %zu bytes",
-            surface_id, luma_pitch, vstride, required, object_size);
-        rk_object_unref(&surface->base);
-        return VA_STATUS_ERROR_INVALID_SURFACE;
-    }
 
     VABufferID buffer_id;
     VAStatus status = rk_CreateBuffer(context, 0, VAImageBufferType, 0, 0,
@@ -538,12 +629,20 @@ VAStatus rk_DeriveImage(VADriverContextP context, VASurfaceID surface_id,
     }
 
     /* The buffer keeps the surface alive: the image outlives the caller's
-     * surface reference, and its memory is the surface's. */
+     * surface reference, and its memory is the surface's.
+     *
+     * The mapping spans the whole DMA-BUF, but the buffer's advertised size is
+     * the image layout. MPP's decode buffers reserve codec side data past the
+     * picture, and a consumer that trusts data_size as the frame extent -- as
+     * GStreamer does -- would otherwise emit that padding as if it were
+     * pixels. */
     buffer->derived_surface = surface;
     buffer->derived_fd = fd;
     buffer->derived_size = object_size;
-    buffer->capacity = object_size;
-    buffer->size = (unsigned int)object_size;
+    buffer->derived_pitch = luma_pitch;
+    buffer->derived_chroma_offset = chroma_offset;
+    buffer->capacity = required;
+    buffer->size = (unsigned int)required;
     buffer->num_elements = 1;
 
     rk_object_init(&image_object->base, image_destroy);
@@ -582,12 +681,12 @@ VAStatus rk_DeriveImage(VADriverContextP context, VASurfaceID surface_id,
     image->pitches[1] = image_object->pitches[1];
     image->offsets[0] = image_object->offsets[0];
     image->offsets[1] = image_object->offsets[1];
-    image->data_size = (unsigned int)object_size;
+    image->data_size = (unsigned int)required;
 
     LOG("DeriveImage: surface=0x%x %ux%u %s pitch=%u chroma_offset=%zu "
-        "size=%zu fd=%d", surface_id, width, height,
-        is_10bit ? "P010" : "NV12", luma_pitch, chroma_offset, object_size,
-        fd);
+        "image=%zu object=%zu fd=%d", surface_id, width, height,
+        is_10bit ? "P010" : "NV12", luma_pitch, chroma_offset, required,
+        object_size, fd);
     return VA_STATUS_SUCCESS;
 }
 

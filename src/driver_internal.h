@@ -185,9 +185,11 @@ typedef struct RKBuffer {
      * DMA-BUF instead of owning heap memory, so map/unmap go through mmap with
      * CPU access brackets and vaAcquireBufferHandle can export the fd. */
     RKSurface *derived_surface;
-    int derived_fd;
     size_t derived_size;
+    size_t derived_chroma_offset;
     void *derived_map;
+    unsigned int derived_pitch;
+    int derived_fd;
     int acquired_fd;
 } RKBuffer;
 

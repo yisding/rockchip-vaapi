@@ -259,13 +259,29 @@ handle as a DRM PRIME fd, and import it as an EGLImage; while `vaDeriveImage`
 was a stub VLC dropped its hardware decoder module entirely and fell back to
 software after creating surfaces through this driver.
 
-`vaDeriveImage` returns a `VAImage` that aliases the surface's own linear
-NV12/P010 DMA-BUF rather than a fresh allocation: pitches and offsets are the
-surface's real layout, `vaMapBuffer` mmaps that buffer with dma-buf CPU access
-brackets, and `vaAcquireBufferHandle` exports it as `DRM_PRIME`. The image
-holds a reference on the surface, so it stays valid after the caller drops
-theirs. Imported RGB and AFBC layouts are not describable as a `VAImage` and
-fail closed, as does a request for any other memory type.
+`vaDeriveImage` returns a `VAImage` that aliases the surface's own linear NV12
+DMA-BUF rather than a fresh allocation: pitches and offsets are the surface's
+real layout, `data_size` is the image extent rather than the whole allocation
+(MPP's decode buffers reserve codec side data past the picture),
+`vaMapBuffer` mmaps that buffer with dma-buf CPU access brackets, and
+`vaAcquireBufferHandle` exports it as `DRM_PRIME`. The image holds a reference
+on the surface, so it stays valid after the caller drops theirs.
+
+A `VAImage` fixes its pitches once, but a surface's layout is only final after
+decode binds the real frame -- and consumers legitimately derive during pool
+setup, before that. Two rules keep the alias honest:
+
+- **10-bit surfaces are refused.** Their placeholder is sized for the declared
+  linear P010, while the decoded frame arrives as AFBC NV15 and RGA repacks it
+  at MPP's stride; the two disagree. Consumers fall back to `vaGetImage`, whose
+  readback resolves the layout per call.
+- **Map and acquire re-resolve the surface.** If the pitch or chroma offset has
+  changed since the image was derived, the call fails rather than reading
+  pixels through the wrong geometry. If only the buffer changed, the stale
+  mapping is dropped and the current buffer is mapped instead.
+
+Imported RGB and still-compressed AFBC layouts are refused for the same reason,
+as is a request for any memory type other than DRM PRIME.
 
 Firefox calls `vaExportSurfaceHandle` with
 `VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2` to get a zero-copy handle to the
