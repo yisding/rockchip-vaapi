@@ -466,6 +466,27 @@ candidates that are not Main 8-bit 4:2:0, `PICSIZE_A_Bossen_1.bit` at
 `make check-hevc-conformance-sweep` pins every class in
 `tests/hevc-sweep-vectors.tsv` and fails on divergence in either direction.
 
+**Progress (2026-07-28, Main10 conformance widened):** `PROFILE=main10` runs
+the same sweep over the FATE Main10 candidates with P010 comparison, pinned in
+`tests/hevc-main10-sweep-vectors.tsv` and re-runnable as `make
+check-hevc-main10-conformance-sweep`. Ten of the eleven real Main10 streams are
+bit-exact, including the `DBLK_A_MAIN10_VIXS` and `WPP_A_ericsson_MAIN10`
+vectors that direct-backend triage had rejected on 2026-07-26.
+
+It found one driver defect and one hardware boundary. `init_qp_minus26` was
+bounded at -26, which is the 8-bit range: the floor is -(26 + QpBdOffsetY) and
+QpBdOffsetY grows with luma bit depth (7.4.3.3.1), so legal Main10 streams were
+rejected as unreconstructable -- `INITQP_B_Sony_1.bit` among them, now
+bit-exact. `WPP_D_ericsson_MAIN10_2.bit` at 64x240 is the remaining failure:
+RGA3 refuses a source below its minimum active width, so the AFBC NV15-to-P010
+repack that every 10-bit surface depends on cannot run and the decode fails
+closed rather than returning wrong pixels.
+
+Main10 stays unadvertised. Decode correctness is now well evidenced, but the
+narrow-picture RGA floor fails mid-decode instead of being refused up front,
+10-bit throughput through RGA has not been measured, and HDR display
+presentation is still unvalidated.
+
 **Progress (2026-07-26, HDR10 metadata slice):**
 `make check-hevc-main10-hdr-experimental` generates a 24-frame Main10 HDR10
 stream and validates the complete hardware-frame boundary. Its downloaded

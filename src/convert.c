@@ -207,8 +207,14 @@ bool rk_convert_nv15_to_p010(MppBufferGroup group, MppBuffer source,
                                  (rga_buffer_t){0}, source_rect,
                                  converted_rect, (im_rect){0}, IM_SYNC);
     if (status != IM_STATUS_SUCCESS && status != IM_STATUS_NOERROR) {
-        LOG("convert: RGA NV15->P010 failed status=%d (%s)", (int)status,
-            imStrError_t(status));
+        /* RGA3 on RK3588 refuses sources below its minimum active width, so a
+         * very narrow 10-bit picture cannot be repacked here at all. Name the
+         * geometry: the status string alone reads as a transient driver fault
+         * rather than a size the hardware will never accept. */
+        LOG_WARNING("convert: RGA NV15->P010 refused %ux%u "
+                    "(pixel_stride=%u vstride=%u afbc=%d): status=%d (%s)",
+                    width, height, pixel_stride, vertical_stride, source_afbc,
+                    (int)status, imStrError_t(status));
         mpp_buffer_put(converted);
         return false;
     }

@@ -39,6 +39,8 @@ RGB_ENCODE_TEST := tests/va_rgb_dmabuf_encode
 HEVC_MPP_REPRO := tests/hevc_mpp_repro
 HEVC_SWEEP_MANIFEST := tests/hevc-sweep-vectors.tsv
 HEVC_SWEEP_DIR := tests/vectors/hevc-sweep
+HEVC_MAIN10_SWEEP_MANIFEST := tests/hevc-main10-sweep-vectors.tsv
+HEVC_MAIN10_SWEEP_DIR := tests/vectors/hevc-main10-sweep
 AV1_MPP_CAPS := tests/av1_mpp_caps
 DEB_OUTPUT_DIR ?= $(abspath ..)
 DEB_VERSION = $(shell dpkg-parsechangelog -SVersion)
@@ -164,6 +166,17 @@ check-hevc-conformance-sweep: $(TARGET) $(HEVC_MPP_REPRO) \
 		fetch-hevc-sweep-vectors
 	EXPECTATIONS="$(HEVC_SWEEP_MANIFEST)" \
 		tests/sweep-hevc-conformance.sh "$(HEVC_SWEEP_DIR)"
+
+fetch-hevc-main10-sweep-vectors:
+	MANIFEST="$(HEVC_MAIN10_SWEEP_MANIFEST)" \
+		VECTOR_DIR="$(HEVC_MAIN10_SWEEP_DIR)" tests/fetch-vectors.sh
+
+# The Main10 candidate set. Main10 stays unadvertised, so this documents the
+# 10-bit boundary rather than gating a shipping profile.
+check-hevc-main10-conformance-sweep: $(TARGET) $(HEVC_MPP_REPRO) \
+		fetch-hevc-main10-sweep-vectors
+	PROFILE=main10 EXPECTATIONS="$(HEVC_MAIN10_SWEEP_MANIFEST)" \
+		tests/sweep-hevc-conformance.sh "$(HEVC_MAIN10_SWEEP_DIR)"
 
 probe-mpp-main10-encode:
 	tests/probe-mpp-main10-encode.sh
@@ -507,7 +520,9 @@ clean:
 	check check-conformance check-synthetic \
 	check-hevc check-hevc-sanitize \
 	check-hevc-tiles-backend fetch-hevc-sweep-vectors \
-	check-hevc-conformance-sweep probe-mpp-main10-encode probe-av1-platform \
+	check-hevc-conformance-sweep fetch-hevc-main10-sweep-vectors \
+	check-hevc-main10-conformance-sweep \
+	probe-mpp-main10-encode probe-av1-platform \
 	check-hevc-main10-experimental check-hevc-main10-hdr-experimental \
 	check-vp9-profile2-experimental check-gstreamer-va \
 	check-vlc-display check-firefox-decode \

@@ -422,7 +422,6 @@ static bool validate_picture_parameters(const VAPictureParameterBufferHEVC *pp,
         pp->log2_diff_max_min_transform_block_size > 3 ||
         pp->num_ref_idx_l0_default_active_minus1 > 14 ||
         pp->num_ref_idx_l1_default_active_minus1 > 14 ||
-        pp->init_qp_minus26 < -26 || pp->init_qp_minus26 > 25 ||
         pp->pps_cb_qp_offset < -12 || pp->pps_cb_qp_offset > 12 ||
         pp->pps_cr_qp_offset < -12 || pp->pps_cr_qp_offset > 12 ||
         pp->pps_beta_offset_div2 < -6 || pp->pps_beta_offset_div2 > 6 ||
@@ -430,6 +429,14 @@ static bool validate_picture_parameters(const VAPictureParameterBufferHEVC *pp,
         pp->num_tile_columns_minus1 > 19 ||
         pp->num_tile_rows_minus1 > 21 ||
         (pp->pic_fields.bits.scaling_list_enabled_flag && !iq))
+        return false;
+
+    /* init_qp_minus26 spans -(26 + QpBdOffsetY) to +25, and QpBdOffsetY grows
+     * with luma bit depth (7.4.3.3.1). A flat -26 floor is an 8-bit-only bound
+     * that rejects legal Main10 streams -- INITQP_B_Sony_1 among them. */
+    int qp_bd_offset_y = 6 * pp->bit_depth_luma_minus8;
+    if (pp->init_qp_minus26 < -(26 + qp_bd_offset_y) ||
+        pp->init_qp_minus26 > 25)
         return false;
 
     unsigned int min_cb_log2 =

@@ -243,6 +243,14 @@ every HEVC Main candidate in the FFmpeg FATE conformance suite into
 land in exactly the class `tests/hevc-sweep-vectors.tsv` records. It is slow --
 budget well over an hour -- and is not part of `check`.
 
+`check-hevc-main10-conformance-sweep` is the same tool with `PROFILE=main10`,
+comparing P010 output over the FATE Main10 candidates. Ten of the eleven real
+Main10 streams are bit-exact. The exception is `WPP_D_ericsson_MAIN10_2.bit` at
+64x240: RGA3 refuses a source below its minimum active width, so the AFBC
+NV15-to-P010 repack every 10-bit surface depends on cannot run at all and the
+decode fails closed. Main10 stays unadvertised, so this records the 10-bit
+boundary rather than gating a shipping profile.
+
 `check-hevc-main10-experimental` generates 48 Main10 frames at 320x240 and also
 runs the checksum-pinned FATE `WP_A_MAIN10_Toshiba_3.bit` weighted-prediction
 vector (416x240, 256 frames). It forces the hidden `hevc-main10` profile,

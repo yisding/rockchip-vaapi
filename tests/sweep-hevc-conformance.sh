@@ -23,9 +23,14 @@
 # Usage:
 #   tests/sweep-hevc-conformance.sh CANDIDATE_DIR [REPORT_DIR]
 #
+# PROFILE selects which HEVC profile is under test: "main" (8-bit 4:2:0, the
+# default) or "main10". Main10 output is compared as P010, which is also what
+# every consumer of this driver receives, because MPP hands back AFBC NV15 that
+# RGA repacks.
+#
 # Environment:
 #   FFMPEG FFPROBE REPRO RENDER_NODE FFMPEG_TIMEOUT DRIVER_DIR BASE_URL
-#   EXPECTATIONS
+#   EXPECTATIONS PROFILE
 
 set -u
 
@@ -39,6 +44,26 @@ REPRO=${REPRO:-$SCRIPT_DIR/hevc_mpp_repro}
 RENDER_NODE=${RENDER_NODE:-/dev/dri/renderD128}
 BASE_URL=${BASE_URL:-https://fate-suite.ffmpeg.org/hevc-conformance}
 EXPECTATIONS=${EXPECTATIONS:-}
+PROFILE=${PROFILE:-main}
+
+case $PROFILE in
+    main)
+        WANT_PROFILE=Main
+        WANT_PIX_FMT=yuv420p
+        HW_FORMAT=nv12
+        SW_FORMAT=yuv420p
+        ;;
+    main10)
+        WANT_PROFILE="Main 10"
+        WANT_PIX_FMT=yuv420p10le
+        HW_FORMAT=p010le
+        SW_FORMAT=yuv420p10le
+        export RK_VAAPI_EXPERIMENTAL_PROFILES=hevc-main10
+        ;;
+    *)
+        echo "error: PROFILE must be main or main10" >&2
+        exit 2 ;;
+esac
 
 if [ $# -lt 1 ] || [ $# -gt 2 ]; then
     echo "usage: $0 CANDIDATE_DIR [REPORT_DIR]" >&2
@@ -109,12 +134,12 @@ run_ffmpeg()
 }
 
 # Reject anything that is not the profile under test before spending a decode
-# on it. Unequal bit depths and non-4:2:0 chroma are out of scope for Main.
+# on it. Unequal luma/chroma bit depths and non-4:2:0 chroma are out of scope.
 classify()
 {
     "$FFPROBE" -v error -select_streams v:0 \
         -show_entries stream=codec_name,profile,pix_fmt \
-        -of default=nw=1:nk=1 "$1" 2>/dev/null | tr '\n' ' '
+        -of default=nw=1:nk=1 "$1" 2>/dev/null | tr '\n' '|'
 }
 
 # The manifest's decode_path column carries the expected class for each
@@ -168,19 +193,22 @@ for input in "$CANDIDATE_DIR"/*.bit "$CANDIDATE_DIR"/*.bin; do
     TOTAL=$((TOTAL + 1))
 
     info=$(classify "$input")
-    codec=$(echo "$info" | awk '{print $1}')
-    profile=$(echo "$info" | awk '{print $2}')
-    pix_fmt=$(echo "$info" | awk '{print $3}')
-    if [ "$codec" != hevc ] || [ "$profile" != Main ] ||
-       [ "$pix_fmt" != yuv420p ]; then
+    codec=${info%%|*}
+    rest=${info#*|}
+    profile=${rest%%|*}
+    pix_fmt=$(echo "$rest" | cut -d'|' -f2)
+    if [ "$codec" != hevc ] || [ "$profile" != "$WANT_PROFILE" ] ||
+       [ "$pix_fmt" != "$WANT_PIX_FMT" ]; then
         SKIPPED=$((SKIPPED + 1))
-        report skip "$name" - - "not HEVC Main 8-bit 4:2:0 (${info:-unreadable})"
+        report skip "$name" - - \
+            "not HEVC $WANT_PROFILE $WANT_PIX_FMT (${info:-unreadable})"
         continue
     fi
 
     sw=$WORK/sw.md5
-    if ! run_ffmpeg -nostdin -y -v error -i "$input" -an -vf format=yuv420p \
-            -f framemd5 "$sw" >"$WORK/sw.log" 2>&1; then
+    if ! run_ffmpeg -nostdin -y -v error -i "$input" -an \
+            -vf "format=$SW_FORMAT" -f framemd5 "$sw" \
+            >"$WORK/sw.log" 2>&1; then
         SKIPPED=$((SKIPPED + 1))
         report skip "$name" - - "software reference decode errored"
         continue
@@ -213,7 +241,7 @@ for input in "$CANDIDATE_DIR"/*.bit "$CANDIDATE_DIR"/*.bin; do
     if ! run_ffmpeg -nostdin -y -v error -hwaccel vaapi \
             -hwaccel_output_format vaapi -vaapi_device "$RENDER_NODE" \
             -i "$input" -an \
-            -vf "hwdownload,format=nv12,${crop}format=yuv420p" \
+            -vf "hwdownload,format=$HW_FORMAT,${crop}format=$SW_FORMAT" \
             -f framemd5 "$hw" >"$WORK/hw.log" 2>&1; then
         # A picture larger than the advertised constraints is a correct,
         # documented refusal, not a decode failure. FFmpeg falls back.
@@ -260,7 +288,11 @@ if [ -n "$EXPECTATIONS" ]; then
         echo "error: $UNEXPECTED vectors diverged from the pinned manifest" >&2
         exit 1
     fi
+    # The manifest is the verdict for a pinned run. A driver failure recorded
+    # there is a known boundary, not a regression; an unrecorded one already
+    # failed above.
     echo "ALL PINNED CLASSES MATCH"
+    exit 0
 fi
 
 [ "$DRIVER_FAILED" -eq 0 ]
