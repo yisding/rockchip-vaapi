@@ -204,6 +204,7 @@ FFMPEG=/usr/bin/ffmpeg make check-hevc-main10-hdr-experimental
 FFMPEG=/usr/bin/ffmpeg make check-vp9-profile2-experimental
 FFMPEG=/usr/bin/ffmpeg make check-gstreamer-va
 FFMPEG=/usr/bin/ffmpeg make check-vlc-display
+FFMPEG=/usr/bin/ffmpeg make check-mpv-display
 FFMPEG=/usr/bin/ffmpeg make check-firefox-decode
 FFMPEG=/usr/bin/ffmpeg make check-h264-encode-experimental
 FFMPEG=/usr/bin/ffmpeg make check-hevc-encode-experimental
@@ -292,6 +293,23 @@ VLC destroys its decoder mid-stream at exit with the last pictures still in
 flight. The driver reports that as a teardown-drain note and fails those
 fences rather than waiting forever; it is not an error and the gate does not
 treat it as one.
+
+`check-mpv-display` generates 20 H.264 High CIF frames at 352x288 and plays
+the complete clip through stock mpv 0.41.0 with `--hwdec=vaapi`, gpu-next,
+OpenGL, and the active Wayland context. It requires VA-API hardware decode,
+the VAAPI NV12 video-output path, exactly one MPP info-change, at least 20
+external-pool frames, and at least 20 352-to-384-byte RGA repacks. It rejects
+Panfrost's `WSI pitch not properly aligned`, EGL mapping/import failures,
+render failures, and hardware-frame downloads. The gate refuses to run without
+a Wayland session because a headless pass cannot exercise EGL DMA-BUF import.
+
+This narrow repack is an export/display compatibility path, not a decode-path
+copy: MPP still decodes into its external pool, layouts already aligned to 64
+bytes stay zero-copy through export, and only decoded driver-owned 8-bit NV12
+surfaces with an incompatible pitch are repacked once per surface fence.
+`tests/driver_objects_test` independently fills 352-stride NV12 luma/chroma,
+repacks to 384 stride, and compares every active output byte. The mpv result is
+an 8-bit presentation slice; 10-bit and HDR presentation remain open.
 
 `check-firefox-decode` plays generated H.264 High and HEVC Main clips in stock
 Firefox with a throwaway profile and requires at least `MIN_FRAMES` external

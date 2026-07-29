@@ -31,4 +31,10 @@ bool rk_convert_rgb_to_nv12(int source_fd, size_t source_size,
                             uint32_t destination_stride,
                             uint32_t destination_vertical_stride);
 
+bool rk_repack_nv12(MppBuffer source, uint32_t width, uint32_t height,
+                    uint32_t source_stride,
+                    uint32_t source_vertical_stride,
+                    MppBuffer destination, uint32_t destination_stride,
+                    uint32_t destination_vertical_stride);
+
 #endif

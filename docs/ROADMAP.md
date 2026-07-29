@@ -614,6 +614,25 @@ Wayland -- so its GPU process never starts and no VA-API path is reachable. The
 same session runs accelerated GL for VLC and Firefox, so no Chromium claim is
 made in either direction.
 
+**Progress (2026-07-29, mpv/Panfrost presentation slice):** Stock mpv 0.41.0
+selects VA-API decode and gpu-next's Wayland/OpenGL presentation for H.264.
+The first real probe exposed a driver/display contract gap: MPP emitted the
+352x288 CIF frame with a 352-byte linear NV12 pitch, which Panfrost refused as
+`WSI pitch not properly aligned`; every EGL import and render failed even
+though hardware decode itself succeeded. Forcing a wider layout inside MPP
+was rejected because it caused a stream info-change on every frame.
+
+The driver now retains MPP's normal external-pool zero-copy decode and, only
+when exporting a decoded driver-owned 8-bit NV12 surface whose pitch is not
+64-byte aligned, uses RGA to repack the active image into a cached aligned
+DMA-BUF once per surface fence. Compatible H.264, HEVC, and VP9 layouts remain
+direct exports. The hardware object test proves every active luma/chroma byte
+survives a 352-to-384-byte repack. `make check-mpv-display` then renders a
+complete generated 20-frame H.264 High CIF clip through mpv with one MPP
+info-change, 20 external frames, 20 repacks, no hardware-frame download, and
+no pitch, EGL-import, mapping, or render error. This closes the 8-bit mpv
+presentation slice; 10-bit/HDR presentation is still open.
+
 **Progress (2026-07-27, packaging slice):** Debian packaging now declares its
 RGA build dependency and produces separate `rockchip-vaapi` and
 `rockchip-vaapi-config` packages. The optional config package selects the
@@ -657,10 +676,10 @@ normal, ASan/UBSan, TSan, and Valgrind tests cover filtering, JSON control
 characters, nested lifecycle, and 800 concurrent records without interleaving.
 
 **Gate:** the app matrix passes on-device — ✅ stock FFmpeg, GStreamer `va`,
-VLC and Firefox; ⬜ Chromium (blocked on its GL stack here) and mpv (not
-installed); ✅ conformance suite green; clean soak; ✅ `.deb` + config packages
-install, upgrade and purge cleanly in an isolated root, ⬜ enabling HW decode
-from a genuinely clean image is untested.
+VLC, and Firefox; ✅ mpv 8-bit H.264 decode/presentation (10-bit/HDR open);
+⬜ Chromium (blocked on its GL stack here); ✅ conformance suite green; clean
+soak; ✅ `.deb` + config packages install, upgrade and purge cleanly in an
+isolated root, ⬜ enabling HW decode from a genuinely clean image is untested.
 
 ### Phase 4 — Encode (`VAEntrypointEncSlice`)  (~3–4 wk)
 
@@ -836,12 +855,15 @@ concurrent with decode contexts are race-free.
   bit-exact and static BT.2020/PQ HDR metadata is preserved, but both 10-bit
   profiles stay hidden until broader 10-bit conformance and HDR display
   presentation are validated.
-- Phase 3: in progress; three app-matrix rows now pass on-device. Stock FFmpeg
+- Phase 3: in progress; five app-matrix slices now pass on-device. Stock FFmpeg
   is the conformance gate itself, the stock GStreamer 1.28 `va` plugin
   system-memory gate is byte-exact for H.264, HEVC Main10, and VP9 Profiles
   0/2, and stock VLC 3.0.23 and Firefox 153.0 both hardware-decode H.264 High
   and HEVC Main in a real display session with clean driver logs
-  (`check-vlc-display`, `check-firefox-decode`). Both refuse to run headless.
+  (`check-vlc-display`, `check-firefox-decode`). Stock mpv 0.41.0 also renders
+  the 8-bit H.264 CIF path through Wayland/Panfrost after a selective
+  352-to-384-byte NV12 export repack (`check-mpv-display`). The display gates
+  refuse to run headless.
   Split driver/config Debian packaging no longer weakens Firefox's sandbox
   globally, structured leveled text/JSON logging is lifecycle-, sanitizer-,
   thread-, and leak-tested, and clean-image package lifecycle validation is
@@ -853,8 +875,8 @@ concurrent with decode contexts are race-free.
   Open: no patched Firefox has been built, so the sandbox contract is verified
   by hash and application only; Chromium cannot
   initialize a GL context on this Mali-G610/Panfrost stack, so no Chromium
-  claim is made; mpv is not installed; HDR display presentation and
-  fresh-image hardware decode remain untested. Installed `1.0.11+ysp5` matches
+  claim is made; mpv 10-bit/HDR display presentation and fresh-image hardware
+  decode remain untested. Installed `1.0.11+ysp5` matches
   its deb payload and passes the narrow Main10 fallback plus complete normal
   pinned conformance gates; the installed-package gap is no longer open.
 - Phase 4: in progress; experimental one-slice H.264 Main/High and HEVC Main

@@ -333,6 +333,88 @@ static void test_rga_10bit_geometry(void)
     }
 }
 
+static void test_rga_nv12_repack(void)
+{
+    enum {
+        WIDTH = 352,
+        HEIGHT = 288,
+        SOURCE_STRIDE = 352,
+        DESTINATION_STRIDE = 384,
+    };
+    const size_t source_size =
+        (size_t)SOURCE_STRIDE * HEIGHT * 3u / 2u;
+    const size_t destination_size =
+        (size_t)DESTINATION_STRIDE * HEIGHT * 3u / 2u;
+    MppBufferGroup group = NULL;
+    MppBuffer source = NULL;
+    MppBuffer destination = NULL;
+
+    if (mpp_buffer_group_get_internal(&group, MPP_BUFFER_TYPE_DRM) != MPP_OK ||
+        mpp_buffer_get(group, &source, source_size) != MPP_OK ||
+        mpp_buffer_get(group, &destination, destination_size) != MPP_OK) {
+        fputs("failed to allocate NV12 repack test buffers\n", stderr);
+        exit(1);
+    }
+    uint8_t *source_bytes = mpp_buffer_get_ptr(source);
+    uint8_t *destination_bytes = mpp_buffer_get_ptr(destination);
+    if (!source_bytes || !destination_bytes ||
+        mpp_buffer_sync_begin(source) != MPP_OK ||
+        mpp_buffer_sync_begin(destination) != MPP_OK) {
+        fputs("failed to map NV12 repack test buffers\n", stderr);
+        exit(1);
+    }
+    memset(source_bytes, 0, source_size);
+    memset(destination_bytes, 0, destination_size);
+    for (unsigned int row = 0; row < HEIGHT; row++)
+        for (unsigned int column = 0; column < WIDTH; column++)
+            source_bytes[(size_t)row * SOURCE_STRIDE + column] =
+                (uint8_t)(row * 13u + column * 7u + 3u);
+    uint8_t *source_uv = source_bytes +
+                         (size_t)SOURCE_STRIDE * HEIGHT;
+    for (unsigned int row = 0; row < HEIGHT / 2; row++)
+        for (unsigned int column = 0; column < WIDTH; column++)
+            source_uv[(size_t)row * SOURCE_STRIDE + column] =
+                (uint8_t)(row * 5u + column * 11u + 19u);
+    if (mpp_buffer_sync_end(source) != MPP_OK ||
+        mpp_buffer_sync_end(destination) != MPP_OK ||
+        !rk_repack_nv12(source, WIDTH, HEIGHT, SOURCE_STRIDE, HEIGHT,
+                        destination, DESTINATION_STRIDE, HEIGHT) ||
+        mpp_buffer_sync_ro_begin(destination) != MPP_OK) {
+        fputs("NV12 repack operation failed\n", stderr);
+        exit(1);
+    }
+
+    uint8_t *destination_uv = destination_bytes +
+                              (size_t)DESTINATION_STRIDE * HEIGHT;
+    for (unsigned int row = 0; row < HEIGHT; row++) {
+        for (unsigned int column = 0; column < WIDTH; column++) {
+            uint8_t expected = (uint8_t)(row * 13u + column * 7u + 3u);
+            if (destination_bytes[(size_t)row * DESTINATION_STRIDE + column]
+                    != expected) {
+                fputs("NV12 luma repack changed active pixels\n", stderr);
+                exit(1);
+            }
+        }
+    }
+    for (unsigned int row = 0; row < HEIGHT / 2; row++) {
+        for (unsigned int column = 0; column < WIDTH; column++) {
+            uint8_t expected = (uint8_t)(row * 5u + column * 11u + 19u);
+            if (destination_uv[(size_t)row * DESTINATION_STRIDE + column]
+                    != expected) {
+                fputs("NV12 chroma repack changed active pixels\n", stderr);
+                exit(1);
+            }
+        }
+    }
+    if (mpp_buffer_sync_ro_end(destination) != MPP_OK) {
+        fputs("failed to finish NV12 repack readback\n", stderr);
+        exit(1);
+    }
+    mpp_buffer_put(destination);
+    mpp_buffer_put(source);
+    mpp_buffer_group_put(group);
+}
+
 static void test_experimental_10bit_profiles(struct VADriverVTable *v,
                                              VADriverContextP ctx)
 {
@@ -1059,6 +1141,7 @@ int main(void)
     VAImage images[IMAGE_COUNT];
 
     test_rga_10bit_geometry();
+    test_rga_nv12_repack();
     test_experimental_10bit_profiles(&vtable, &ctx);
     test_experimental_h264_encode(&vtable, &ctx);
     test_experimental_hevc_encode(&vtable, &ctx);

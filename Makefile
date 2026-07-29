@@ -208,6 +208,9 @@ check-gstreamer-va: $(TARGET) test
 check-vlc-display: $(TARGET) test
 	tests/check-vlc-display.sh
 
+check-mpv-display: $(TARGET) test
+	tests/check-mpv-display.sh
+
 check-firefox-decode: $(TARGET) test
 	tests/check-firefox-decode.sh
 

@@ -96,8 +96,10 @@ Key features:
 - DRM PRIME 2 surface export directly from retained MPP external-pool DMA-BUFs
 - `vaDeriveImage` over the surface's own DMA-BUF, so VLC's OpenGL VA-API
   converters can import decoded frames as EGLImages
-- App gates on-device for stock FFmpeg, GStreamer `va`, VLC 3.0.23 and
-  Firefox 153.0; the VLC and Firefox gates refuse to run headless
+- App gates on-device for stock FFmpeg, GStreamer `va`, VLC 3.0.23,
+  Firefox 153.0, and mpv 0.41.0. The display gates refuse to run headless;
+  mpv additionally proves Panfrost can EGL-import a repacked 64-byte-aligned
+  CIF NV12 pitch without falling back to a software download
 - Experimental H.264 High encode through `h264_vaapi` and GStreamer
   `vah264enc`, with CQP/CBR/VBR round-trip PSNR gates
 - Compatible with Firefox 128+ (VA-API PDM path, RDD process)

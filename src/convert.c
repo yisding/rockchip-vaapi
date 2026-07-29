@@ -125,6 +125,87 @@ bool rk_convert_rgb_to_nv12(int source_fd, size_t source_size,
 #endif
 }
 
+bool rk_repack_nv12(MppBuffer source, uint32_t width, uint32_t height,
+                    uint32_t source_stride,
+                    uint32_t source_vertical_stride,
+                    MppBuffer destination, uint32_t destination_stride,
+                    uint32_t destination_vertical_stride)
+{
+    size_t source_layout_size = 0;
+    size_t destination_layout_size = 0;
+    if (!source || !destination || !width || !height ||
+        (width & 1u) || (height & 1u) || source_stride < width ||
+        source_vertical_stride < height || destination_stride < width ||
+        destination_vertical_stride < height ||
+        !rk_nv12_layout_size(source_stride, source_vertical_stride,
+                             &source_layout_size) ||
+        !rk_nv12_layout_size(destination_stride,
+                             destination_vertical_stride,
+                             &destination_layout_size) ||
+        source_layout_size > mpp_buffer_get_size(source) ||
+        destination_layout_size > mpp_buffer_get_size(destination)) {
+        LOG("convert: invalid NV12 repack layout size=%ux%u source=%ux%u "
+            "destination=%ux%u source_size=%zu destination_size=%zu",
+            width, height, source_stride, source_vertical_stride,
+            destination_stride, destination_vertical_stride,
+            source ? mpp_buffer_get_size(source) : 0,
+            destination ? mpp_buffer_get_size(destination) : 0);
+        return false;
+    }
+
+#ifndef RK_HAVE_RGA
+    LOG("convert: RGA support not compiled in; cannot repack NV12");
+    return false;
+#else
+    int source_fd = mpp_buffer_get_fd(source);
+    int destination_fd = mpp_buffer_get_fd(destination);
+    if (source_fd < 0 || destination_fd < 0 ||
+        source_layout_size > (size_t)INT_MAX ||
+        destination_layout_size > (size_t)INT_MAX ||
+        width > (uint32_t)INT_MAX || height > (uint32_t)INT_MAX ||
+        source_stride > (uint32_t)INT_MAX ||
+        source_vertical_stride > (uint32_t)INT_MAX ||
+        destination_stride > (uint32_t)INT_MAX ||
+        destination_vertical_stride > (uint32_t)INT_MAX) {
+        LOG("convert: NV12 repack buffer not importable source_fd=%d "
+            "destination_fd=%d source_size=%zu destination_size=%zu",
+            source_fd, destination_fd, source_layout_size,
+            destination_layout_size);
+        return false;
+    }
+
+    rga_buffer_t source_image = wrapbuffer_fd_t(
+        source_fd, (int)width, (int)height, (int)source_stride,
+        (int)source_vertical_stride, RK_FORMAT_YCbCr_420_SP);
+    rga_buffer_t destination_image = wrapbuffer_fd_t(
+        destination_fd, (int)width, (int)height, (int)destination_stride,
+        (int)destination_vertical_stride, RK_FORMAT_YCbCr_420_SP);
+    im_rect rect = {
+        .x = 0,
+        .y = 0,
+        .width = (int)width,
+        .height = (int)height,
+    };
+    IM_STATUS status = improcess(source_image, destination_image,
+                                 (rga_buffer_t){0}, rect, rect,
+                                 (im_rect){0}, IM_SYNC);
+    if (status != IM_STATUS_SUCCESS && status != IM_STATUS_NOERROR) {
+        LOG_WARNING("convert: RGA NV12 repack failed %ux%u %ux%u -> "
+                    "%ux%u status=%d (%s)", width, height, source_stride,
+                    source_vertical_stride, destination_stride,
+                    destination_vertical_stride, (int)status,
+                    imStrError_t(status));
+        return false;
+    }
+
+    LOG("convert: NV12 repack %ux%u %ux%u -> %ux%u source_fd=%d "
+        "destination_fd=%d", width, height, source_stride,
+        source_vertical_stride, destination_stride,
+        destination_vertical_stride, source_fd, destination_fd);
+    return true;
+#endif
+}
+
 bool rk_convert_nv15_to_p010(MppBufferGroup group, MppBuffer source,
                              uint32_t width, uint32_t height,
                              uint32_t source_byte_stride,

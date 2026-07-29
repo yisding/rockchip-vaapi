@@ -42,6 +42,8 @@ static void surface_destroy(void *opaque) {
         rk_object_unref(&surface->decode_pool->base);
     if (surface->priv_buf)
         mpp_buffer_put(surface->priv_buf);
+    if (surface->export_buf)
+        mpp_buffer_put(surface->export_buf);
     if (surface->priv_group)
         mpp_buffer_group_put(surface->priv_group);
     pthread_cond_destroy(&surface->cond);

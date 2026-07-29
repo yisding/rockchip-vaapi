@@ -151,6 +151,10 @@ struct RKSurface {
 
     MppBufferGroup priv_group;
     MppBuffer priv_buf;
+    MppBuffer export_buf;
+    uint64_t export_fence;
+    int export_hstride;
+    int export_vstride;
 
     MppBuffer import_buf;
     int import_fd;

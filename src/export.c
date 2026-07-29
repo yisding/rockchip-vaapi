@@ -8,8 +8,12 @@
 
 #include <va/va_drmcommon.h>
 
+#include "convert.h"
 #include "driver_internal.h"
+#include "frame_layout.h"
 #include "surface.h"
+
+enum { DRM_LINEAR_NV12_PITCH_ALIGNMENT = 64 };
 
 VAStatus rk_ExportSurfaceHandle(VADriverContextP context, VASurfaceID id,
                                 uint32_t mem_type, uint32_t flags,
@@ -65,6 +69,60 @@ VAStatus rk_ExportSurfaceHandle(VADriverContextP context, VASurfaceID id,
     uint32_t import_pitch = surface->import_pitch;
     uint32_t import_drm_format = surface->import_drm_format;
     uint32_t surface_fourcc = surface->fourcc;
+
+    /* Panfrost rejects a linear NV12 EGL import whose pitch is not 64-byte
+     * aligned. MPP's RK3588 H.264 output is only 16-byte aligned for widths
+     * such as CIF (352), while HEVC and VP9 already use compatible layouts.
+     * Repack only those decoded, driver-owned surfaces and cache the result
+     * for the surface fence; all compatible layouts retain zero-copy export. */
+    if (decoded && !surface->import_buf && !is_10bit &&
+        hstride % DRM_LINEAR_NV12_PITCH_ALIGNMENT != 0) {
+        int aligned_hstride =
+            (hstride + DRM_LINEAR_NV12_PITCH_ALIGNMENT - 1) &
+            ~(DRM_LINEAR_NV12_PITCH_ALIGNMENT - 1);
+        size_t aligned_size = 0;
+        bool layout_valid = aligned_hstride >= width && vstride >= height &&
+            rk_nv12_layout_size((size_t)aligned_hstride, (size_t)vstride,
+                                &aligned_size);
+        bool allocation_valid = surface->export_buf &&
+            surface->export_hstride == aligned_hstride &&
+            surface->export_vstride == vstride &&
+            mpp_buffer_get_size(surface->export_buf) >= aligned_size;
+        if (layout_valid && !allocation_valid) {
+            MppBuffer replacement = NULL;
+            if (surface->priv_group &&
+                mpp_buffer_get(surface->priv_group, &replacement,
+                               aligned_size) == MPP_OK) {
+                if (surface->export_buf)
+                    mpp_buffer_put(surface->export_buf);
+                surface->export_buf = replacement;
+                surface->export_hstride = aligned_hstride;
+                surface->export_vstride = vstride;
+                surface->export_fence = 0;
+                allocation_valid = true;
+            }
+        }
+        if (!layout_valid || !allocation_valid ||
+            (surface->export_fence != surface->fence &&
+             !rk_repack_nv12(active_buffer, (uint32_t)width,
+                              (uint32_t)height, (uint32_t)hstride,
+                              (uint32_t)vstride, surface->export_buf,
+                              (uint32_t)aligned_hstride,
+                              (uint32_t)vstride))) {
+            pthread_mutex_unlock(&surface->lock);
+            rk_object_unref(&surface->base);
+            return layout_valid ? VA_STATUS_ERROR_OPERATION_FAILED
+                                : VA_STATUS_ERROR_INVALID_SURFACE;
+        }
+        surface->export_fence = surface->fence;
+        active_buffer = surface->export_buf;
+        fd = mpp_buffer_get_fd(active_buffer);
+        hstride = aligned_hstride;
+        object_size = mpp_buffer_get_size(active_buffer);
+        LOG("ExportSurfaceHandle: repacked surface=0x%x fence=%llu "
+            "pitch=%d->%d", id, (unsigned long long)surface->fence,
+            surface->hstride, aligned_hstride);
+    }
     int export_fd = fd >= 0 ? dup(fd) : -1;
     int duplicate_error = export_fd < 0 ? errno : 0;
     pthread_mutex_unlock(&surface->lock);
