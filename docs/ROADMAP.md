@@ -756,9 +756,20 @@ in-process SDP offer/answer, trickle ICE, DTLS-SRTP state auditing, dynamic
 sender attachment after the peers connect, H.264 depayload, and standard
 decode/PSNR checks. An independent 12-frame OpenH264 transport control
 completed 12/12 access units, exchanged 28 candidates in each direction, and
-reported connected DTLS-SRTP elements on both peers. The combined
-`vah264enc` normal and sanitizer qualification remains open pending a clean
-on-device encoder run; the transport-only control is not hardware evidence.
+reported connected DTLS-SRTP elements on both peers. At that point the
+combined `vah264enc` normal and sanitizer qualification was still open; the
+transport-only control was not hardware evidence.
+
+**Progress (2026-07-29, hardware WebRTC peers closed):** The missing
+`GstWebRTC-1.0` typelib and `libgstnice.so` plugin were supplied through the
+gate's non-system `WEBRTC_DEPS_ROOT` path by extracting the matching Ubuntu
+arm64 packages `gir1.2-gst-plugins-bad-1.0 1.28.2-1ubuntu1.1` and
+`gstreamer1.0-nice 0.1.23-2`. The combined two-peer hardware run now passes:
+120 direct-I420 frames are encoded by `vah264enc`, traverse offer/answer,
+trickle ICE, DTLS, and SRTP, arrive as 120 High-profile access units, decode
+cleanly, and measure 41.061795 dB. The identical gate passes with the full
+ASan/UBSan driver. This replaces the transport-only control with hardware
+evidence; no system package installation is claimed.
 
 **Progress (2026-07-26, encode soak smoke):** The new paced soak exposed and
 closed a GStreamer HEVC geometry mismatch: a 640x360 visible I420 surface is
@@ -886,14 +897,13 @@ concurrent with decode contexts are race-free.
   normalized to native NV12 and pass direct FFmpeg/GStreamer gates. Linear
   packed-RGB DMA-BUF import passes a public-libva RGA conversion gate. Linear
   P010 import/readback is byte-exact, but Main10 encode is backend-blocked by
-  MPP `vepu5xx` rejecting its compact 10-bit input format. A native two-peer
-  WebRTC gate covers SDP/ICE/DTLS/SRTP and passes its software transport
-  control; combined `vah264enc` normal/sanitizer qualification remains open.
+  MPP `vepu5xx` rejecting its compact 10-bit input format. The native two-peer
+  `vah264enc` WebRTC gate covers SDP/ICE/DTLS/SRTP and passes 120 frames at
+  41.061795 dB normally and with the full ASan/UBSan driver.
   Multi-object/tiled imports, multi-slice, and long encode qualification also
   remain open; H.264 WebRTC-compatible RTP packetization and paced dual-codec
-  soak smoke are green. The two-peer WebRTC gate cannot run on this host at
-  all: it needs GstWebRTC introspection from `gir1.2-gst-plugins-bad-1.0`,
-  which is not installed.
+  soak smoke are green. Its two missing GStreamer test packages were supplied
+  from an extracted arm64 package root rather than installed system-wide.
 - Phase 5: planned.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement

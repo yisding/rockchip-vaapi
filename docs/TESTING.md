@@ -408,6 +408,16 @@ arm64 package root during development. Running `tests/webrtc_peer.py` with
 `--encoder openh264enc` is a transport-only diagnostic and is not hardware
 encode evidence.
 
+On 2026-07-29, the exact Ubuntu arm64 packages
+`gir1.2-gst-plugins-bad-1.0 1.28.2-1ubuntu1.1` and
+`gstreamer1.0-nice 0.1.23-2` were extracted under a development-only
+`WEBRTC_DEPS_ROOT`. The 120-frame hardware peer gate passed at 41.061795 dB
+both normally and with the full ASan/UBSan driver. SDP fingerprints, connected
+peer/ICE/DTLS-SRTP state, 120 High-profile received access units, 120 MPP
+packets, and checked I420 uploads were all required. This is full local
+hardware WebRTC transport evidence, but not evidence that those two optional
+test packages are installed system-wide.
+
 `check-encode-soak-experimental` launches simultaneous live H.264 and HEVC
 GStreamer pipelines at 30 fps for two hours by default. It samples combined
 RSS/fd counts from the actual pipeline processes after warmup, requires bounded
