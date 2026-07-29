@@ -456,11 +456,84 @@ static void test_slice_sps_long_term_rewrite(void)
     assert(read_ue(&br) == 1);
     assert(read_ue(&br) == 0);
     assert(read_ue(&br) == 0 && read_bit(&br) == 1);
+    assert(read_ue(&br) == 1);          /* num_long_term_pics */
+    assert(read_bits(&br, 8) == 2);     /* poc_lsb_lt */
+    assert(read_bit(&br) == 1);         /* used_by_curr_pic_lt_flag */
+    /* delta_poc_msb_present_flag is always written: the syntax element is a
+     * running delta the decoder carries across entries, and an absent flag
+     * makes it inherit the previous entry rather than mean zero. */
+    assert(read_bit(&br) == 1);
+    assert(read_ue(&br) == 0);          /* delta_poc_msb_cycle_lt */
+    assert(read_bit(&br) == 1);         /* suffix sentinel */
+}
+
+/* Long-term entries that do not index the SPS table are reproduced from the
+ * stream, because ReferenceFrames[] carries no ordering and RefPicSetLtCurr
+ * order decides the initial reference list. */
+static void test_slice_explicit_long_term_preserved(void)
+{
+    VAPictureParameterBufferHEVC pp;
+    VASliceParameterBufferHEVC sp;
+    uint8_t slice[128];
+    uint8_t rewritten[512];
+    uint8_t rbsp[512];
+    init_picture(&pp);
+    memset(&sp, 0xff, sizeof(sp));
+    sp.slice_data_byte_offset = 0;
+    pp.num_short_term_ref_pic_sets = 2;
+    pp.slice_parsing_fields.bits.long_term_ref_pics_present_flag = 1;
+    pp.num_long_term_ref_pic_sps = 0;
+    add_reference(&pp, 0, 2, 9, VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE);
+    add_reference(&pp, 1, 3, 7, VA_PICTURE_HEVC_RPS_LT_CURR |
+                                   VA_PICTURE_HEVC_LONG_TERM_REFERENCE);
+    add_reference(&pp, 2, 4, 3, VA_PICTURE_HEVC_RPS_LT_CURR |
+                                   VA_PICTURE_HEVC_LONG_TERM_REFERENCE);
+
+    BSWriter bs;
+    bs_init(&bs, slice, sizeof(slice));
+    bs_write(&bs, 0, 1);
+    bs_write(&bs, 1, 6);
+    bs_write(&bs, 0, 6);
+    bs_write(&bs, 1, 3);
+    bs_write(&bs, 1, 1);       /* first_slice_segment_in_pic_flag */
+    bs_write_ue(&bs, 0);       /* slice_pic_parameter_set_id */
+    bs_write_ue(&bs, 1);       /* P slice */
+    bs_write(&bs, 10, 8);      /* slice_pic_order_cnt_lsb */
+    bs_write(&bs, 1, 1);       /* short_term_ref_pic_set_sps_flag */
+    bs_write(&bs, 1, 1);       /* short_term_ref_pic_set_idx */
+    bs_write_ue(&bs, 2);       /* num_long_term_pics */
+    bs_write(&bs, 3, 8);       /* poc_lsb_lt[0], deliberately not DPB order */
+    bs_write(&bs, 1, 1);       /* used_by_curr_pic_lt_flag[0] */
+    bs_write(&bs, 0, 1);       /* delta_poc_msb_present_flag[0] */
+    bs_write(&bs, 7, 8);       /* poc_lsb_lt[1] */
+    bs_write(&bs, 1, 1);       /* used_by_curr_pic_lt_flag[1] */
+    bs_write(&bs, 0, 1);       /* delta_poc_msb_present_flag[1] */
+    bs_write(&bs, 1, 1);       /* suffix sentinel */
+    bs_rbsp_trailing(&bs);
+
+    int size = rk_hevc_rewrite_slice_nal(rewritten, sizeof(rewritten),
+                                         slice, bs_bytes(&bs), &pp, &sp);
+    assert(size > 0);
+    size_t rbsp_size = unescape_nal(rewritten + 2, (size_t)size - 2,
+                                    rbsp, sizeof(rbsp));
+    BitReader br = {rbsp, rbsp_size, 0};
+    assert(read_bit(&br) == 1);
+    assert(read_ue(&br) == 0);
     assert(read_ue(&br) == 1);
-    assert(read_bits(&br, 8) == 2);
+    assert(read_bits(&br, 8) == 10);
+    assert(read_bit(&br) == 0);         /* short_term_ref_pic_set_sps_flag */
+    assert(read_ue(&br) == 1);          /* num_negative_pics */
+    assert(read_ue(&br) == 0);          /* num_positive_pics */
+    assert(read_ue(&br) == 0 && read_bit(&br) == 1);
+    /* The original entry order and values survive the short-term rewrite. */
+    assert(read_ue(&br) == 2);          /* num_long_term_pics */
+    assert(read_bits(&br, 8) == 3);
     assert(read_bit(&br) == 1);
     assert(read_bit(&br) == 0);
+    assert(read_bits(&br, 8) == 7);
     assert(read_bit(&br) == 1);
+    assert(read_bit(&br) == 0);
+    assert(read_bit(&br) == 1);         /* suffix sentinel */
 }
 
 static void test_pps_uniform_tile_spacing(void)
@@ -701,6 +774,7 @@ int main(int argc, char **argv)
     test_reference_sets_and_pps();
     test_slice_rps_rewrite();
     test_slice_sps_long_term_rewrite();
+    test_slice_explicit_long_term_preserved();
     test_pps_uniform_tile_spacing();
     test_scaling_lists();
     test_sequence_parameter_sets();

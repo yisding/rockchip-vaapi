@@ -615,32 +615,35 @@ static bool write_long_term_rps(BSWriter *bs, const HEVCRPS *rps,
     uint32_t max_poc_lsb = UINT32_C(1) << poc_bits;
     uint32_t mask = max_poc_lsb - 1;
     int64_t current_poc = pp->CurrPic.pic_order_cnt;
-    int64_t prev_delta_msb = 0;
+    int64_t previous_msb = 0;
 
     bs_write_ue(bs, rps->long_term_count);
     for (unsigned int i = 0; i < rps->long_term_count; i++) {
         int64_t ref_poc = (int32_t)rps->long_term[i].poc;
         uint32_t ref_lsb = (uint32_t)ref_poc & mask;
-        int64_t delta_msb =
+        /* DeltaPocMsbCycleLt for this entry, as an absolute cycle count. */
+        int64_t msb =
             ((int64_t)ref_lsb + current_poc - poc_lsb - ref_poc) /
             max_poc_lsb;
 
         bs_write(bs, ref_lsb, (int)poc_bits);
         bs_write(bs, rps->long_term[i].used, 1);
-        if (delta_msb <= 0) {
-            bs_write(bs, 0, 1);
-            continue;
-        }
-        if (i > 0) {
-            if (delta_msb < prev_delta_msb)
-                return false;
-            delta_msb -= prev_delta_msb;
-        }
-        if (delta_msb > UINT32_MAX)
+
+        /* The syntax element is a delta against the previous entry, and the
+         * decoder carries that running total forward even across entries
+         * whose presence flag is absent (7.4.7.1). Writing an absolute cycle
+         * -- or writing nothing and assuming zero -- therefore corrupts every
+         * later entry once any entry needs a nonzero cycle. An entry whose
+         * absolute cycle is below its predecessor cannot be expressed at all,
+         * so fail closed rather than emit a reference set we know is wrong. */
+        if (msb < 0 || msb < previous_msb)
+            return false;
+        int64_t delta = msb - previous_msb;
+        if (delta > UINT32_MAX)
             return false;
         bs_write(bs, 1, 1);
-        bs_write_ue(bs, (uint32_t)delta_msb);
-        prev_delta_msb += delta_msb;
+        bs_write_ue(bs, (uint32_t)delta);
+        previous_msb = msb;
     }
     return true;
 }
@@ -680,10 +683,25 @@ static bool find_byte_alignment_start(const uint8_t *rbsp,
     return false;
 }
 
+/* Skip the reference-picture-set syntax the rewriter replaces, and report
+ * where the long-term section that follows can be reused verbatim.
+ *
+ * Only the short-term set genuinely has to be rebuilt: it may select an SPS
+ * table VA-API does not expose. Long-term entries are self-contained in the
+ * slice header unless they index the SPS long-term table, and the stream's own
+ * entries are more faithful than anything derived from ReferenceFrames[] --
+ * that array carries no ordering, and RefPicSetLtCurr order decides the
+ * initial reference list. *lt_verbatim_bit is the bit position of
+ * num_long_term_pics, which is exactly what a reconstructed SPS carrying
+ * num_long_term_ref_pics_sps=0 expects to see next. */
 static bool skip_original_rps(HEVCBitReader *br,
-                              const VAPictureParameterBufferHEVC *pp)
+                              const VAPictureParameterBufferHEVC *pp,
+                              size_t *lt_verbatim_bit, bool *lt_verbatim)
 {
     uint32_t flag;
+
+    *lt_verbatim = false;
+    *lt_verbatim_bit = 0;
 
     if (!br_read_bit(br, &flag))
         return false;
@@ -705,6 +723,7 @@ static bool skip_original_rps(HEVCBitReader *br,
         if (pp->num_long_term_ref_pic_sps > 0 &&
             !br_read_ue(br, &num_lt_sps))
             return false;
+        *lt_verbatim_bit = br->bit;
         if (!br_read_ue(br, &num_lt_pics) ||
             num_lt_sps > pp->num_long_term_ref_pic_sps ||
             num_lt_sps + num_lt_pics > HEVC_MAX_RPS_REFS)
@@ -728,6 +747,7 @@ static bool skip_original_rps(HEVCBitReader *br,
                     return false;
             }
         }
+        *lt_verbatim = num_lt_sps == 0;
     }
     return true;
 }
@@ -825,7 +845,9 @@ int rk_hevc_rewrite_slice_nal(uint8_t *buf, size_t buf_size,
                       &poc_lsb))
         goto fail;
     size_t rps_start = br.bit;
-    if (!skip_original_rps(&br, pp))
+    size_t lt_verbatim_bit = 0;
+    bool lt_verbatim = false;
+    if (!skip_original_rps(&br, pp, &lt_verbatim_bit, &lt_verbatim))
         goto fail;
     size_t rps_end = br.bit;
 
@@ -839,8 +861,12 @@ int rk_hevc_rewrite_slice_nal(uint8_t *buf, size_t buf_size,
         goto fail;
     bs_write(&bs, 0, 1);       /* short_term_ref_pic_set_sps_flag */
     write_short_term_rps(&bs, &rps, 0);
-    if (!write_long_term_rps(&bs, &rps, pp, poc_lsb))
+    if (lt_verbatim) {
+        if (!copy_bits(&bs, rbsp, lt_verbatim_bit, rps_end))
+            goto fail;
+    } else if (!write_long_term_rps(&bs, &rps, pp, poc_lsb)) {
         goto fail;
+    }
     size_t suffix_start = rps_end;
     if (sp && sp->slice_data_byte_offset >= 2) {
         size_t slice_data_bit =
