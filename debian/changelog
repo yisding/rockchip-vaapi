@@ -1,4 +1,4 @@
-rockchip-vaapi (1.0.11+ysp6) resolute; urgency=medium
+rockchip-vaapi (1.0.11+ysp6-0ubuntu1~rk1) resolute; urgency=medium
 
   * Complete the remaining Phase 2/4 roadmap gates: 1080p HEVC Main10 and VP9
     Profile 2 throughput, same-process two-decode/two-encode concurrency,
