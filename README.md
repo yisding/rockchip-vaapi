@@ -56,15 +56,13 @@ decoder gates, and two-hour 4K resource soak are also complete; see
 - **Pinned real conformance vectors and CI plumbing.** The gate now uses ITU-T
   H.264 and official libvpx VP9 vectors with payload checksums, and normal plus
   sanitized AArch64 builds are cross-compiled in CI.
-- **Direct HEVC backend reduction tooling.** The remaining TILES failure has a
-  libva-free MPP runner and a control-gated access-unit prefix reducer; current
-  host analysis isolates the first candidate to an IDR plus one replacement-PPS
-  P-picture transition. See
-  [`docs/HEVC_TILES_BACKEND.md`](docs/HEVC_TILES_BACKEND.md).
-- **Honest capability advertising.** HEVC reconstruction is under Phase 2
-  validation; seven of eight gated Main vectors are bit-exact, but the profile
-  remains hidden until every pinned HEVC case is either supported bit-exactly
-  or has a documented fallback contract. HEVC Main10 has a separate opt-in
+- **HEVC Main, conformance-gated.** 142 of the 163 HEVC Main candidates in the
+  FFmpeg FATE conformance suite are bit-exact against software decode with zero
+  driver failures, pinned by class in `tests/hevc-sweep-vectors.tsv` and
+  re-runnable as `make check-hevc-conformance-sweep`. A libva-free MPP runner
+  and control-gated prefix reducer separate backend failures from driver
+  failures; see [`docs/HEVC_TILES_BACKEND.md`](docs/HEVC_TILES_BACKEND.md).
+- **Honest capability advertising.** HEVC Main10 has a separate opt-in
   gate whose generated 48-frame and pinned 256-frame MPP AFBC-to-RGA P010
   paths are bit-exact, but it remains hidden pending broader conformance and
   app/display HDR presentation. VP9 Profile 2 has generated and official
@@ -89,10 +87,12 @@ library, which in turn uses the hardware VPU.
 
 Key features:
 
-- H.264 and VP9 hardware decode with byte-exact regression checking
+- H.264, HEVC Main and VP9 hardware decode with byte-exact regression checking
 - DRM PRIME 2 surface export directly from retained MPP external-pool DMA-BUFs
-- GStreamer `va` app gate with byte-exact H.264, HEVC Main10, and VP9
-  Profile 0/2 system-memory output
+- `vaDeriveImage` over the surface's own DMA-BUF, so VLC's OpenGL VA-API
+  converters can import decoded frames as EGLImages
+- App gates on-device for stock FFmpeg, GStreamer `va`, VLC 3.0.23 and
+  Firefox 153.0; the VLC and Firefox gates refuse to run headless
 - Experimental H.264 High encode through `h264_vaapi` and GStreamer
   `vah264enc`, with CQP/CBR/VBR round-trip PSNR gates
 - Compatible with Firefox 128+ (VA-API PDM path, RDD process)
@@ -114,7 +114,7 @@ Key features:
 | H.264 | Constrained Baseline | not offered | pinned SVA vector is corrupt in MPP; software fallback |
 | VP9 | Profile 0 | full normal + ASan/UBSan gates bit-exact | hidden-reference vector included on audited kernel |
 | VP9 | Profile 2 (under development) | not offered | generated 48-frame and official libvpx 10-frame gates are P010 bit-exact through MPP AFBC + RGA |
-| HEVC | Main (under development) | not offered | gated hardware path has 7/8 pinned Main vectors bit-exact; MPP rejects the remaining TILES vector |
+| HEVC | Main | full normal + ASan/UBSan gates bit-exact | 8/8 pinned vectors, plus 142/163 FATE Main candidates with zero driver failures |
 | HEVC | Main10 (under development) | not offered | generated, pinned weighted-prediction, and HDR10 gates are P010 bit-exact through MPP AFBC + RGA; BT.2020/PQ and static HDR metadata survive hardware decode |
 | VP8 | — | not offered | crashes in the generic path; needs debugging |
 | AV1 | — | not offered | VA-API hands headerless tile data; MPP needs full OBUs; see the [support plan](docs/AV1_SUPPORT_PLAN.md) and non-submitting platform probe |

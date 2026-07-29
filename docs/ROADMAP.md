@@ -491,9 +491,10 @@ NV12 and is valid in both composed P010 and split R16/GR1616 forms. The
 driver-object gate checks both descriptors normally and under ASan/UBSan; the
 HDR Main10 and shipping-profile hardware regressions remain green.
 
-**Gate:** HEVC Main bit-exact vs software on conformance vectors; HEVC Main10 /
-VP9 P2 bit-exact after P010 repacking; HDR HEVC plays correctly in Firefox and
-mpv on-device.
+**Gate:** ✅ HEVC Main bit-exact vs software on conformance vectors (8/8 pinned,
+142/163 FATE candidates, zero driver failures) and advertised by default;
+✅ HEVC Main10 / VP9 P2 bit-exact after P010 repacking; HDR HEVC playing
+correctly in a display session remains open.
 
 ### Phase 3 — Production hardening & the app matrix  (~2–3 wk)
 
@@ -768,22 +769,31 @@ concurrent with decode contexts are race-free.
 - Phase 1: complete on `main`; object heap/object migrations, external-buffer
   zero-copy, worker/fence synchronization, module separation, two active
   decoders, sanitizer gates, and the multi-hour 4K resource soak are green.
-- Phase 2: in progress; the first host reconstruction/routing slice is green,
-  the fail-fast experimental HEVC Main hardware gate is 7/8 bit-exact, and the
+- Phase 2: **HEVC Main is complete and shipping.** `VAProfileHEVCMain` is
+  advertised by default as of 2026-07-28: all eight pinned vectors are
+  bit-exact normally and under ASan/UBSan, and 142 of the 163 HEVC Main
+  candidates in the FATE conformance suite are bit-exact with zero driver
+  failures. The direct-MPP TILES failure is gone on the current stack and
+  `TILES_A_Cisco_2.bit` is bit-exact. The remainder of the phase is 10-bit: the
   generated 48-frame Main10/Profile 2, pinned 256-frame Main10, official
   10-frame Profile 2, and 24-frame Main10 HDR10 AFBC-to-P010 gates are
-  bit-exact. Static BT.2020/PQ HDR metadata is preserved. HEVC Main remains
-  hidden on the direct-MPP TILES failure; both 10-bit profiles remain hidden
-  while broader HEVC conformance and app/display validation are open.
-- Phase 3: in progress; the stock GStreamer 1.28 `va` plugin system-memory
-  gate is byte-exact for H.264, HEVC Main10, and VP9 Profiles 0/2. Split
-  driver/config Debian packaging no longer weakens Firefox's sandbox globally.
-  A hash-pinned Firefox 152.0.6 RDD source patch covers the measured Rockchip
-  broker and seccomp contract. Structured leveled text/JSON logging is
-  lifecycle-, sanitizer-, thread-, and leak-tested. Clean-image package
-  lifecycle validation is green. The rebuilt Firefox package, live RDD
-  playback, display sinks, other desktop apps, and fresh-image hardware decode
-  remain open.
+  bit-exact and static BT.2020/PQ HDR metadata is preserved, but both 10-bit
+  profiles stay hidden until broader 10-bit conformance and HDR display
+  presentation are validated.
+- Phase 3: in progress; three app-matrix rows now pass on-device. Stock FFmpeg
+  is the conformance gate itself, the stock GStreamer 1.28 `va` plugin
+  system-memory gate is byte-exact for H.264, HEVC Main10, and VP9 Profiles
+  0/2, and stock VLC 3.0.23 and Firefox 153.0 both hardware-decode H.264 High
+  and HEVC Main in a real display session with clean driver logs
+  (`check-vlc-display`, `check-firefox-decode`). Both refuse to run headless.
+  Split driver/config Debian packaging no longer weakens Firefox's sandbox
+  globally, structured leveled text/JSON logging is lifecycle-, sanitizer-,
+  thread-, and leak-tested, and clean-image package lifecycle validation is
+  green. Open: the Firefox RDD source patch still targets 152.0.6 and must be
+  rebased for 153 before a patched build can be validated; Chromium cannot
+  initialize a GL context on this Mali-G610/Panfrost stack, so no Chromium
+  claim is made; mpv is not installed; HDR display presentation and
+  fresh-image hardware decode remain untested.
 - Phase 4: in progress; experimental one-slice H.264 Main/High and HEVC Main
   encode pass FFmpeg and GStreamer CQP/CBR/VBR interoperability, parser, and
   PSNR gates normally and under ASan/UBSan. Both 96-frame encoder gates pass
