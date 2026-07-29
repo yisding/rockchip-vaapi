@@ -29,6 +29,7 @@ static void context_destroy(void *opaque) {
             rk_object_unref(&context->targets[i]->base);
     }
     free(context->targets);
+    free(context->pending);
     free(context->hevc_sequence_headers);
     if (context->render_surface)
         rk_object_unref(&context->render_surface->base);
@@ -340,6 +341,33 @@ VAStatus rk_BeginPicture(VADriverContextP ctx,
     return VA_STATUS_SUCCESS;
 }
 
+/* Far above the CTB count of the largest advertised picture, so no legal
+ * stream reaches it. It exists only so a broken or hostile caller cannot make
+ * one picture allocate without bound. */
+#define PENDING_LIMIT (1 << 20)
+
+/* Caller holds picture_lock. */
+static VAStatus reserve_pending(RKContext *c, int extra)
+{
+    if (extra < 0 || c->n_pending > PENDING_LIMIT - extra)
+        return VA_STATUS_ERROR_MAX_NUM_EXCEEDED;
+
+    int needed = c->n_pending + extra;
+    if (needed <= c->pending_capacity)
+        return VA_STATUS_SUCCESS;
+
+    int capacity = c->pending_capacity ? c->pending_capacity : 64;
+    while (capacity < needed)
+        capacity *= 2;
+    VABufferID *grown = realloc(c->pending,
+                                (size_t)capacity * sizeof(*grown));
+    if (!grown)
+        return VA_STATUS_ERROR_ALLOCATION_FAILED;
+    c->pending = grown;
+    c->pending_capacity = capacity;
+    return VA_STATUS_SUCCESS;
+}
+
 VAStatus rk_RenderPicture(VADriverContextP ctx,
                                   VAContextID ctx_id,
                                   VABufferID *buffers, int n) {
@@ -372,10 +400,11 @@ VAStatus rk_RenderPicture(VADriverContextP ctx,
     }
 
     pthread_mutex_lock(&c->picture_lock);
-    if (n > 64 - c->n_pending) {
+    VAStatus reserved = reserve_pending(c, n);
+    if (reserved != VA_STATUS_SUCCESS) {
         pthread_mutex_unlock(&c->picture_lock);
         rk_object_unref(&c->base);
-        return VA_STATUS_ERROR_MAX_NUM_EXCEEDED;
+        return reserved;
     }
 
     for (int i = 0; i < n; i++) {

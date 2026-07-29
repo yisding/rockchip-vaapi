@@ -7,6 +7,7 @@
 set -u
 
 FFMPEG=${FFMPEG:-ffmpeg}
+FFPROBE=${FFPROBE:-ffprobe}
 FFMPEG_TIMEOUT=${FFMPEG_TIMEOUT:-300}
 FAIL_FAST=${FAIL_FAST:-0}
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
@@ -90,6 +91,10 @@ if [ -z "$ffmpeg_path" ]; then
     echo "error: FFMPEG '$FFMPEG' not found" >&2
     exit 2
 fi
+if ! command -v "$FFPROBE" >/dev/null 2>&1; then
+    echo "error: FFPROBE '$FFPROBE' not found" >&2
+    exit 2
+fi
 if ! "$FFMPEG" -hide_banner -hwaccels 2>/dev/null |
      grep -qx '[[:space:]]*vaapi[[:space:]]*'; then
     echo "error: $ffmpeg_path was built without VAAPI support" >&2
@@ -134,13 +139,32 @@ sw_md5()
         -f framemd5 "$2" >"$2.log" 2>&1
 }
 
+# VA-API hands out whole coded surfaces. libavcodec applies only the right and
+# bottom crop to a hardware frame and leaves the left/top conformance-window
+# offset on the frame for the consumer, so a downloaded hardware frame can be
+# larger than -- and shifted relative to -- the software one. Re-crop to the
+# stream's display rectangle before comparing. Uncropped streams give
+# in_w-w == 0 and the expression is a no-op.
+display_crop()
+{
+    size=$("$FFPROBE" -v error -select_streams v:0 \
+        -show_entries stream=width,height -of csv=p=0:s=x "$1" 2>/dev/null)
+    w=${size%x*}
+    h=${size#*x}
+    case ${w:-}${h:-} in
+        ''|*[!0-9]*) echo ""; return ;;
+    esac
+    echo "crop=$w:$h:in_w-$w:in_h-$h,"
+}
+
 hw_md5()
 {
     if [ "$3" = vaapi ]; then
+        crop=$(display_crop "$1")
         run_ffmpeg -nostdin -y -v error -hwaccel vaapi \
             -hwaccel_output_format vaapi -vaapi_device "$RENDER_NODE" \
             -i "$1" -an \
-            -vf 'hwdownload,format=nv12,format=yuv420p' \
+            -vf "hwdownload,format=nv12,${crop}format=yuv420p" \
             -f framemd5 "$2" >"$2.log" 2>&1
     else
         run_ffmpeg -nostdin -y -v error -hwaccel vaapi \

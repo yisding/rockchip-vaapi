@@ -60,7 +60,9 @@ typedef struct {
     MppBufferGroup frame_group;
     MppBufferGroup backing_group;
     MppBuffer *buffers;
-    int count;
+    int count;                  /* committed to MPP so far */
+    int capacity;               /* entries in buffers[] */
+    size_t buffer_size;
 } RKDecodePool;
 
 typedef struct {
@@ -85,23 +87,28 @@ typedef struct {
     pthread_mutex_t work_lock;
     pthread_cond_t work_cond;
     pthread_t worker;
-    bool sync_initialized;
-    bool worker_started;
-    bool worker_stop;
     RKDecodeJob *job_head;
     RKDecodeJob *job_tail;
     RKFrameRoute *h264_routes;
     RKFrameRoute *generic_head;
     RKFrameRoute *generic_tail;
-    unsigned int outstanding_frames;
     uint64_t next_token;
+    int64_t drain_deadline_ns;
+    unsigned int outstanding_frames;
+    bool sync_initialized;
+    bool worker_started;
+    bool worker_stop;
+    bool worker_drain;
 
-    VABufferID pending[64];
-    int n_pending;
-
-    VASurfaceID render_target;
+    /* Grown on demand: HEVC conformance streams such as CAINIT_G carry more
+     * than a hundred slices in one picture, and a fixed ceiling would turn a
+     * legal stream into a decode failure. */
+    VABufferID *pending;
     RKSurface *render_surface;
     uint64_t render_fence;
+    int n_pending;
+    int pending_capacity;
+    VASurfaceID render_target;
 
     VAPictureParameterBufferH264 last_pp;
     VAIQMatrixBufferH264 last_iq;

@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <rockchip/mpp_buffer.h>
 #include <rockchip/mpp_frame.h>
@@ -76,9 +77,75 @@ static bool codec_uses_token_routes(const RKContext *c)
            c->coding == MPP_VIDEO_CodingHEVC;
 }
 
+/* The pool starts at the depth a single-threaded consumer needs and grows on
+ * demand. It cannot be sized correctly up front: VA surfaces are created
+ * independently of the context, FFmpeg passes no render targets to
+ * vaCreateContext, and its surface count scales with decoder thread count.
+ * A frame-threaded HEVC decode of a large DPB holds ~29 surfaces, which
+ * deadlocked against a fixed 24-buffer pool -- MPP had no free output buffer,
+ * every buffer was bound to a surface the application had not released, and
+ * the application was waiting on the decode. Growing costs memory only when a
+ * consumer actually holds that many frames. */
+enum { EXTERNAL_POOL_COUNT = 24, EXTERNAL_POOL_MAX = 64 };
+
+/* Allocate and commit one more backing buffer. Caller runs on the worker. */
+static bool commit_pool_buffer(RKDecodePool *pool, int index)
+{
+    if (mpp_buffer_get(pool->backing_group, &pool->buffers[index],
+                       pool->buffer_size) != MPP_OK) {
+        LOG("external_group: backing buffer %d allocation failed", index);
+        return false;
+    }
+    MppBufferInfo commit = {
+        .type = MPP_BUFFER_TYPE_EXT_DMA,
+        .size = mpp_buffer_get_size(pool->buffers[index]),
+        .ptr = NULL,
+        .hnd = NULL,
+        .fd = mpp_buffer_get_fd(pool->buffers[index]),
+        .index = index,
+    };
+    if (commit.fd < 0 ||
+        mpp_buffer_commit(pool->frame_group, &commit) != MPP_OK) {
+        LOG("external_group: commit buffer[%d] fd=%d size=%zu failed",
+            index, commit.fd, commit.size);
+        mpp_buffer_put(pool->buffers[index]);
+        pool->buffers[index] = NULL;
+        return false;
+    }
+    return true;
+}
+
+/* Add buffers to a live external group. Returns false when the pool is
+ * already at its ceiling or the allocation failed, so the caller can report a
+ * real error instead of stalling forever. */
+static bool grow_external_group(RKContext *c)
+{
+    enum { EXTERNAL_POOL_GROW = 8 };
+    RKDecodePool *pool = c->decode_pool;
+
+    if (!pool || pool->count >= pool->capacity)
+        return false;
+
+    int target = pool->count + EXTERNAL_POOL_GROW;
+    if (target > pool->capacity)
+        target = pool->capacity;
+
+    int added = 0;
+    for (int i = pool->count; i < target; i++) {
+        if (!commit_pool_buffer(pool, i))
+            break;
+        added++;
+    }
+    if (!added)
+        return false;
+
+    pool->count += added;
+    LOG("external_group: grew to %d buffers (+%d)", pool->count, added);
+    return true;
+}
+
 static bool configure_external_group(RKContext *c, MppFrame info_frame)
 {
-    enum { EXTERNAL_POOL_COUNT = 24 };
     size_t required_size = mpp_frame_get_buf_size(info_frame);
     size_t allocation_size = required_size;
     unsigned int hs = mpp_frame_get_hor_stride(info_frame);
@@ -107,7 +174,8 @@ static bool configure_external_group(RKContext *c, MppFrame info_frame)
     if (!pool)
         return false;
     rk_object_init(&pool->base, decode_pool_destroy);
-    pool->count = EXTERNAL_POOL_COUNT;
+    pool->capacity = EXTERNAL_POOL_MAX;
+    pool->buffer_size = allocation_size;
 
     if (mpp_buffer_group_get_external(&pool->frame_group,
                                       MPP_BUFFER_TYPE_EXT_DMA) !=
@@ -122,32 +190,14 @@ static bool configure_external_group(RKContext *c, MppFrame info_frame)
         goto fail;
     }
 
-    pool->buffers = calloc(EXTERNAL_POOL_COUNT, sizeof(*pool->buffers));
+    pool->buffers = calloc((size_t)pool->capacity, sizeof(*pool->buffers));
     if (!pool->buffers)
         goto fail;
 
     for (int i = 0; i < EXTERNAL_POOL_COUNT; i++) {
-        if (mpp_buffer_get(pool->backing_group, &pool->buffers[i],
-                           allocation_size) !=
-            MPP_OK) {
-            LOG("external_group: backing buffer %d/%d allocation failed",
-                i, EXTERNAL_POOL_COUNT);
+        if (!commit_pool_buffer(pool, i))
             goto fail;
-        }
-        MppBufferInfo commit = {
-            .type = MPP_BUFFER_TYPE_EXT_DMA,
-            .size = mpp_buffer_get_size(pool->buffers[i]),
-            .ptr = NULL,
-            .hnd = NULL,
-            .fd = mpp_buffer_get_fd(pool->buffers[i]),
-            .index = i,
-        };
-        if (commit.fd < 0 ||
-            mpp_buffer_commit(pool->frame_group, &commit) != MPP_OK) {
-            LOG("external_group: commit buffer[%d] fd=%d size=%zu failed",
-                i, commit.fd, commit.size);
-            goto fail;
-        }
+        pool->count++;
     }
 
     if (c->mpi->control(c->mpp, MPP_DEC_SET_EXT_BUF_GROUP,
@@ -523,10 +573,22 @@ static bool assign_mpp_frame(MppFrame frame, RKContext *c)
  * caller thread polls and no sleep loop is needed.
  * Without this, fast submission silently drops frames (measured on VP9:
  * 38 of 120 packets rejected, nondeterministically, before this fix). */
+static int64_t monotonic_ns(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return 0;
+    return (int64_t)now.tv_sec * 1000000000 + now.tv_nsec;
+}
+
+/* True once the worker must stop pushing work at MPP: either a hard stop, or
+ * a teardown drain that has run past its deadline. The deadline keeps
+ * vaDestroyContext bounded when the backend has stopped making progress. */
 static bool decode_worker_stopping(RKContext *c)
 {
     pthread_mutex_lock(&c->work_lock);
-    bool stopping = c->worker_stop;
+    bool stopping = c->worker_stop ||
+                    (c->worker_drain && monotonic_ns() > c->drain_deadline_ns);
     pthread_mutex_unlock(&c->work_lock);
     return stopping;
 }
@@ -547,13 +609,33 @@ static bool drain_output_frame(RKContext *c)
 
 static MPP_RET put_packet_draining(RKContext *c, MppPacket pkt)
 {
+    /* Consecutive rejections with nothing to drain that mean MPP is starved of
+     * output buffers rather than merely busy. At the 20 ms output timeout this
+     * is ~0.5 s of no progress before the pool is grown. */
+    enum { STARVED_TRIES = 25 };
     MPP_RET ret = MPP_OK;
+    int starved = 0;
+
     for (int tries = 0; tries < 500; tries++) {
         if (decode_worker_stopping(c))
             return MPP_NOK;
         ret = c->mpi->decode_put_packet(c->mpp, pkt);
         if (ret == MPP_OK) return MPP_OK;
-        (void)drain_output_frame(c);
+        if (drain_output_frame(c)) {
+            starved = 0;
+            continue;
+        }
+        /* Every pool buffer is bound to a surface the application still holds,
+         * so no drain can free one. Only more buffers break the deadlock. */
+        if (++starved >= STARVED_TRIES) {
+            starved = 0;
+            if (!grow_external_group(c)) {
+                LOG_WARNING("decode worker: output pool exhausted at %d "
+                            "buffers; consumer holds every frame",
+                            c->decode_pool ? c->decode_pool->count : 0);
+                return ret;
+            }
+        }
     }
     return ret;
 }
@@ -1080,10 +1162,15 @@ static void worker_submit_job(RKContext *c, RKDecodeJob *job)
     drain_hevc_after_submit(c);
 }
 
-static void worker_drain_one(RKContext *c)
+static bool worker_drain_one(RKContext *c)
 {
-    (void)drain_output_frame(c);
+    return drain_output_frame(c);
 }
+
+/* Wall time a teardown drain may spend waiting on MPP before the remaining
+ * fences are failed. Bounds vaDestroyContext against a wedged backend without
+ * cutting a healthy flush short. */
+#define WORKER_DRAIN_TIMEOUT_NS ((int64_t)3000000000)
 
 void *rk_mpp_dec_worker_main(void *opaque)
 {
@@ -1092,12 +1179,29 @@ void *rk_mpp_dec_worker_main(void *opaque)
 
     for (;;) {
         pthread_mutex_lock(&c->work_lock);
-        while (!c->worker_stop && !c->job_head &&
+        while (!c->worker_stop && !c->worker_drain && !c->job_head &&
                c->outstanding_frames == 0)
             pthread_cond_wait(&c->work_cond, &c->work_lock);
 
         if (c->worker_stop) {
             pthread_mutex_unlock(&c->work_lock);
+            break;
+        }
+
+        /* VA surfaces outlive the context that decoded into them, so a
+         * teardown drains submitted work instead of cancelling it. Applications
+         * legitimately destroy a decode context on a sequence change and then
+         * sync surfaces the old context was still filling. */
+        bool draining = c->worker_drain;
+        bool drain_expired = draining &&
+                             monotonic_ns() > c->drain_deadline_ns;
+        if (draining && (drain_expired ||
+                         (!c->job_head && c->outstanding_frames == 0))) {
+            unsigned int stranded = c->outstanding_frames;
+            pthread_mutex_unlock(&c->work_lock);
+            if (drain_expired)
+                LOG_WARNING("decode worker: drain timed out with %u frames "
+                         "outstanding", stranded);
             break;
         }
 
@@ -1114,7 +1218,7 @@ void *rk_mpp_dec_worker_main(void *opaque)
             worker_submit_job(c, job);
             rk_mpp_dec_job_destroy(job);
         } else {
-            worker_drain_one(c);
+            (void)worker_drain_one(c);
         }
     }
 
@@ -1170,11 +1274,18 @@ void rk_mpp_dec_stop(RKContext *c)
 
     bool had_worker = c->worker_started;
     if (c->worker_started) {
+        /* Let the worker finish what the application already submitted; only
+         * then stop it. Anything still queued after the bounded drain is
+         * failed below, so no fence is left unsignalled either way. */
         pthread_mutex_lock(&c->work_lock);
-        c->worker_stop = true;
+        c->drain_deadline_ns = monotonic_ns() + WORKER_DRAIN_TIMEOUT_NS;
+        c->worker_drain = true;
         pthread_cond_broadcast(&c->work_cond);
         pthread_mutex_unlock(&c->work_lock);
         pthread_join(c->worker, NULL);
+        pthread_mutex_lock(&c->work_lock);
+        c->worker_stop = true;
+        pthread_mutex_unlock(&c->work_lock);
         c->worker_started = false;
     }
 
