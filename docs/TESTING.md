@@ -206,6 +206,7 @@ FFMPEG=/usr/bin/ffmpeg make check-hevc-main10-hdr-experimental
 FFMPEG=/usr/bin/ffmpeg make check-vp9-profile2-experimental
 FFMPEG=/usr/bin/ffmpeg make check-gstreamer-va
 FFMPEG=/usr/bin/ffmpeg make check-vlc-display
+FFMPEG=/usr/bin/ffmpeg make check-firefox-decode
 FFMPEG=/usr/bin/ffmpeg make check-h264-encode-experimental
 FFMPEG=/usr/bin/ffmpeg make check-hevc-encode-experimental
 FFMPEG=/usr/bin/ffmpeg make check-webrtc-rtp-experimental
@@ -282,6 +283,25 @@ VLC destroys its decoder mid-stream at exit with the last pictures still in
 flight. The driver reports that as a teardown-drain note and fails those
 fences rather than waiting forever; it is not an error and the gate does not
 treat it as one.
+
+`check-firefox-decode` plays generated H.264 High and HEVC Main clips in stock
+Firefox with a throwaway profile and requires at least `MIN_FRAMES` external
+frames plus DMA-BUF exports, with no driver error markers. Like the VLC gate it
+refuses to run headless.
+
+It runs with `MOZ_DISABLE_RDD_SANDBOX=1` and says so in its own output. The
+stock Firefox binary cannot reach `/dev/mpp_service`, `/dev/rga` or
+`/dev/dma_heap` from a sandboxed RDD process; `contrib/firefox` holds a source
+patch that adds exactly those broker paths and ioctls, but it has to be applied
+to a Firefox source build. This gate therefore proves the decode and export
+path, not the sandbox story.
+
+Chromium is not gated. On this stack Chromium 150 cannot initialize a GL
+context at all -- ANGLE reports "Could not create a backing OpenGL context" on
+Mali-G610/Panfrost under both X11 and Wayland -- so its GPU process never
+starts and no VA-API decode path is reachable. The same session runs accelerated
+GL for VLC and Firefox, so this is a Chromium/ANGLE limitation rather than a
+driver one, and no Chromium claim is made either way.
 
 `check-vp9-profile2-experimental` generates a lossless 48-frame VP9 Profile 2
 stream at 320x240 and runs the checksum-pinned official WebM/libvpx

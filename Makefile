@@ -188,9 +188,12 @@ check-vp9-profile2-experimental: $(TARGET) test
 check-gstreamer-va: $(TARGET) test
 	tests/check-gstreamer-va.sh
 
-# Needs a real display session; refuses to run headless.
+# Need a real display session; both refuse to run headless.
 check-vlc-display: $(TARGET) test
 	tests/check-vlc-display.sh
+
+check-firefox-decode: $(TARGET) test
+	tests/check-firefox-decode.sh
 
 check-h264-encode-experimental: $(TARGET) test
 	tests/check-h264-encode.sh
@@ -507,7 +510,7 @@ clean:
 	check-hevc-conformance-sweep probe-mpp-main10-encode probe-av1-platform \
 	check-hevc-main10-experimental check-hevc-main10-hdr-experimental \
 	check-vp9-profile2-experimental check-gstreamer-va \
-	check-vlc-display \
+	check-vlc-display check-firefox-decode \
 	check-h264-encode-experimental check-h264-encode-experimental-sanitize \
 	check-hevc-encode-experimental check-hevc-encode-experimental-sanitize \
 	check-rgb-dmabuf-encode-experimental \

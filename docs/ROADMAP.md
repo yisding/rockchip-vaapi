@@ -559,6 +559,22 @@ zero-copy, and two-context concurrent gates. Teardown now also signals
 end-of-stream to MPP and stops as soon as MPP marks the stream ended, instead
 of always waiting out its deadline.
 
+**Progress (2026-07-28, Firefox and Chromium rows):** `make
+check-firefox-decode` plays generated H.264 High and HEVC Main clips in stock
+Firefox 153.0 and requires external-pool frames plus DMA-BUF exports with a
+clean driver log; both codecs pass with hundreds of frames and zero error
+markers. It runs with `MOZ_DISABLE_RDD_SANDBOX=1` and reports that in its own
+output, so it closes the decode/export row and not the sandbox row. The
+hash-pinned RDD source patch in `contrib/firefox` still targets 152.0.6 and
+must be rebased before it can be validated against a 153 source build.
+
+Chromium remains open for an environment reason rather than a driver one.
+Chromium 150 cannot initialize a GL context on this Mali-G610/Panfrost stack --
+ANGLE reports "Could not create a backing OpenGL context" under both X11 and
+Wayland -- so its GPU process never starts and no VA-API path is reachable. The
+same session runs accelerated GL for VLC and Firefox, so no Chromium claim is
+made in either direction.
+
 **Progress (2026-07-27, packaging slice):** Debian packaging now declares its
 RGA build dependency and produces separate `rockchip-vaapi` and
 `rockchip-vaapi-config` packages. The optional config package selects the
