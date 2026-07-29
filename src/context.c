@@ -85,6 +85,16 @@ VAStatus rk_CreateContext(VADriverContextP ctx,
     if (coding == MPP_VIDEO_CodingUnused)
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
 
+    bool output_10bit = entrypoint == VAEntrypointVLD &&
+                        (profile == VAProfileHEVCMain10 ||
+                         profile == VAProfileVP9Profile2);
+    if (output_10bit &&
+        !rk_rga_nv15_to_p010_geometry_supported((uint32_t)width, true)) {
+        LOG_ERROR("CreateContext: 10-bit AFBC conversion width=%d is below "
+                  "RGA3 minimum=%u", width, RK_RGA3_MIN_ACTIVE_WIDTH);
+        return VA_STATUS_ERROR_RESOLUTION_NOT_SUPPORTED;
+    }
+
     RKContext *c = calloc(1, sizeof(*c));
     if (!c)
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
@@ -160,8 +170,6 @@ VAStatus rk_CreateContext(VADriverContextP ctx,
             return enc_status;
         }
     } else {
-        bool output_10bit = profile == VAProfileHEVCMain10 ||
-                            profile == VAProfileVP9Profile2;
         if (output_10bit) {
             RK_U32 output_format = MPP_FRAME_FBC_AFBC_V2;
             if (!rk_rga_available() ||

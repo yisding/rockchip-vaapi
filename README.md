@@ -65,7 +65,9 @@ decoder gates, and two-hour 4K resource soak are also complete; see
 - **Honest capability advertising.** HEVC Main10 has a separate opt-in
   gate whose generated 48-frame and pinned 256-frame MPP AFBC-to-RGA P010
   paths are bit-exact, but it remains hidden pending broader conformance and
-  app/display HDR presentation. VP9 Profile 2 has generated and official
+  app/display HDR presentation. A 10-bit context narrower than RGA3's
+  68-pixel active-width minimum is refused at context creation so applications
+  fall back before MPP or RGA setup. VP9 Profile 2 has generated and official
   libvpx P010-exact AFBC/RGA gates and remains hidden pending app validation.
   HEVC Main10 additionally has a 24-frame HDR10 gate
   proving byte-exact P010 output and preservation of BT.2020/PQ, mastering

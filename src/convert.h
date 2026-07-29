@@ -7,7 +7,12 @@
 
 #include <rockchip/mpp_buffer.h>
 
+#define RK_RGA3_MIN_ACTIVE_WIDTH 68u
+
 bool rk_rga_available(void);
+
+bool rk_rga_nv15_to_p010_geometry_supported(uint32_t width,
+                                             bool source_afbc);
 
 bool rk_convert_nv15_to_p010(MppBufferGroup group, MppBuffer source,
                              uint32_t width, uint32_t height,

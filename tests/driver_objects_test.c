@@ -12,6 +12,8 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "convert.h"
+
 extern VAStatus __vaDriverInit_1_20(VADriverContextP ctx);
 
 #define CONFIG_COUNT 32
@@ -305,9 +307,28 @@ static void test_experimental_10bit_profile(struct VADriverVTable *v,
     CHECK_STATUS(v->vaCreateConfig(ctx, profile,
                                    VAEntrypointVLD, &rt_format, 1, &config),
                  VA_STATUS_SUCCESS);
+
+    VAContextID context;
+    CHECK_STATUS(v->vaCreateContext(ctx, config, 64, 240, 0, NULL, 0,
+                                   &context),
+                 VA_STATUS_ERROR_RESOLUTION_NOT_SUPPORTED);
+    CHECK_STATUS(v->vaCreateContext(ctx, config, 68, 240, 0, NULL, 0,
+                                   &context), VA_STATUS_SUCCESS);
+    CHECK_STATUS(v->vaDestroyContext(ctx, context), VA_STATUS_SUCCESS);
+
     CHECK_STATUS(v->vaDestroyConfig(ctx, config), VA_STATUS_SUCCESS);
     if (unsetenv("RK_VAAPI_EXPERIMENTAL_PROFILES") != 0) {
         perror("unsetenv");
+        exit(1);
+    }
+}
+
+static void test_rga_10bit_geometry(void)
+{
+    if (rk_rga_nv15_to_p010_geometry_supported(64, true) ||
+        !rk_rga_nv15_to_p010_geometry_supported(68, true) ||
+        !rk_rga_nv15_to_p010_geometry_supported(64, false)) {
+        fputs("RGA AFBC 10-bit geometry guard is invalid\n", stderr);
         exit(1);
     }
 }
@@ -1037,6 +1058,7 @@ int main(void)
     VABufferID buffers[BUFFER_COUNT];
     VAImage images[IMAGE_COUNT];
 
+    test_rga_10bit_geometry();
     test_experimental_10bit_profiles(&vtable, &ctx);
     test_experimental_h264_encode(&vtable, &ctx);
     test_experimental_hevc_encode(&vtable, &ctx);

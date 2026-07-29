@@ -21,6 +21,15 @@ bool rk_rga_available(void)
 #endif
 }
 
+bool rk_rga_nv15_to_p010_geometry_supported(uint32_t width,
+                                             bool source_afbc)
+{
+    /* RK3588 AFBC jobs can run only on RGA3. The vendor driver gives RGA3
+     * both an input and output minimum active width of 68; RGA2 can handle
+     * narrower raster jobs, so this must not become a global width floor. */
+    return !source_afbc || width >= RK_RGA3_MIN_ACTIVE_WIDTH;
+}
+
 static int rgb_rga_format(uint32_t fourcc)
 {
 #ifdef RK_HAVE_RGA
@@ -129,6 +138,13 @@ bool rk_convert_nv15_to_p010(MppBufferGroup group, MppBuffer source,
     if (!converted_out)
         return false;
     *converted_out = NULL;
+
+    if (!rk_rga_nv15_to_p010_geometry_supported(width, source_afbc)) {
+        LOG_WARNING("convert: AFBC NV15->P010 active width=%u is below "
+                    "RGA3 minimum=%u; refusing before RGA submission",
+                    width, RK_RGA3_MIN_ACTIVE_WIDTH);
+        return false;
+    }
 
     size_t source_size = source ? mpp_buffer_get_size(source) : 0;
     size_t source_layout_size = 0;

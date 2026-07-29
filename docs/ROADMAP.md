@@ -490,15 +490,16 @@ It found one driver defect and one hardware boundary. `init_qp_minus26` was
 bounded at -26, which is the 8-bit range: the floor is -(26 + QpBdOffsetY) and
 QpBdOffsetY grows with luma bit depth (7.4.3.3.1), so legal Main10 streams were
 rejected as unreconstructable -- `INITQP_B_Sony_1.bit` among them, now
-bit-exact. `WPP_D_ericsson_MAIN10_2.bit` at 64x240 is the remaining failure:
-RGA3 refuses a source below its minimum active width, so the AFBC NV15-to-P010
-repack that every 10-bit surface depends on cannot run and the decode fails
-closed rather than returning wrong pixels.
+bit-exact. `WPP_D_ericsson_MAIN10_2.bit` at 64x240 is the remaining
+hardware-path exception: the AFBC NV15-to-P010 repack that every 10-bit
+surface depends on requires RGA3, whose input and output active-width minimum
+is 68. The driver now returns `VA_STATUS_ERROR_RESOLUTION_NOT_SUPPORTED` at
+context creation, so FFmpeg falls back before MPP or RGA setup rather than
+failing mid-decode.
 
 Main10 stays unadvertised. Decode correctness is now well evidenced, but the
-narrow-picture RGA floor fails mid-decode instead of being refused up front,
-10-bit throughput through RGA has not been measured, and HDR display
-presentation is still unvalidated.
+narrow-picture hardware path remains unavailable, 10-bit throughput through
+RGA has not been measured, and HDR display presentation is still unvalidated.
 
 **Progress (2026-07-26, HDR10 metadata slice):**
 `make check-hevc-main10-hdr-experimental` generates a 24-frame Main10 HDR10

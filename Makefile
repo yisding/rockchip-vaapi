@@ -192,6 +192,9 @@ probe-av1-platform: $(AV1_MPP_CAPS)
 check-hevc-main10-experimental: $(TARGET) test
 	tests/check-hevc-main10.sh
 
+check-hevc-main10-narrow-fallback: $(TARGET)
+	tests/check-main10-narrow-fallback.sh
+
 check-hevc-main10-hdr-experimental: $(TARGET) test
 	tests/check-hevc-main10-hdr.sh
 
@@ -522,6 +525,7 @@ clean:
 	check-hevc-tiles-backend fetch-hevc-sweep-vectors \
 	check-hevc-conformance-sweep fetch-hevc-main10-sweep-vectors \
 	check-hevc-main10-conformance-sweep \
+	check-hevc-main10-narrow-fallback \
 	probe-mpp-main10-encode probe-av1-platform \
 	check-hevc-main10-experimental check-hevc-main10-hdr-experimental \
 	check-vp9-profile2-experimental check-gstreamer-va \

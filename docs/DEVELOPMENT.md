@@ -346,6 +346,13 @@ stride, `IM_AFBC16x16_MODE`, and MPP's crop offsets as the source rectangle.
 Linear NV15 remains fail-closed unless byte stride, pixel stride, alignment,
 and buffer bounds are all mutually consistent.
 
+RK3588 AFBC input can run only on RGA3, whose vendor table requires both input
+and output active widths to be at least 68. `rk_CreateContext` therefore
+returns `VA_STATUS_ERROR_RESOLUTION_NOT_SUPPORTED` for a narrower HEVC Main10
+or VP9 Profile 2 context before configuring MPP. The conversion helper repeats
+the same geometry guard before allocating its destination or calling librga,
+so a later crop/info-change mismatch still cannot reach `/dev/rga`.
+
 The converted P010 buffer is stored as `surface->backing_buf` and the source
 `MppFrame` is released back to MPP after the surface is signaled. Export and
 image readback always prefer `backing_buf`, which lets the 10-bit path expose

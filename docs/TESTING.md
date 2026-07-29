@@ -244,10 +244,13 @@ budget well over an hour -- and is not part of `check`.
 `check-hevc-main10-conformance-sweep` is the same tool with `PROFILE=main10`,
 comparing P010 output over the FATE Main10 candidates. Ten of the eleven real
 Main10 streams are bit-exact. The exception is `WPP_D_ericsson_MAIN10_2.bit` at
-64x240: RGA3 refuses a source below its minimum active width, so the AFBC
-NV15-to-P010 repack every 10-bit surface depends on cannot run at all and the
-decode fails closed. Main10 stays unadvertised, so this records the 10-bit
-boundary rather than gating a shipping profile.
+64x240: the AFBC NV15-to-P010 repack every 10-bit surface depends on requires
+RGA3, whose input and output active-width minimum is 68. The driver now returns
+`VA_STATUS_ERROR_RESOLUTION_NOT_SUPPORTED` at context creation, before MPP or
+RGA setup. `make check-hevc-main10-narrow-fallback` requires FFmpeg to complete
+all 48 frames through software fallback, with one context rejection, zero RGA
+conversions, and no kernel `no core match`. Main10 stays unadvertised, so this
+records the 10-bit boundary rather than gating a shipping profile.
 
 `check-hevc-main10-experimental` generates 48 Main10 frames at 320x240 and also
 runs the checksum-pinned FATE `WP_A_MAIN10_Toshiba_3.bit` weighted-prediction
