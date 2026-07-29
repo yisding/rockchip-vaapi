@@ -224,12 +224,48 @@ reuse can expose an older hidden frame before the newer visible frame arrives.
 On successful binding or asynchronous failure, the worker broadcasts
 `surface->cond`. `vaSyncSurface` waits indefinitely as required by libva;
 `vaSyncSurface2` returns `VA_STATUS_ERROR_TIMEDOUT` when its nanosecond
-deadline expires. Context teardown joins the worker and fails any remaining
-queued or routed fences before destroying MPP.
+deadline expires.
+
+Because `vaSyncSurface` has no timeout, a backend that stops responding would
+otherwise hang the calling media process forever. The worker tracks how long it
+has had frames outstanding with no output at all, and after ten seconds fails
+every pending route so each waiting caller gets
+`VA_STATUS_ERROR_DECODING_ERROR` and can fall back. Frames MPP delivers
+afterwards find no route and are dropped safely.
+
+Teardown does **not** cancel in-flight work. VA surfaces belong to the display,
+not the context: applications legitimately destroy a decode context on a
+sequence change and then sync surfaces the old context was still filling.
+`rk_mpp_dec_stop` therefore puts the worker into a drain, signals end-of-stream
+to MPP so codecs holding pictures release them, and stops as soon as MPP marks
+the stream ended. A one-second deadline bounds the drain so a wedged backend
+cannot block `vaDestroyContext`; anything still outstanding then has its fence
+failed. A player that stops mid-stream routinely lands here, and that is
+reported rather than treated as a fault.
+
+H.264 and HEVC both run MPP with immediate output. Their outputs are routed
+back to their surface by token, so MPP's own display reordering buys the driver
+nothing and costs it latency plus pictures stranded whenever an application
+stops feeding the decoder. VP9 keeps reordering because its routing is the
+submission-order FIFO.
 
 ---
 
-## DRM PRIME 2 surface export
+## DRM PRIME 2 surface export and `vaDeriveImage`
+
+Not every consumer uses `vaExportSurfaceHandle`. VLC's OpenGL VA-API
+converters derive an image from the decoded surface, take that image's buffer
+handle as a DRM PRIME fd, and import it as an EGLImage; while `vaDeriveImage`
+was a stub VLC dropped its hardware decoder module entirely and fell back to
+software after creating surfaces through this driver.
+
+`vaDeriveImage` returns a `VAImage` that aliases the surface's own linear
+NV12/P010 DMA-BUF rather than a fresh allocation: pitches and offsets are the
+surface's real layout, `vaMapBuffer` mmaps that buffer with dma-buf CPU access
+brackets, and `vaAcquireBufferHandle` exports it as `DRM_PRIME`. The image
+holds a reference on the surface, so it stays valid after the caller drops
+theirs. Imported RGB and AFBC layouts are not describable as a `VAImage` and
+fail closed, as does a request for any other memory type.
 
 Firefox calls `vaExportSurfaceHandle` with
 `VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2` to get a zero-copy handle to the
@@ -381,6 +417,16 @@ the intended VA surface. This fixes the old aliasing bug without a CPU copy:
   frames from `decode_get_frame`. The driver parses the refresh mask and sends
   a minimal `show_existing_frame` repeat, causing MPP to expose the completed
   hidden reference so it can be bound to the correct logical VA surface.
+
+The pool grows on demand to a 64-frame ceiling. It cannot be sized correctly up
+front: VA surfaces are created independently of the context and FFmpeg passes
+no render targets to `vaCreateContext`, so the driver never learns how many
+surfaces a consumer intends to hold. Frame-threaded FFmpeg allocated 29
+surfaces for a large-DPB HEVC stream, every pool buffer ended up bound to a
+surface the application still held, and MPP waited forever for a free one --
+a hard deadlock. When the worker sees MPP refuse input while no drain can free
+a buffer, it commits more; at the ceiling it reports a real error instead of
+stalling.
 
 ## `bs.h` — Exp-Golomb bitstream writer
 
@@ -559,9 +605,9 @@ allowlists the four MPP/RGA requests measured on the audited stack.
 - VA-API does not preserve the original H.264 `level_idc`; the driver derives
   the lowest Annex A level supported by the available frame/DPB constraints.
   Bitrate and frame-rate distinctions cannot be recovered from this buffer.
-- HEVC reconstruction is host-validated but unadvertised pending the pinned
-  on-device Main conformance gate. Seven of eight pinned vectors are bit-exact;
-  MPP-reported errored TILES output is the remaining fail-closed class.
+- HEVC Main is advertised. Two FATE conformance streams -- `NUT_A_ericsson_4`
+  and `_5` -- cannot be decoded by MPP itself and fail closed, as do pictures
+  beyond the advertised 7680x4320 constraint.
 - HEVC Main10 has bit-exact generated 48-frame and pinned FATE 256-frame AFBC
   NV15-to-P010 development gates.
   VP9 Profile 2 has a separate bit-exact 48-frame gate through the same
