@@ -186,7 +186,7 @@ an isolated root.
 
 Firefox additionally needs a distribution sandbox policy that permits the RDD
 process to use Rockchip MPP, RGA, and dma-heap devices. A version-pinned
-Firefox 152.0.6 source patch and validator are provided in
+Firefox 153.0 source patch and validator are provided in
 [`contrib/firefox`](contrib/firefox/README.md). Disabling the RDD sandbox is
 only appropriate as a short, per-process diagnostic because it broadens the
 attack surface for untrusted media. With a suitable policy, enable:

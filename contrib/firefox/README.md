@@ -1,13 +1,13 @@
 # Firefox RDD sandbox policy
 
-Firefox runs Linux VA-API decode in the sandboxed RDD process. The stock
-Firefox 152.0.6 RDD broker permits `/dev/dri`, but it does not permit the
-Rockchip MPP, RGA, or dma-heap paths. Its seccomp policy permits DRM and
-DMA-BUF ioctl families, but not the MPP request or the RGA requests used by
-this driver.
+Firefox runs Linux VA-API decode in the sandboxed RDD process. Its RDD broker
+permits `/dev/dri`, but not the Rockchip MPP, RGA, or dma-heap paths. Its
+seccomp policy permits DRM and DMA-BUF ioctl families, but not the MPP request
+or the RGA requests used by this driver.
 
-The patch in `patches/firefox-152.0.6-rdd-rockchip-vaapi.patch` is intended for
-an arm64 Firefox source package. It keeps the RDD sandbox enabled. Broker
+`patches/` holds one patch per pinned Firefox release; the current milestone is
+153.0 and 152.0.6 is kept for older trees. Each is intended for an arm64
+Firefox source package. It keeps the RDD sandbox enabled. Broker
 permissions are added only when the corresponding device node or directory
 exists, and seccomp permits only the requests observed on the validated ROCK
 5B stack:
@@ -25,8 +25,18 @@ broker still needs access to `/dev/dma_heap`.
 
 ## Version contract
 
-The patch is pinned to upstream Firefox `FIREFOX_152_0_6_RELEASE`. The two
-preimage files must have these SHA-256 values:
+Each patch is pinned to an upstream Firefox release tag by the SHA-256 of the
+two preimage files. A tree that does not match is rejected instead of being
+force-patched.
+
+`FIREFOX_153_0_RELEASE`:
+
+```text
+b1dae2499ba9589cc41454cf7f73c332c82ed9d6c13710c0448fdc9c7507e1e9  security/sandbox/linux/SandboxFilter.cpp
+3eefffdd817ddebea6d029e5403a1f1d9536c7b49ef86e5c553e1ab77e6bddcb  security/sandbox/linux/broker/SandboxBrokerPolicyFactory.cpp
+```
+
+`FIREFOX_152_0_6_RELEASE`:
 
 ```text
 7a9c7b4e56b5ed0401998f42242bd576bff5461e85df271d42f73844a2bf9f47  security/sandbox/linux/SandboxFilter.cpp
@@ -34,10 +44,11 @@ preimage files must have these SHA-256 values:
 ```
 
 Validate an unpacked source tree before adding the patch to the distribution
-package:
+package. `FIREFOX_VERSION` selects the milestone and defaults to 153.0:
 
 ```sh
-tests/check-firefox-rdd-patch.sh /path/to/firefox-152.0.6
+tests/check-firefox-rdd-patch.sh /path/to/firefox-153.0
+FIREFOX_VERSION=152.0.6 tests/check-firefox-rdd-patch.sh /path/to/firefox-152.0.6
 ```
 
 For a Debian-format Firefox source package, copy the patch into
@@ -59,5 +70,13 @@ the rebuilt browser in a real Wayland or X11 session and confirm:
 
 The ioctl list above was measured on 2026-07-26 with Firefox 152.0.6,
 librockchip-mpp 1.5.0, librga 2.2.0, and the audited RK3588 kernel. H.264
-encode and HEVC Main10 decode/RGA gates used the same request set. Browser
-playback remains a separate display-session validation gate.
+encode and HEVC Main10 decode/RGA gates used the same request set.
+
+The 153.0 patch is a rebase of that measurement, not a new one. It was verified
+to apply cleanly to `FIREFOX_153_0_RELEASE` and to produce byte-identical
+sources to applying the 152.0.6 patch, and 153.0 was confirmed not to permit
+any of these paths or requests already. The request set itself is inherited
+from the 152.0.6 measurement and has not been remeasured against a patched
+153.0 build, because that needs a Firefox source build. `make
+check-firefox-decode` exercises the decode path with the sandbox disabled and
+is deliberately not evidence about the sandbox.

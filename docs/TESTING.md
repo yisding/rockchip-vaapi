@@ -39,11 +39,11 @@ one-record-per-line framing, nested init/finalize plus sink reopen, and 800
 concurrent records from eight threads without interleaving.
 
 `make check-firefox-rdd-patch` checks the committed policy contract without
-network access. Pass an unpacked exact Firefox 152.0.6 source tree to validate
+network access. Pass an unpacked exact Firefox 153.0 source tree to validate
 the two upstream source hashes and dry-run/apply the patch:
 
 ```sh
-tests/check-firefox-rdd-patch.sh /path/to/firefox-152.0.6
+tests/check-firefox-rdd-patch.sh /path/to/firefox-153.0
 ```
 
 `make check-package-install` builds both binary packages in the repository's

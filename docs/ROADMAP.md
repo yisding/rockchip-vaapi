@@ -566,8 +566,11 @@ Firefox 153.0 and requires external-pool frames plus DMA-BUF exports with a
 clean driver log; both codecs pass with hundreds of frames and zero error
 markers. It runs with `MOZ_DISABLE_RDD_SANDBOX=1` and reports that in its own
 output, so it closes the decode/export row and not the sandbox row. The
-hash-pinned RDD source patch in `contrib/firefox` still targets 152.0.6 and
-must be rebased before it can be validated against a 153 source build.
+hash-pinned RDD source patch in `contrib/firefox` has been rebased onto
+`FIREFOX_153_0_RELEASE` -- it applies cleanly, produces sources byte-identical
+to applying the 152.0.6 patch, and 153.0 was confirmed not to permit any of
+those paths or requests already. The ioctl set is inherited from the 152.0.6
+measurement rather than remeasured, which needs a Firefox source build.
 
 Chromium remains open for an environment reason rather than a driver one.
 Chromium 150 cannot initialize a GL context on this Mali-G610/Panfrost stack --
@@ -752,9 +755,10 @@ concurrent with decode contexts are race-free.
   presentation remain open.
 - **Encode conformance:** encoders aren't spec-exact; the gate must be
   round-trip PSNR + interop, and depends on the kernel RKVENC2 hardening.
-- **Sandbox upstreamability:** the Firefox 152.0.6 RDD source patch is
-  hash-pinned and request-specific but must be rebased and remeasured per
-  milestone; the Chromium aliasing sidestep depends on the GPU
+- **Sandbox upstreamability:** the Firefox RDD source patch is hash-pinned and
+  request-specific but must be rebased and remeasured per milestone -- it is
+  pinned to 153.0 with 152.0.6 kept alongside, and the 153.0 rebase inherits
+  rather than remeasures the ioctl set; the Chromium aliasing sidestep depends on the GPU
   sandbox continuing to allow `ioctl` without arg inspection — verify against
   the shipping Chromium, don't assume.
 - **MPP threading contract:** the dedicated-worker model is validated for the
@@ -789,8 +793,9 @@ concurrent with decode contexts are race-free.
   Split driver/config Debian packaging no longer weakens Firefox's sandbox
   globally, structured leveled text/JSON logging is lifecycle-, sanitizer-,
   thread-, and leak-tested, and clean-image package lifecycle validation is
-  green. Open: the Firefox RDD source patch still targets 152.0.6 and must be
-  rebased for 153 before a patched build can be validated; Chromium cannot
+  green, and the Firefox RDD source patch is rebased and hash-pinned to 153.0.
+  Open: no patched Firefox has been built, so the sandbox contract is verified
+  by hash and application only; Chromium cannot
   initialize a GL context on this Mali-G610/Panfrost stack, so no Chromium
   claim is made; mpv is not installed; HDR display presentation and
   fresh-image hardware decode remain untested.

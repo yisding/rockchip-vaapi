@@ -1,16 +1,36 @@
 #!/bin/sh
-# Validate the Firefox 152.0.6 Rockchip RDD sandbox source patch.
+# Validate a Rockchip RDD sandbox source patch against its exact Firefox
+# release. Each supported milestone pins the two preimage hashes; a source tree
+# that does not match is rejected rather than force-patched.
 
 set -eu
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)
-PATCH=$REPO_ROOT/contrib/firefox/patches/firefox-152.0.6-rdd-rockchip-vaapi.patch
+FIREFOX_VERSION=${FIREFOX_VERSION:-153.0}
+PATCH=$REPO_ROOT/contrib/firefox/patches/firefox-$FIREFOX_VERSION-rdd-rockchip-vaapi.patch
 SOURCE_ROOT=${1:-${FIREFOX_SOURCE_ROOT:-}}
 FILTER=security/sandbox/linux/SandboxFilter.cpp
 BROKER=security/sandbox/linux/broker/SandboxBrokerPolicyFactory.cpp
-FILTER_SHA256=7a9c7b4e56b5ed0401998f42242bd576bff5461e85df271d42f73844a2bf9f47
-BROKER_SHA256=0bc000706b11d7dcf54c71f67bd1cb32d2214e939fbb67634e0bd0036b805af0
+case $FIREFOX_VERSION in
+    153.0)
+        FILTER_SHA256=b1dae2499ba9589cc41454cf7f73c332c82ed9d6c13710c0448fdc9c7507e1e9
+        BROKER_SHA256=3eefffdd817ddebea6d029e5403a1f1d9536c7b49ef86e5c553e1ab77e6bddcb
+        ;;
+    152.0.6)
+        FILTER_SHA256=7a9c7b4e56b5ed0401998f42242bd576bff5461e85df271d42f73844a2bf9f47
+        BROKER_SHA256=0bc000706b11d7dcf54c71f67bd1cb32d2214e939fbb67634e0bd0036b805af0
+        ;;
+    *)
+        echo "error: no pinned patch for Firefox $FIREFOX_VERSION" >&2
+        echo "error: rebase and remeasure before adding one" >&2
+        exit 2
+        ;;
+esac
+if [ ! -f "$PATCH" ]; then
+    echo "error: missing patch $PATCH" >&2
+    exit 2
+fi
 
 for command in grep patch sha256sum mktemp cp mkdir; do
     if ! command -v "$command" >/dev/null 2>&1; then
@@ -44,7 +64,7 @@ if grep -Fq 'MOZ_DISABLE_RDD_SANDBOX' "$PATCH"; then
 fi
 
 if [ -z "$SOURCE_ROOT" ]; then
-    echo "ok    Firefox 152.0.6 RDD patch contract"
+    echo "ok    Firefox $FIREFOX_VERSION RDD patch contract"
     echo "note  pass a Firefox source root to verify hashes and patch application"
     exit 0
 fi
@@ -91,4 +111,4 @@ grep -Fq 'request == kRockchipRgaBlitSync' "$WORK/$FILTER"
 grep -Fq 'policy->AddPath(rdwr, "/dev/mpp_service")' "$WORK/$BROKER"
 grep -Fq 'policy->AddTree(rdwr, "/dev/dma_heap")' "$WORK/$BROKER"
 
-echo "ok    Firefox 152.0.6 source hashes and RDD patch application"
+echo "ok    Firefox $FIREFOX_VERSION source hashes and RDD patch application"
