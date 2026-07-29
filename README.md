@@ -56,12 +56,15 @@ decoder gates, and two-hour 4K resource soak are also complete; see
 - **Pinned real conformance vectors and CI plumbing.** The gate now uses ITU-T
   H.264 and official libvpx VP9 vectors with payload checksums, and normal plus
   sanitized AArch64 builds are cross-compiled in CI.
-- **HEVC Main, conformance-gated.** 142 of the 163 HEVC Main candidates in the
-  FFmpeg FATE conformance suite are bit-exact against software decode with zero
-  driver failures, pinned by class in `tests/hevc-sweep-vectors.tsv` and
-  re-runnable as `make check-hevc-conformance-sweep`. A libva-free MPP runner
-  and control-gated prefix reducer separate backend failures from driver
-  failures; see [`docs/HEVC_TILES_BACKEND.md`](docs/HEVC_TILES_BACKEND.md).
+- **HEVC Main, conformance-gated.** The complete installed-stack sweep has 142
+  of the 163 HEVC Main candidates bit-exact against software decode with zero
+  driver failures. Focused validation with the fixed MPP and FFmpeg source
+  stack adds the byte-identical `NUT_A_ericsson_4/5` names at 34/34 clean,
+  byte-exact frames, advancing the pinned source expectation to **144/163**.
+  The classes live in `tests/hevc-sweep-vectors.tsv` and are re-runnable as
+  `make check-hevc-conformance-sweep`. A libva-free MPP runner and
+  control-gated prefix reducer separate backend failures from driver failures;
+  see [`docs/HEVC_TILES_BACKEND.md`](docs/HEVC_TILES_BACKEND.md).
 - **Honest capability advertising.** HEVC Main10 has a separate opt-in
   gate whose generated 48-frame and pinned 256-frame MPP AFBC-to-RGA P010
   paths are bit-exact, but it remains hidden pending broader conformance and
@@ -77,8 +80,12 @@ decoder gates, and two-hour 4K resource soak are also complete; see
 - Packaging/build hygiene: `DESTDIR`/`PREFIX`/multiarch-aware Makefile,
   no `sudo` in `make install`, `make check` validation gate. Version
   `1.0.11+ysp5` is installed on the ROCK 5B; its payload matches the built deb,
-  and the installed driver passes the complete pinned conformance gate plus the
-  64-pixel Main10 software-fallback audit on the production 6.18.40 kernel.
+  and the installed driver passes the complete eight-vector pinned conformance
+  gate plus the 64-pixel Main10 software-fallback audit on the production
+  6.18.40 kernel.
+  Packaging and installing MPP `3381fd2c` plus an FFmpeg line containing
+  upstream fix `265d39e551`, followed by the complete 163-vector rerun, remain
+  the release gate for replacing the installed-stack 142/163 measurement.
 
 ---
 
@@ -121,7 +128,7 @@ Key features:
 | H.264 | Constrained Baseline | not offered | pinned SVA vector is corrupt in MPP; software fallback |
 | VP9 | Profile 0 | full normal + ASan/UBSan gates bit-exact | hidden-reference vector included on audited kernel |
 | VP9 | Profile 2 (under development) | not offered | generated 48-frame and official libvpx 10-frame gates are P010 bit-exact through MPP AFBC + RGA |
-| HEVC | Main | full normal + ASan/UBSan gates bit-exact | 8/8 pinned vectors, plus 142/163 FATE Main candidates with zero driver failures |
+| HEVC | Main | full normal + ASan/UBSan gates bit-exact | 8/8 pinned vectors; 142/163 FATE Main candidates in the complete installed-stack sweep, plus focused fixed-source validation of the two byte-identical NUT names (144/163 pinned expectation), with zero driver failures |
 | HEVC | Main10 (under development) | not offered | 10 of 11 FATE Main10 vectors, plus generated, weighted-prediction and HDR10 gates, are P010 bit-exact through MPP AFBC + RGA; BT.2020/PQ and static HDR metadata survive hardware decode. RGA3 refuses sources below its minimum width, so a 64-pixel-wide picture fails closed |
 | VP8 | — | not offered | crashes in the generic path; needs debugging |
 | AV1 | — | not offered | VA-API hands headerless tile data; MPP needs full OBUs; see the [support plan](docs/AV1_SUPPORT_PLAN.md) and non-submitting platform probe |

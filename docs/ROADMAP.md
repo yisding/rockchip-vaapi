@@ -479,6 +479,39 @@ candidates that are not Main 8-bit 4:2:0, `PICSIZE_A_Bossen_1.bit` at
 `make check-hevc-conformance-sweep` pins every class in
 `tests/hevc-sweep-vectors.tsv` and fails on divergence in either direction.
 
+**Progress (2026-07-29, NUT random-access and RPS fixes):**
+`NUT_A_ericsson_4.bit` and `NUT_A_ericsson_5.bit` are not independent
+payloads: both are 302,142 bytes with SHA-256
+`d87dcae6353a680ff1c816395b578afae3ed9f1a88b56b07a24e62333e0621b7`.
+The stream contains 36 VCL access units and should output 34 pictures after
+two RASL pictures are suppressed.
+
+Direct MPP at `d8c6b88a` returned only 27 pictures because its random-access
+gate suppressed every non-IRAP picture below the IRAP POC, incorrectly
+discarding seven valid RADL pictures along with the two RASL pictures. MPP
+`3381fd2c` removes that broad condition while retaining the explicit RASL
+test. Both sample names then return 34 clean direct-MPP frames, zero
+error/discard flags, and EOS.
+
+The YSP FFmpeg 8.0/8.1 lines had a separate software-side failure: unavailable
+references in the unused `ST_FOLL`/`LT_FOLL` sets were made fatal unless
+corrupt output was requested. Upstream FFmpeg fix `265d39e551` implements the
+HEVC 8.3.3 requirement to generate those following pictures and removes the
+global FATE `output_corrupt` workaround. It is present in YSP's maintained
+`ffmpeg-80@ab675f19cf`, `ffmpeg-81@629f4968d2`, and package line
+`fix/rkmpp-output-timeout@33a651a55b`.
+
+A focused source-stack VA-API run with both fixes produced 34 software and 34
+hardware frames with byte-identical per-frame MD5s. The manifest therefore
+advances both FATE names from `backend` to `exact`: the source expectation is
+now **144 exact, 17 non-Main skips, two size-contract refusals, and zero
+backend or driver failures**. This is 142 cases from the complete installed
+stack sweep plus the two focused-verified names, not a claim that the complete
+163-vector sweep has already been rerun with the new packages. Exporting and
+installing both dependencies, then rerunning that sweep, remains the release
+gate. The root-cause record is
+[in the YSP findings repository](https://github.com/yisding/rock-5b-ysp/blob/main/findings/2026-07-29-hevc-nut-radl-and-unused-rps-reference-fixes.md).
+
 **Progress (2026-07-28, Main10 conformance widened):** `PROFILE=main10` runs
 the same sweep over the FATE Main10 candidates with P010 comparison, pinned in
 `tests/hevc-main10-sweep-vectors.tsv` and re-runnable as `make
@@ -526,8 +559,10 @@ NV12 and is valid in both composed P010 and split R16/GR1616 forms. The
 driver-object gate checks both descriptors normally and under ASan/UBSan; the
 HDR Main10 and shipping-profile hardware regressions remain green.
 
-**Gate:** ✅ HEVC Main bit-exact vs software on conformance vectors (8/8 pinned,
-142/163 FATE candidates, zero driver failures) and advertised by default;
+**Gate:** ✅ HEVC Main bit-exact vs software on conformance vectors (8/8 pinned;
+142/163 in the complete installed-stack sweep plus two focused fixed-source
+NUT names, 144/163 pinned expectation, zero driver failures) and advertised by
+default; complete fixed-package sweep pending;
 ✅ HEVC Main10 / VP9 P2 bit-exact after P010 repacking; HDR HEVC playing
 correctly in a display session remains open.
 
@@ -857,9 +892,11 @@ concurrent with decode contexts are race-free.
   decoders, sanitizer gates, and the multi-hour 4K resource soak are green.
 - Phase 2: **HEVC Main is complete and shipping.** `VAProfileHEVCMain` is
   advertised by default as of 2026-07-28: all eight pinned vectors are
-  bit-exact normally and under ASan/UBSan, and 142 of the 163 HEVC Main
-  candidates in the FATE conformance suite are bit-exact with zero driver
-  failures. The direct-MPP TILES failure is gone on the current stack and
+  bit-exact normally and under ASan/UBSan. The complete installed-stack sweep
+  has 142 of 163 HEVC Main candidates bit-exact with zero driver failures; the
+  fixed-source MPP/FFmpeg focus run adds both byte-identical NUT names, making
+  144/163 the pinned expectation pending package installation and a complete
+  rerun. The direct-MPP TILES failure is gone on the current stack and
   `TILES_A_Cisco_2.bit` is bit-exact. The remainder of the phase is 10-bit: the
   generated 48-frame Main10/Profile 2, pinned 256-frame Main10, official
   10-frame Profile 2, and 24-frame Main10 HDR10 AFBC-to-P010 gates are

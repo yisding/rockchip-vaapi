@@ -242,6 +242,30 @@ every HEVC Main candidate in the FFmpeg FATE conformance suite into
 land in exactly the class `tests/hevc-sweep-vectors.tsv` records. It is slow --
 budget well over an hour -- and is not part of `check`.
 
+The pinned Main expectation is now 144 `exact`, 17 `skip`, two `unsup`, and
+zero `backend` or `driver`. The complete installed-package sweep established
+142 of those exact cases. The other two manifest rows,
+`NUT_A_ericsson_4.bit` and `NUT_A_ericsson_5.bit`, are byte-identical
+(SHA-256
+`d87dcae6353a680ff1c816395b578afae3ed9f1a88b56b07a24e62333e0621b7`)
+and were focused-verified with the fixed source stack:
+
+- MPP `3381fd2c` returns 34/34 clean direct frames for both names after
+  retaining RASL suppression but no longer suppressing valid RADL pictures;
+- FFmpeg upstream fix `265d39e551` generates unavailable unused
+  `ST_FOLL`/`LT_FOLL` references as HEVC 8.3.3 requires; and
+- the combined VA-API run returns 34 hardware frames byte-exact against the
+  34-frame software reference.
+
+An installed stack lacking either fix is expected to diverge from the new
+manifest. Package both source commits before treating
+`make check-hevc-conformance-sweep` as a release result, then rerun all 163
+candidates; the focused result does not substitute for that complete
+regression. Missing-reference diagnostics alone are not a failure for this
+stream because its unavailable entries are unused following pictures. The
+required signals are the 34-frame count, zero MPP error/discard flags, EOS,
+and byte-exact VA-API output.
+
 `check-hevc-main10-conformance-sweep` is the same tool with `PROFILE=main10`,
 comparing P010 output over the FATE Main10 candidates. Ten of the eleven real
 Main10 streams are bit-exact. The exception is `WPP_D_ericsson_MAIN10_2.bit` at
