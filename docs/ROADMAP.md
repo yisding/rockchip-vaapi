@@ -815,6 +815,10 @@ concurrent with decode contexts are race-free.
   globally, structured leveled text/JSON logging is lifecycle-, sanitizer-,
   thread-, and leak-tested, and clean-image package lifecycle validation is
   green, and the Firefox RDD source patch is rebased and hash-pinned to 153.0.
+  `vaDeriveImage` and `vaAcquireBufferHandle` are implemented over the
+  surface's own DMA-BUF, which is what unblocked VLC; they deliberately refuse
+  10-bit, still-compressed, imported-RGB and encoder-input surfaces, and
+  re-check the surface's layout on every use.
   Open: no patched Firefox has been built, so the sandbox contract is verified
   by hash and application only; Chromium cannot
   initialize a GL context on this Mali-G610/Panfrost stack, so no Chromium

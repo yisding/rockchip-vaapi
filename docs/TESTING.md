@@ -17,10 +17,7 @@ make test-fuzz
 make lint
 make check-firefox-rdd-patch
 make check-package-install
-shellcheck tests/check-concurrent-decode.sh tests/check-zero-copy.sh \
-    tests/check-hevc-main10.sh tests/check-hevc-main10-hdr.sh \
-    tests/check-soak.sh tests/check-webrtc-peer.sh \
-    tests/fetch-vectors.sh tests/probe-av1-platform.sh tests/validate.sh
+shellcheck tests/*.sh
 python3 -c "import ast,pathlib; ast.parse(pathlib.Path('tests/webrtc_peer.py').read_text())"
 ```
 
@@ -199,6 +196,7 @@ FFMPEG=/usr/bin/ffmpeg make check-concurrent-decode-tsan
 FFMPEG=/usr/bin/ffmpeg make check-soak
 FFMPEG=/usr/bin/ffmpeg make check-hevc
 FFMPEG=/usr/bin/ffmpeg make check-hevc-conformance-sweep
+FFMPEG=/usr/bin/ffmpeg make check-hevc-main10-conformance-sweep
 make check-hevc-tiles-backend
 make probe-av1-platform
 FFMPEG=/usr/bin/ffmpeg make check-hevc-main10-experimental
