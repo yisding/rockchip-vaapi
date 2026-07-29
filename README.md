@@ -75,7 +75,10 @@ decoder gates, and two-hour 4K resource soak are also complete; see
   are also not advertised, so
   applications fall back instead of receiving an unsafe format or decode path.
 - Packaging/build hygiene: `DESTDIR`/`PREFIX`/multiarch-aware Makefile,
-  no `sudo` in `make install`, `make check` validation gate.
+  no `sudo` in `make install`, `make check` validation gate. Version
+  `1.0.11+ysp5` is installed on the ROCK 5B; its payload matches the built deb,
+  and the installed driver passes the complete pinned conformance gate plus the
+  64-pixel Main10 software-fallback audit on the production 6.18.40 kernel.
 
 ---
 

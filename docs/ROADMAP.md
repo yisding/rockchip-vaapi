@@ -624,6 +624,18 @@ Lintian-backed isolated-root gate now validates package metadata, payloads,
 clean install, driver upgrade, config-only purge, reinstall, and full purge
 against an empty package database. Fresh-image hardware decode remains open.
 
+**Progress (2026-07-29, installed ysp5 gate):** Source commit `491533e` adds
+the up-front sub-68-pixel 10-bit context refusal and matching RGA pre-submit
+guard; package commit `4e6e99b` versions it as `1.0.11+ysp5`. The driver and
+config packages pass their isolated install/upgrade/purge gate and are now
+installed on the board. The installed shared object's SHA-256 is byte-identical
+to the deb payload. Against the exact production kernel/notes fingerprint, the
+64x240 Main10 case software-decodes all 48 frames after one context refusal
+with zero RGA submissions or kernel `no core match`, and the complete pinned
+conformance gate passes including the guarded VP9 hidden-reference vector.
+This closes the stale-installed-driver gap; a genuinely clean-image install is
+still separate evidence.
+
 **Progress (2026-07-26, Firefox RDD policy source slice):** The exact Firefox
 152.0.6 RDD policy was audited and a hash-pinned distribution source patch now
 adds broker access for existing `/dev/mpp_service`, `/dev/rga`, and
@@ -807,7 +819,9 @@ concurrent with decode contexts are race-free.
 ## Status
 
 - Phase 0: complete on `main`; the normal and sanitized full hardware gates are
-  green after the Phase 2 slice on audited fixed kernel build `#4`.
+  green after the Phase 2 slice on audited fixed kernel build `#4`. The normal
+  full gate is also green through installed `1.0.11+ysp5` on the audited
+  production 6.18.40 kernel.
 - Phase 1: complete on `main`; object heap/object migrations, external-buffer
   zero-copy, worker/fence synchronization, module separation, two active
   decoders, sanitizer gates, and the multi-hour 4K resource soak are green.
@@ -840,7 +854,9 @@ concurrent with decode contexts are race-free.
   by hash and application only; Chromium cannot
   initialize a GL context on this Mali-G610/Panfrost stack, so no Chromium
   claim is made; mpv is not installed; HDR display presentation and
-  fresh-image hardware decode remain untested.
+  fresh-image hardware decode remain untested. Installed `1.0.11+ysp5` matches
+  its deb payload and passes the narrow Main10 fallback plus complete normal
+  pinned conformance gates; the installed-package gap is no longer open.
 - Phase 4: in progress; experimental one-slice H.264 Main/High and HEVC Main
   encode pass FFmpeg and GStreamer CQP/CBR/VBR interoperability, parser, and
   PSNR gates normally and under ASan/UBSan. Both 96-frame encoder gates pass

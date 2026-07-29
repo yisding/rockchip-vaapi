@@ -18,8 +18,8 @@ VECTOR_DIR=${VECTOR_DIR:-$SCRIPT_DIR/vectors}
 MANIFEST=${MANIFEST:-$SCRIPT_DIR/conformance-vectors.tsv}
 TEST_SET=${TEST_SET:-all}
 RISKY_VECTORS=${RISKY_VECTORS:-skip}
-RISKY_KERNEL_RELEASE=${RISKY_KERNEL_RELEASE:-6.18.38-current-rockchip64}
-RISKY_KERNEL_NOTES_SHA256=${RISKY_KERNEL_NOTES_SHA256:-db292410e58bd9c658a0b32b6fc7c7895f3ac4a349ae3c292c441e92e340690e}
+RISKY_KERNEL_RELEASE=${RISKY_KERNEL_RELEASE:-6.18.40-ysp-rockchip64}
+RISKY_KERNEL_NOTES_SHA256=${RISKY_KERNEL_NOTES_SHA256:-db18acdddf7ba9de84590a5816911ed2d929643980057d639a90c2b1337d900c}
 ALLOW_QUARANTINE=${ALLOW_QUARANTINE:-0}
 VP9_RUNS=${VP9_RUNS:-5}
 KEEP_WORK=${KEEP_WORK:-0}
@@ -43,9 +43,9 @@ esac
 # A typo or stale CI checkbox must not turn a conformance run into a kernel
 # panic. Kernel-crash vectors are enabled only on the exact release and GNU
 # notes fingerprint of the build whose RK3588 VP9 probability-table bounds fix
-# was audited. The fingerprint distinguishes audited build #4 from vulnerable
-# build #1, which deliberately shares the same release string. Future kernel
-# builds must be reviewed and then named explicitly through both variables.
+# was audited. The current defaults name the production 6.18.40 package whose
+# full gate passed on 2026-07-29. Future kernel builds must be reviewed and then
+# named explicitly through both variables.
 if [ "$RISKY_VECTORS" = run ] && [ "$TEST_SET" != synthetic ]; then
     running_kernel=$(uname -r) || exit 2
     running_notes_sha=$(sha256sum /sys/kernel/notes 2>/dev/null |

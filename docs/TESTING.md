@@ -484,11 +484,12 @@ fix is installed and the board has booted that kernel. The
 `vp90-2-10-show-existing-frame2.webm` stream can otherwise panic the RK3588 VPU
 driver. The harness additionally requires both the exact running release and
 the SHA-256 of `/sys/kernel/notes` to match `RISKY_KERNEL_RELEASE` and
-`RISKY_KERNEL_NOTES_SHA256`. This distinguishes the current audited fixed
-build `#4` from vulnerable build `#1`, which both report
-`6.18.38-current-rockchip64`; a stale checkbox or environment variable cannot
-enable the vector on the older build. A future kernel must be audited before
-passing both its release and notes fingerprint through those variables.
+`RISKY_KERNEL_NOTES_SHA256`. The defaults name the current audited production
+kernel, `6.18.40-ysp-rockchip64` with notes SHA-256
+`db18acdddf7ba9de84590a5816911ed2d929643980057d639a90c2b1337d900c`;
+a stale checkbox or environment variable therefore cannot enable the vector
+on an older or merely same-version build. A future kernel must be audited
+before advancing both variables.
 Omitting `RISKY_VECTORS` quarantines the stream, but the full gate exits
 non-zero so a skipped required vector can never be reported as a pass.
 
@@ -522,8 +523,8 @@ request:
   MPP commit `1375813cbbae5ad6861b166475dd8fb672183220`.
 
 The on-board gate is a manual `workflow_dispatch` job. Its separate
-`run_risky_vectors` confirmation must remain false until the VP9 kernel fix is
-booted and the driver hidden-reference bridge is ready to validate; with it
+`run_risky_vectors` confirmation may be enabled only when the runner matches
+the exact audited release and notes fingerprint in `tests/validate.sh`; with it
 false, the required quarantine intentionally fails the job.
 Register the board as a self-hosted runner with the default `self-hosted`,
 `linux`, and `ARM64` labels plus the custom `rk3588` label. GitHub documents
@@ -534,6 +535,18 @@ Before confirming risky vectors, verify the board has the fixed kernel, the
 driver build includes the hidden-reference bridge, `/usr/bin/ffmpeg` has
 VA-API, and the build dependencies, `curl`, `unzip`, and `sha256sum` are
 installed.
+
+On 2026-07-29, installed `rockchip-vaapi 1.0.11+ysp5` was verified byte-for-byte
+against its built deb payload on the production-shaped stack:
+`6.18.40-ysp-rockchip64` (notes
+`db18acdddf7ba9de84590a5816911ed2d929643980057d639a90c2b1337d900c`),
+`librockchip-mpp1 1.5.0+git20260727.d8c6b88a`, and
+`librga2 2.2.0+git20260725.26a50ef`. The installed-driver 64x240 Main10 gate
+software-decoded all 48 frames after one up-front context refusal with zero
+RGA submissions and zero kernel `no core match` messages. The complete pinned
+conformance gate then passed, including the guarded VP9 hidden-reference
+vector. These are installed-package correctness results; they do not substitute
+for a genuinely clean-image install or the two-hour resource soaks.
 
 On 2026-07-21, this board was booted into fixed kernel build `#3`, identified
 by kernel-notes SHA-256
