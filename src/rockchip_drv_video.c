@@ -63,15 +63,15 @@ static VAStatus rk_Terminate(VADriverContextP ctx) {
  * software-vs-VAAPI framemd5 comparison:
  *   - H.264 Main/High: bit-exact on pinned conformance vectors
  *   - VP9 Profile 0: bit-exact
+ *   - HEVC Main: bit-exact on all eight pinned FATE vectors, normally and
+ *     under ASan/UBSan, plus 142 of the 163 HEVC Main candidates in the FATE
+ *     conformance suite with zero driver failures (2026-07-28). The rest are
+ *     two streams MPP itself cannot decode and two pictures larger than the
+ *     advertised size constraint, both of which fail closed.
  * Deliberately not offered:
  *   - H.264 Constrained Baseline: MPP decodes the pinned SVA_Base_B stream
  *     incorrectly even though the reconstructed Annex B stream is
  *     software-exact. Fall back instead of returning corrupt frames.
- *   - HEVC: reconstruction and worker routing exist, and a narrow
- *     RK_VAAPI_EXPERIMENTAL_PROFILES=hevc-main gate can expose Main for
- *     validation. Seven pinned Main vectors are bit-exact as of 2026-07-26,
- *     but the profile remains hidden by default until the full pinned gate is
- *     bit-exact rather than partially fail-closed.
  *   - HEVC Main10: MPP AFBC-to-P010 conversion is bit-exact on the narrow
  *     hevc-main10 gate, but it remains hidden until the broader conformance
  *     and HDR gates pass.
@@ -123,9 +123,8 @@ static bool decode_profile_supported(VAProfile p)
     case VAProfileH264Main:
     case VAProfileH264High:
     case VAProfileVP9Profile0:
-        return true;
     case VAProfileHEVCMain:
-        return experimental_profile_enabled("hevc-main");
+        return true;
     case VAProfileHEVCMain10:
         return experimental_profile_enabled("hevc-main10");
     case VAProfileVP9Profile2:

@@ -117,8 +117,8 @@ scaling lists), eight FFmpeg FATE HEVC Main streams, one FATE HEVC Main10
 weighted-prediction stream, one official WebM/libvpx VP9 Profile 2 10-bit
 stream, and four official WebM/libvpx VP9 Profile 0 VA-API streams.
 The HEVC cases exercise long-term references, PPS syntax, RPS, scaling lists,
-tiles, VPS IDs, WPP, and weighted prediction; they remain
-`software-fallback` by default until the Phase 2 hardware gates close. The
+tiles, VPS IDs, WPP, and weighted prediction, and are all `vaapi` as of
+2026-07-28. The
 `decode_path` column makes hardware expectations explicit; `vaapi` cases force
 hardware-frame output so an accidental software fallback cannot turn the gate
 green.
@@ -197,7 +197,8 @@ FFMPEG=/usr/bin/ffmpeg make check-concurrent-decode
 FFMPEG=/usr/bin/ffmpeg make check-concurrent-decode-sanitize
 FFMPEG=/usr/bin/ffmpeg make check-concurrent-decode-tsan
 FFMPEG=/usr/bin/ffmpeg make check-soak
-FFMPEG=/usr/bin/ffmpeg make check-hevc-experimental
+FFMPEG=/usr/bin/ffmpeg make check-hevc
+FFMPEG=/usr/bin/ffmpeg make check-hevc-conformance-sweep
 make check-hevc-tiles-backend
 make probe-av1-platform
 FFMPEG=/usr/bin/ffmpeg make check-hevc-main10-experimental
@@ -214,27 +215,31 @@ FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-conformance
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-sanitize
 ```
 
-`check-hevc-experimental` sets
-`RK_VAAPI_EXPERIMENTAL_PROFILES=hevc-main` through the validator, runs only
-the pinned HEVC vectors, and fails fast with a bounded FFmpeg timeout. It is a
-Phase 2 development gate, not a release gate: HEVC remains unadvertised until
-this target is bit-exact. On 2026-07-26 the current forced-hardware boundary is
-seven bit-exact vectors: `LTRPSPS_A_Qualcomm_1.bit`,
-`PPS_A_qualcomm_7.bit`, `RPS_A_docomo_4.bit`, `SLIST_A_Sony_4.bit`,
-`VPSID_A_VIDYO_2.bit`, `WPP_A_ericsson_MAIN_2.bit`, and
-`WP_A_Toshiba_3.bit`. SPS-backed references are consumed from the original
-slice syntax and rematerialized from the current VA DPB state; scaling matrices
-are carried in the per-access-unit PPS. `TILES_A_Cisco_2.bit` is the sole
-failure. Direct MPP decode of the original Annex B stream and the reconstructed
-VA-API path both report `errinfo=1` from frame 1 onward, so the driver maps
-errored/discarded MPP frames to `VA_STATUS_ERROR_DECODING_ERROR` instead of
-returning corrupt output. `make check-hevc-tiles-backend` builds a libva-free
-MPP runner and reduces the pinned stream by software-valid access-unit prefix.
-It first requires the known-good `PPS_A_qualcomm_7.bit` control to decode
-cleanly, preventing a broken kernel/device stack from being mistaken for a
-TILES-specific failure. The host-side packet, NAL, PPS-transition, checksum,
-and fixed-kernel rerun details are recorded in
+`check-hevc` runs only the pinned HEVC vectors and fails fast with a bounded
+FFmpeg timeout. All eight are bit-exact as of 2026-07-28, normally and with the
+complete ASan/UBSan driver, and `VAProfileHEVCMain` is advertised by default.
+SPS-backed references are consumed from the original slice syntax and
+rematerialized from the current VA DPB state; explicit long-term entries are
+reproduced from the stream unchanged; scaling matrices are carried in the
+per-access-unit PPS.
+
+`TILES_A_Cisco_2.bit` was the last holdout. Direct MPP decode of the original
+Annex B stream reported `errinfo=1` from frame 1 onward, so the failure was
+never attributable to the driver. `make check-hevc-tiles-backend` builds a
+libva-free MPP runner and reduces the pinned stream by software-valid
+access-unit prefix, requiring the known-good `PPS_A_qualcomm_7.bit` control to
+decode cleanly first so a broken kernel/device stack cannot be mistaken for a
+TILES-specific failure. On the current stack the control, the complete
+100-frame vector, and the reduced two-picture core all decode cleanly, and the
+vector is bit-exact through VA-API. The host-side packet, NAL, PPS-transition,
+checksum, and kernel-rerun details are recorded in
 [`HEVC_TILES_BACKEND.md`](HEVC_TILES_BACKEND.md).
+
+`check-hevc-conformance-sweep` is the wide gate behind that claim. It fetches
+every HEVC Main candidate in the FFmpeg FATE conformance suite into
+`tests/vectors/hevc-sweep/` against pinned checksums and requires each one to
+land in exactly the class `tests/hevc-sweep-vectors.tsv` records. It is slow --
+budget well over an hour -- and is not part of `check`.
 
 `check-hevc-main10-experimental` generates 48 Main10 frames at 320x240 and also
 runs the checksum-pinned FATE `WP_A_MAIN10_Toshiba_3.bit` weighted-prediction

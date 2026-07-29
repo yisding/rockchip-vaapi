@@ -83,7 +83,6 @@ fi
 
 export LIBVA_DRIVER_NAME=rockchip
 export LIBVA_DRIVERS_PATH="$DRIVER_DIR"
-export RK_VAAPI_EXPERIMENTAL_PROFILES=hevc-main
 
 mkdir -p "$REPORT_DIR" || exit 1
 WORK=$(mktemp -d "$REPORT_DIR/work.XXXXXX") || exit 1

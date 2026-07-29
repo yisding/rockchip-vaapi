@@ -144,9 +144,8 @@ check: $(TARGET) test
 check-conformance: $(TARGET) test
 	TEST_SET=conformance tests/validate.sh
 
-check-hevc-experimental: $(TARGET) test
-	TEST_SET=hevc EXPERIMENTAL_HEVC=1 FAIL_FAST=1 FFMPEG_TIMEOUT=60 \
-		tests/validate.sh
+check-hevc: $(TARGET) test
+	TEST_SET=hevc FAIL_FAST=1 FFMPEG_TIMEOUT=60 tests/validate.sh
 
 $(HEVC_MPP_REPRO): tests/hevc_mpp_repro.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(MPP_CFLAGS) $< \
@@ -470,11 +469,11 @@ check-sanitize: sanitize
 	UBSAN_OPTIONS=halt_on_error=1 \
 	DRIVER_DIR="$(abspath $(SAN_DIR))" TEST_SET=all tests/validate.sh
 
-check-hevc-experimental-sanitize: sanitize
+check-hevc-sanitize: sanitize
 	LD_PRELOAD="$(shell $(CC) -print-file-name=libasan.so)" \
 	ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
 	UBSAN_OPTIONS=halt_on_error=1 \
-	DRIVER_DIR="$(abspath $(SAN_DIR))" TEST_SET=hevc EXPERIMENTAL_HEVC=1 \
+	DRIVER_DIR="$(abspath $(SAN_DIR))" TEST_SET=hevc \
 		FAIL_FAST=1 FFMPEG_TIMEOUT=60 tests/validate.sh
 
 check-sanitize-safe: sanitize
@@ -499,7 +498,7 @@ clean:
 
 .PHONY: all install package check-package-install fetch-vectors \
 	check check-conformance check-synthetic \
-	check-hevc-experimental check-hevc-experimental-sanitize \
+	check-hevc check-hevc-sanitize \
 	check-hevc-tiles-backend fetch-hevc-sweep-vectors \
 	check-hevc-conformance-sweep probe-mpp-main10-encode probe-av1-platform \
 	check-hevc-main10-experimental check-hevc-main10-hdr-experimental \

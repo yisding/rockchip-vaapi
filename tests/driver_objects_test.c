@@ -175,9 +175,14 @@ static void test_experimental_hevc_encode(struct VADriverVTable *v,
 {
     VAEntrypoint entrypoints[2];
     int count = 0;
+    /* HEVC Main decode ships; encode stays behind its own switch. */
     CHECK_STATUS(v->vaQueryConfigEntrypoints(
                      ctx, VAProfileHEVCMain, entrypoints, &count),
-                 VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
+                 VA_STATUS_SUCCESS);
+    if (count != 1 || entrypoints[0] != VAEntrypointVLD) {
+        fputs("HEVC Main must expose decode only by default\n", stderr);
+        exit(1);
+    }
 
     if (setenv("RK_VAAPI_EXPERIMENTAL_ENCODE", "hevc", 1) != 0) {
         perror("setenv");
@@ -186,8 +191,9 @@ static void test_experimental_hevc_encode(struct VADriverVTable *v,
     CHECK_STATUS(v->vaQueryConfigEntrypoints(
                      ctx, VAProfileHEVCMain, entrypoints, &count),
                  VA_STATUS_SUCCESS);
-    if (count != 1 || entrypoints[0] != VAEntrypointEncSlice) {
-        fputs("HEVC encode must not expose experimental decode\n", stderr);
+    if (count != 2 || entrypoints[0] != VAEntrypointVLD ||
+        entrypoints[1] != VAEntrypointEncSlice) {
+        fputs("HEVC encode must be added alongside decode\n", stderr);
         exit(1);
     }
 

@@ -397,7 +397,7 @@ profile on software fallback; Profile 2 remains hidden pending app validation.
 **Progress (2026-07-26, HEVC hardware gate):** Added a gated HEVC Main
 validation path without advertising HEVC by default:
 `RK_VAAPI_EXPERIMENTAL_PROFILES=hevc-main` enables `VAProfileHEVCMain`, and
-`make check-hevc-experimental` runs only the pinned HEVC conformance vectors
+`make check-hevc` (then `check-hevc-experimental`) runs only the pinned HEVC vectors
 with fail-fast FFmpeg timeouts. The RPS rewrite now keeps valid
 `ReferenceFrames[]` entries that are not current-picture refs as follow
 references (`used_by_curr_pic=0`), preserving DPB state needed by later pictures.

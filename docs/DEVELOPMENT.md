@@ -433,18 +433,17 @@ manifest together only after the on-device bit-exact gate passes. VP9 Profile
 0 remains the other shipping path. Profile 2 has an experimental AFBC/P010
 gate; AV1 remains future work.
 
-For Phase 2 debugging, `RK_VAAPI_EXPERIMENTAL_PROFILES=hevc-main` temporarily
-enables `VAProfileHEVCMain` so `make check-hevc-experimental` can force the
-pinned HEVC vectors through hardware. The switch is intentionally narrow and
-must not be used as release evidence by itself. The current boundary is 7/8
-bit-exact. Unflagged `ReferenceFrames[]` entries are preserved as follow
-references, while current short- and long-term references are explicitly
-materialized after the original SPS-table syntax is consumed.
-`LTRPSPS_A_Qualcomm_1.bit` and `SLIST_A_Sony_4.bit` now pass alongside PPS,
-RPS, VPSID, WPP, and weighted-prediction vectors. MPP reports `errinfo` on the
-TILES vector even when decoding its original Annex B stream, and the driver
-treats errored/discarded MPP frames as decode failures instead of binding
-corrupt output. HEVC stays hidden until the pinned gate is bit-exact.
+`VAProfileHEVCMain` is advertised by default as of 2026-07-28. Unflagged
+`ReferenceFrames[]` entries are preserved as follow references, current
+short-term references are explicitly materialized after the original SPS-table
+syntax is consumed, and explicit long-term entries are reproduced from the
+stream rather than rebuilt -- `ReferenceFrames[]` carries no ordering, and
+RefPicSetLtCurr order decides the initial reference list. All eight pinned
+vectors are bit-exact, as are 142 of the 163 HEVC Main candidates in the FATE
+conformance suite, with zero driver failures. The remainder are two streams MPP
+itself cannot decode and two pictures beyond the advertised 7680x4320
+constraint; all four fail closed. Errored or discarded MPP frames still become
+decode failures rather than bound corrupt output.
 
 ---
 

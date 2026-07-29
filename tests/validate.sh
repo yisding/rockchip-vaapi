@@ -18,7 +18,6 @@ VECTOR_DIR=${VECTOR_DIR:-$SCRIPT_DIR/vectors}
 MANIFEST=${MANIFEST:-$SCRIPT_DIR/conformance-vectors.tsv}
 TEST_SET=${TEST_SET:-all}
 RISKY_VECTORS=${RISKY_VECTORS:-skip}
-EXPERIMENTAL_HEVC=${EXPERIMENTAL_HEVC:-0}
 RISKY_KERNEL_RELEASE=${RISKY_KERNEL_RELEASE:-6.18.38-current-rockchip64}
 RISKY_KERNEL_NOTES_SHA256=${RISKY_KERNEL_NOTES_SHA256:-db292410e58bd9c658a0b32b6fc7c7895f3ac4a349ae3c292c441e92e340690e}
 ALLOW_QUARANTINE=${ALLOW_QUARANTINE:-0}
@@ -33,10 +32,6 @@ case $RISKY_VECTORS in
     skip|run) ;;
     *) echo "error: RISKY_VECTORS must be skip or run" >&2; exit 2 ;;
 esac
-case $EXPERIMENTAL_HEVC in
-    0|1) ;;
-    *) echo "error: EXPERIMENTAL_HEVC must be 0 or 1" >&2; exit 2 ;;
-esac
 case $FAIL_FAST in
     0|1) ;;
     *) echo "error: FAIL_FAST must be 0 or 1" >&2; exit 2 ;;
@@ -44,11 +39,6 @@ esac
 case $FFMPEG_TIMEOUT in
     ''|*[!0-9]*) echo "error: FFMPEG_TIMEOUT must be a non-negative integer" >&2; exit 2 ;;
 esac
-
-if [ "$EXPERIMENTAL_HEVC" = 1 ]; then
-    RK_VAAPI_EXPERIMENTAL_PROFILES=${RK_VAAPI_EXPERIMENTAL_PROFILES:-hevc-main}
-    export RK_VAAPI_EXPERIMENTAL_PROFILES
-fi
 
 # A typo or stale CI checkbox must not turn a conformance run into a kernel
 # panic. Kernel-crash vectors are enabled only on the exact release and GNU
@@ -249,10 +239,6 @@ run_conformance()
             vaapi|software-fallback) ;;
             *) echo "FAIL  $codec/$output (invalid decode path $decode_path)"; FAIL=1; continue ;;
         esac
-        if [ "$EXPERIMENTAL_HEVC" = 1 ] && [ "$codec" = hevc ] &&
-           [ "$decode_path" = software-fallback ]; then
-            decode_path=vaapi
-        fi
         compare_clip "$codec/$output" "$input" "$decode_path"
         if fail_fast_requested; then
             return

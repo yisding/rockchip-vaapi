@@ -99,7 +99,7 @@ esac
 
 ready_count=$(awk '/external_group: ready/ { count++ } END { print count + 0 }' "$LOG")
 destroyed_count=$(awk '/external_group: destroyed/ { count++ } END { print count + 0 }' "$LOG")
-frame_count=$(awk '/zero_copy=1 external=1/ { count++ } END { print count + 0 }' "$LOG")
+frame_count=$(awk '/zero_copy=1/ && /external=1/ { count++ } END { print count + 0 }' "$LOG")
 worker_started=$(awk '/decode worker: started/ { count++ } END { print count + 0 }' "$LOG")
 worker_stopped=$(awk '/decode worker: stopped/ { count++ } END { print count + 0 }' "$LOG")
 peak_workers=$(awk '
