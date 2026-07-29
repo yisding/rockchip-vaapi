@@ -115,7 +115,7 @@ Key features:
 | VP9 | Profile 0 | full normal + ASan/UBSan gates bit-exact | hidden-reference vector included on audited kernel |
 | VP9 | Profile 2 (under development) | not offered | generated 48-frame and official libvpx 10-frame gates are P010 bit-exact through MPP AFBC + RGA |
 | HEVC | Main | full normal + ASan/UBSan gates bit-exact | 8/8 pinned vectors, plus 142/163 FATE Main candidates with zero driver failures |
-| HEVC | Main10 (under development) | not offered | generated, pinned weighted-prediction, and HDR10 gates are P010 bit-exact through MPP AFBC + RGA; BT.2020/PQ and static HDR metadata survive hardware decode |
+| HEVC | Main10 (under development) | not offered | 10 of 11 FATE Main10 vectors, plus generated, weighted-prediction and HDR10 gates, are P010 bit-exact through MPP AFBC + RGA; BT.2020/PQ and static HDR metadata survive hardware decode. RGA3 refuses sources below its minimum width, so a 64-pixel-wide picture fails closed |
 | VP8 | — | not offered | crashes in the generic path; needs debugging |
 | AV1 | — | not offered | VA-API hands headerless tile data; MPP needs full OBUs; see the [support plan](docs/AV1_SUPPORT_PLAN.md) and non-submitting platform probe |
 | H.264 | High10 | not offered | profile-specific reconstruction and validation pending |

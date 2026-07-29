@@ -428,7 +428,9 @@ VA-API path reports the same backend error. The driver maps
 errored/discarded MPP frames to `VA_STATUS_ERROR_DECODING_ERROR` and resets the
 decoder during teardown so in-flight MPP buffers are not leaked. The safe
 advertised hardware subset (`check-safe`) still passes with HEVC software
-fallback and the risky VP9 vector blocked. HEVC Main stays hidden.
+fallback and the risky VP9 vector blocked. HEVC Main stayed hidden at this
+point; it was advertised on 2026-07-28 once the backend decoded TILES and the
+wider sweep landed (see below).
 
 **Progress (2026-07-27, TILES backend reduction tooling):** A libva-free
 `tests/hevc_mpp_repro` now submits Annex-B HEVC directly to MPP, reports every
