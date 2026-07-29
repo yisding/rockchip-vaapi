@@ -7,8 +7,7 @@ Build-Depends: debhelper-compat (= 13),
                libva-dev (>= 2.0),
                librockchip-mpp-dev,
                librga-dev,
-               pkg-config,
-               gcc
+               pkgconf
 Standards-Version: 4.6.2
 Rules-Requires-Root: no
 Homepage: https://github.com/yisding/rockchip-vaapi
