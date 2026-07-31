@@ -78,8 +78,12 @@ Published MPP `3381fd2c` and FFmpeg `33a651a55b` package root, completing
   libvpx P010-exact AFBC/RGA gates and remains hidden pending app validation.
   HEVC Main10 additionally has a 24-frame HDR10 gate
   proving byte-exact P010 output and preservation of BT.2020/PQ, mastering
-  display, and content-light metadata. VP8 and the other unvalidated profiles
-  are also not advertised, so
+  display, and content-light metadata. A control-gated Main10 prefix reducer
+  separates VA rebuilt-packet failures from unrelated RGA failures, retains
+  the exact access-unit boundaries, and replays them below libva with AFBC and
+  linear output controls; see
+  [`docs/TESTING.md`](docs/TESTING.md#reducing-hevc-main10-reconstruction-failures).
+  VP8 and the other unvalidated profiles are also not advertised, so
   applications fall back instead of receiving an unsafe format or decode path.
 - Packaging/build hygiene: `DESTDIR`/`PREFIX`/multiarch-aware Makefile,
   no `sudo` in `make install`, `make check` validation gate. Version

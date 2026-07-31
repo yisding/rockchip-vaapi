@@ -597,14 +597,17 @@ Firefox Main10 run reaches three hardware frames and then falls back at its
 plane-1 EGL import. Source inspection later identified the producer defect:
 the driver exported `0x36315247` (`GR16`) instead of
 `DRM_FORMAT_GR1616` (`0x32335247`, `GR32`), so Mesa correctly rejected an
-unknown fourcc before reaching Panfrost.
+unknown fourcc before reaching Panfrost. The corrected ysp7 exporter has since
+reached successful plane-1 zero-copy EGL import in both Firefox's RDD and
+parent renderer. Later decode failure is below that EGL boundary.
 
 **Gate:** ✅ HEVC Main bit-exact vs software on conformance vectors (8/8 pinned;
 144/163 complete exact-PPA-package sweep, 17 profile skips, two size refusals,
 zero backend/driver failures) and advertised by default;
 ✅ HEVC Main10 / VP9 P2 bit-exact after P010 repacking and measured above
-260 fps at 1080p; ✅ VLC Main10 decode/presentation; Firefox/Panfrost Main10
-corrected-export display validation and physical HDR presentation remain open.
+260 fps at 1080p; ✅ VLC Main10 decode/presentation; ✅ Firefox/Panfrost
+GR1616 import in both processes; complete Firefox Main10 playback and physical
+HDR presentation remain open.
 
 ### Phase 3 — Production hardening & the app matrix  (~2–3 wk)
 
@@ -747,8 +750,24 @@ changes chroma from the invalid `0x36315247` to
 `DRM_FORMAT_GR1616` (`0x32335247`) and corrects the test that had preserved the
 bad value. The speculative Firefox GR/RG retry patches and their contract gate
 were retired; the display gate now requires the correct exported fourcc and a
-successful plane-1 zero-copy import. Rebuilt-driver hardware validation in a
-real display session remains pending.
+successful plane-1 zero-copy import. Installed `1.0.11+ysp7` reaches that
+success in both the Firefox RDD process and parent renderer. Playback later
+fails when MPP marks a decoded Main10 frame bad, so the GR1616/Mesa question is
+closed independently of the remaining decoder failure.
+
+**Progress (2026-07-31, Main10 failure reducer):** The new control-gated prefix
+reducer retained Firefox-style cases with two and six access units in separate
+runs. In both, the original prefix and exact concatenated driver output were
+clean in three of three whole-stream direct-MPP controls while the VA path
+produced MPP bad-frame markers in two of three attempts. For the six-packet
+case, exact-boundary replay below libva was clean in three of three
+external-linear runs but emitted bad frames in one of three external-AFBC and
+three of three internal-AFBC runs. The final two-packet run was clean in all
+three replay modes. This rules out an always-invalid reconstructed stream and
+shows a stateful MPP packetized/session interaction, with AFBC implicated in
+one run but not deterministically isolated. No individual parameter-set
+rewrite is yet implicated. RGA multi-SG refusals are classified separately and
+never count toward the reducer result.
 
 **Progress (2026-07-27, structured logging):** The opt-in driver log now emits
 single-record structured text or newline-delimited JSON with realtime
@@ -1003,16 +1022,18 @@ concurrent with decode contexts are race-free.
   surface's own DMA-BUF, which is what unblocked VLC; completed linear P010
   and aligned provisional converter probes are accepted, while imported,
   still-compressed, stale-layout, imported-RGB, and encoder-input surfaces
-  fail closed. The recorded stock Firefox Main10 fallback is now traced to the
-  driver's invalid `GR16` literal rather than a Panfrost GR1616 failure; the
-  exporter and regression gate use the correct DRM fourcc.
-  Open: rebuilt-driver and sandboxed Firefox playback gates are not yet
-  complete; Chromium cannot
+  fail closed. The first recorded stock Firefox Main10 fallback was the
+  driver's invalid `GR16` literal, not a Panfrost GR1616 limitation. Installed
+  ysp7 proves the corrected GR1616 import in both Firefox processes; the next
+  failure is the stateful MPP-marked Main10 decode boundary covered by the
+  reducer.
+  Open: complete Main10 and sandboxed Firefox playback gates are not yet
+  green; Chromium cannot
   initialize a GL context on this Mali-G610/Panfrost stack, so no Chromium
   claim is made; mpv 10-bit/HDR display presentation and fresh-image hardware
-  decode remain untested. Installed `1.0.11+ysp5` matches
-  its deb payload and passes the narrow Main10 fallback plus complete normal
-  pinned conformance gates; the installed-package gap is no longer open.
+  decode remain untested. Installed `1.0.11+ysp7` carries the corrected
+  exporter; its GR1616 boundary is measured separately from the open decode
+  failure.
 - Phase 4: complete for the deliberately advertised experimental scope;
   H.264 Main/High and HEVC Main
   encode pass FFmpeg and GStreamer CQP/CBR/VBR interoperability, parser, and

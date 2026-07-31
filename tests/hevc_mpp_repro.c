@@ -16,6 +16,7 @@
 #define _POSIX_C_SOURCE 200809L
 #define MODULE_TAG "hevc_mpp_repro"
 
+#include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <stdbool.h>
@@ -32,6 +33,8 @@
 #include <rockchip/rk_mpi.h>
 #include <rockchip/rk_vdec_cfg.h>
 
+#include "frame_layout.h"
+
 enum {
     REPRO_CLEAN = 0,
     REPRO_STREAM_FAILURE = 1,
@@ -47,14 +50,24 @@ enum {
 typedef struct {
     MppCtx context;
     MppApi *api;
-    MppPacket packet;
     MppDecCfg config;
     MppBufferGroup frame_group;
+    MppBufferGroup backing_group;
+    MppBuffer *buffers;
+    unsigned buffer_count;
     uint8_t *input;
     size_t input_size;
+    size_t *packet_sizes;
+    unsigned packet_count;
     unsigned frames;
+    unsigned expected_frames;
     unsigned bad_frames;
     unsigned info_changes;
+    bool packetized;
+    bool immediate_out;
+    bool afbc_output;
+    bool external_pool;
+    bool no_eos;
     bool saw_eos;
 } Repro;
 
@@ -159,6 +172,21 @@ static bool parse_expected_frames(const char *text, unsigned *value)
     return true;
 }
 
+static bool parse_toggle(const char *name, bool *value)
+{
+    const char *text = getenv(name);
+    if (!text || !*text || strcmp(text, "0") == 0) {
+        *value = false;
+        return true;
+    }
+    if (strcmp(text, "1") == 0) {
+        *value = true;
+        return true;
+    }
+    fprintf(stderr, "INPUT_ERROR %s must be 0 or 1, got: %s\n", name, text);
+    return false;
+}
+
 static bool read_input(const char *path, uint8_t **data_out, size_t *size_out)
 {
     FILE *input = fopen(path, "rb");
@@ -198,10 +226,73 @@ done:
     return ok;
 }
 
+static bool read_packet_sizes(const char *path, size_t input_size,
+                              size_t **sizes_out, unsigned *count_out)
+{
+    FILE *input = fopen(path, "r");
+    if (!input) {
+        fprintf(stderr, "INPUT_ERROR open=%s errno=%d (%s)\n",
+                path, errno, strerror(errno));
+        return false;
+    }
+
+    size_t *sizes = NULL;
+    size_t capacity = 0;
+    unsigned count = 0;
+    size_t total = 0;
+    char *line = NULL;
+    size_t line_capacity = 0;
+    bool ok = true;
+    while (getline(&line, &line_capacity, input) >= 0) {
+        char *end = NULL;
+        errno = 0;
+        uintmax_t parsed = strtoumax(line, &end, 10);
+        while (end && isspace((unsigned char)*end))
+            end++;
+        if (errno || !end || end == line || *end || parsed == 0 ||
+            parsed > SIZE_MAX || (size_t)parsed > input_size - total ||
+            count == UINT32_MAX) {
+            ok = false;
+            break;
+        }
+        if (count == capacity) {
+            size_t new_capacity = capacity ? capacity * 2 : 16;
+            if (new_capacity <= capacity ||
+                new_capacity > SIZE_MAX / sizeof(*sizes)) {
+                ok = false;
+                break;
+            }
+            size_t *grown = realloc(sizes, new_capacity * sizeof(*sizes));
+            if (!grown) {
+                ok = false;
+                break;
+            }
+            sizes = grown;
+            capacity = new_capacity;
+        }
+        sizes[count++] = (size_t)parsed;
+        total += (size_t)parsed;
+    }
+    if (ferror(input) || count == 0 || total != input_size)
+        ok = false;
+    free(line);
+    fclose(input);
+    if (!ok) {
+        fprintf(stderr,
+                "INPUT_ERROR invalid packet manifest=%s count=%u total=%zu input=%zu\n",
+                path, count, total, input_size);
+        free(sizes);
+        return false;
+    }
+
+    *sizes_out = sizes;
+    *count_out = count;
+    printf("PACKET_MANIFEST count=%u bytes=%zu\n", count, total);
+    return true;
+}
+
 static void cleanup(Repro *repro)
 {
-    if (repro->packet)
-        mpp_packet_deinit(&repro->packet);
     if (repro->context) {
         if (repro->api)
             repro->api->reset(repro->context);
@@ -209,8 +300,16 @@ static void cleanup(Repro *repro)
     }
     if (repro->frame_group)
         mpp_buffer_group_put(repro->frame_group);
+    for (unsigned i = 0; i < repro->buffer_count; i++) {
+        if (repro->buffers[i])
+            mpp_buffer_put(repro->buffers[i]);
+    }
+    free(repro->buffers);
+    if (repro->backing_group)
+        mpp_buffer_group_put(repro->backing_group);
     if (repro->config)
         mpp_dec_cfg_deinit(repro->config);
+    free(repro->packet_sizes);
     free(repro->input);
 }
 
@@ -235,16 +334,35 @@ static int configure_decoder(Repro *repro)
     }
     ret = repro->api->control(repro->context, MPP_DEC_GET_CFG,
                               repro->config);
+    RK_U32 split_parse = repro->packetized ? 0 : 1;
     if (ret != MPP_OK ||
-        mpp_dec_cfg_set_u32(repro->config, "base:split_parse", 1) != MPP_OK ||
+        mpp_dec_cfg_set_u32(repro->config, "base:split_parse",
+                            split_parse) != MPP_OK ||
         repro->api->control(repro->context, MPP_DEC_SET_CFG,
                             repro->config) != MPP_OK) {
         fprintf(stderr, "SETUP_ERROR stage=split_parser ret=%d\n", ret);
         return REPRO_ENVIRONMENT;
     }
 
-    RK_S64 input_timeout_ms = 100;
-    RK_S64 output_timeout_ms = 100;
+    if (repro->immediate_out) {
+        RK_U32 immediate_out = 1;
+        if (repro->api->control(repro->context, MPP_DEC_SET_IMMEDIATE_OUT,
+                                &immediate_out) != MPP_OK) {
+            fputs("SETUP_ERROR stage=immediate_out\n", stderr);
+            return REPRO_ENVIRONMENT;
+        }
+    }
+    if (repro->afbc_output) {
+        RK_U32 output_format = MPP_FRAME_FBC_AFBC_V2;
+        if (repro->api->control(repro->context, MPP_DEC_SET_OUTPUT_FORMAT,
+                                &output_format) != MPP_OK) {
+            fputs("SETUP_ERROR stage=afbc_output\n", stderr);
+            return REPRO_ENVIRONMENT;
+        }
+    }
+
+    RK_S64 input_timeout_ms = repro->packetized ? 0 : 100;
+    RK_S64 output_timeout_ms = repro->packetized ? 20 : 100;
     if (repro->api->control(repro->context, MPP_SET_INPUT_TIMEOUT,
                             &input_timeout_ms) != MPP_OK ||
         repro->api->control(repro->context, MPP_SET_OUTPUT_TIMEOUT,
@@ -252,24 +370,21 @@ static int configure_decoder(Repro *repro)
         fputs("SETUP_ERROR stage=timeouts\n", stderr);
         return REPRO_ENVIRONMENT;
     }
-
-    ret = mpp_packet_init(&repro->packet, repro->input, repro->input_size);
-    if (ret != MPP_OK || !repro->packet) {
-        fprintf(stderr, "SETUP_ERROR stage=packet_init ret=%d\n", ret);
-        return REPRO_ENVIRONMENT;
-    }
-    mpp_packet_set_pos(repro->packet, repro->input);
-    mpp_packet_set_length(repro->packet, repro->input_size);
-    if (mpp_packet_set_eos(repro->packet) != MPP_OK) {
-        fputs("SETUP_ERROR stage=packet_eos\n", stderr);
-        return REPRO_ENVIRONMENT;
-    }
+    printf("CONFIG split_parse=%u immediate_out=%u afbc_output=%u "
+           "external_pool=%u send_eos=%u input_timeout_ms=%" PRId64
+           " output_timeout_ms=%" PRId64 "\n",
+           split_parse, repro->immediate_out ? 1u : 0u,
+           repro->afbc_output ? 1u : 0u,
+           repro->external_pool ? 1u : 0u,
+           repro->no_eos ? 0u : 1u, (int64_t)input_timeout_ms,
+           (int64_t)output_timeout_ms);
     return REPRO_CLEAN;
 }
 
 static int accept_info_change(Repro *repro, MppFrame frame)
 {
     size_t buffer_size = mpp_frame_get_buf_size(frame);
+    size_t allocation_size = buffer_size;
     unsigned width = mpp_frame_get_width(frame);
     unsigned height = mpp_frame_get_height(frame);
     unsigned horizontal_stride = mpp_frame_get_hor_stride(frame);
@@ -285,17 +400,59 @@ static int accept_info_change(Repro *repro, MppFrame frame)
         fputs("SETUP_ERROR stage=info_change zero_buffer_size\n", stderr);
         return REPRO_ENVIRONMENT;
     }
-    if (!repro->frame_group) {
-        MPP_RET ret = mpp_buffer_group_get_internal(
-            &repro->frame_group, MPP_BUFFER_TYPE_DRM);
+    size_t conservative_size = 0;
+    if (repro->external_pool &&
+        rk_surface_buffer_size(width, height, &conservative_size) &&
+        conservative_size > allocation_size)
+        allocation_size = conservative_size;
+    MPP_RET ret = MPP_OK;
+    if (!repro->frame_group && repro->external_pool) {
+        ret = mpp_buffer_group_get_external(&repro->frame_group,
+                                            MPP_BUFFER_TYPE_EXT_DMA);
+        if (ret != MPP_OK || !repro->frame_group ||
+            mpp_buffer_group_get_internal(&repro->backing_group,
+                                          MPP_BUFFER_TYPE_DRM) != MPP_OK) {
+            fprintf(stderr,
+                    "SETUP_ERROR stage=external_group_create ret=%d\n", ret);
+            return REPRO_ENVIRONMENT;
+        }
+        repro->buffers = calloc(OUTPUT_BUFFER_COUNT, sizeof(*repro->buffers));
+        if (!repro->buffers)
+            return REPRO_ENVIRONMENT;
+        for (unsigned i = 0; i < OUTPUT_BUFFER_COUNT; i++) {
+            if (mpp_buffer_get(repro->backing_group, &repro->buffers[i],
+                               allocation_size) != MPP_OK) {
+                fprintf(stderr,
+                        "SETUP_ERROR stage=external_buffer_alloc index=%u\n",
+                        i);
+                return REPRO_ENVIRONMENT;
+            }
+            repro->buffer_count++;
+            MppBufferInfo commit = {
+                .type = MPP_BUFFER_TYPE_EXT_DMA,
+                .size = mpp_buffer_get_size(repro->buffers[i]),
+                .fd = mpp_buffer_get_fd(repro->buffers[i]),
+                .index = (int)i,
+            };
+            if (commit.fd < 0 ||
+                mpp_buffer_commit(repro->frame_group, &commit) != MPP_OK) {
+                fprintf(stderr,
+                        "SETUP_ERROR stage=external_buffer_commit index=%u fd=%d\n",
+                        i, commit.fd);
+                return REPRO_ENVIRONMENT;
+            }
+        }
+    } else if (!repro->frame_group) {
+        ret = mpp_buffer_group_get_internal(&repro->frame_group,
+                                            MPP_BUFFER_TYPE_DRM);
         if (ret != MPP_OK || !repro->frame_group) {
             fprintf(stderr,
                     "SETUP_ERROR stage=buffer_group_create ret=%d\n", ret);
             return REPRO_ENVIRONMENT;
         }
+        ret = mpp_buffer_group_limit_config(repro->frame_group, buffer_size,
+                                            OUTPUT_BUFFER_COUNT);
     }
-    MPP_RET ret = mpp_buffer_group_limit_config(
-        repro->frame_group, buffer_size, OUTPUT_BUFFER_COUNT);
     if (ret != MPP_OK ||
         repro->api->control(repro->context, MPP_DEC_SET_EXT_BUF_GROUP,
                             repro->frame_group) != MPP_OK ||
@@ -304,6 +461,10 @@ static int accept_info_change(Repro *repro, MppFrame frame)
         fprintf(stderr, "SETUP_ERROR stage=info_change_ready ret=%d\n", ret);
         return REPRO_ENVIRONMENT;
     }
+    printf("BUFFER_GROUP mode=%s required=%zu allocated=%zu count=%u\n",
+           repro->external_pool ? "external" : "internal", buffer_size,
+           allocation_size,
+           repro->external_pool ? repro->buffer_count : OUTPUT_BUFFER_COUNT);
     return REPRO_CLEAN;
 }
 
@@ -329,26 +490,32 @@ static int drain_one(Repro *repro, bool *made_progress)
         unsigned errinfo = mpp_frame_get_errinfo(frame);
         unsigned discard = mpp_frame_get_discard(frame);
         bool eos = mpp_frame_get_eos(frame) != 0;
+        unsigned width = mpp_frame_get_width(frame);
+        unsigned height = mpp_frame_get_height(frame);
+        if (eos)
+            repro->saw_eos = true;
+        if (eos && width == 0 && height == 0) {
+            puts("EOS empty=1");
+            mpp_frame_deinit(&frame);
+            return status;
+        }
         repro->frames++;
         if (errinfo || discard)
             repro->bad_frames++;
-        if (eos)
-            repro->saw_eos = true;
         printf("FRAME index=%u errinfo=0x%x discard=0x%x eos=%u "
                "width=%u height=%u\n",
                repro->frames, errinfo, discard, eos ? 1u : 0u,
-               mpp_frame_get_width(frame), mpp_frame_get_height(frame));
+               width, height);
     }
     mpp_frame_deinit(&frame);
     return status;
 }
 
-static int submit_packet(Repro *repro)
+static int submit_packet(Repro *repro, MppPacket packet)
 {
     int64_t deadline = monotonic_ms() + PUT_DEADLINE_MS;
     for (;;) {
-        MPP_RET ret = repro->api->decode_put_packet(repro->context,
-                                                    repro->packet);
+        MPP_RET ret = repro->api->decode_put_packet(repro->context, packet);
         if (ret == MPP_OK)
             return REPRO_CLEAN;
         if (ret != MPP_ERR_BUFFER_FULL && ret != MPP_ERR_TIMEOUT) {
@@ -370,10 +537,64 @@ static int submit_packet(Repro *repro)
     }
 }
 
+static int submit_buffer(Repro *repro, void *data, size_t size,
+                         int64_t pts, bool eos)
+{
+    MppPacket packet = NULL;
+    size_t allocation_size = size ? size : 1;
+    MPP_RET ret = mpp_packet_init(&packet, data, allocation_size);
+    if (ret != MPP_OK || !packet) {
+        fprintf(stderr, "RUNTIME_ERROR stage=packet_init ret=%d\n", ret);
+        return REPRO_RUNTIME;
+    }
+    mpp_packet_set_pos(packet, data);
+    mpp_packet_set_length(packet, size);
+    mpp_packet_set_pts(packet, pts);
+    if (eos && mpp_packet_set_eos(packet) != MPP_OK) {
+        fputs("RUNTIME_ERROR stage=packet_eos\n", stderr);
+        mpp_packet_deinit(&packet);
+        return REPRO_RUNTIME;
+    }
+    int status = submit_packet(repro, packet);
+    mpp_packet_deinit(&packet);
+    return status;
+}
+
+static int submit_input(Repro *repro)
+{
+    if (!repro->packetized)
+        return submit_buffer(repro, repro->input, repro->input_size, 1,
+                             !repro->no_eos);
+
+    size_t offset = 0;
+    for (unsigned i = 0; i < repro->packet_count; i++) {
+        size_t size = repro->packet_sizes[i];
+        printf("PACKET index=%u offset=%zu size=%zu\n", i + 1, offset, size);
+        int status = submit_buffer(repro, repro->input + offset, size,
+                                   (int64_t)i + 1, false);
+        if (status != REPRO_CLEAN)
+            return status;
+        offset += size;
+
+        bool progress = false;
+        status = drain_one(repro, &progress);
+        if (status != REPRO_CLEAN)
+            return status;
+    }
+
+    if (!repro->no_eos) {
+        uint8_t stub = 0;
+        return submit_buffer(repro, &stub, 0,
+                             (int64_t)repro->packet_count + 1, true);
+    }
+    return REPRO_CLEAN;
+}
+
 static int drain_to_eos(Repro *repro)
 {
     int64_t idle_deadline = monotonic_ms() + DRAIN_IDLE_DEADLINE_MS;
-    while (!repro->saw_eos) {
+    while (!repro->saw_eos &&
+           (!repro->no_eos || repro->frames < repro->expected_frames)) {
         bool progress = false;
         int status = drain_one(repro, &progress);
         if (status != REPRO_CLEAN)
@@ -409,24 +630,43 @@ int main(int argc, char **argv)
         free(input);
         return REPRO_CLEAN;
     }
-    if (argc != 3) {
+    bool packetized = argc == 5 && strcmp(argv[1], "--packetized") == 0;
+    if (argc != 3 && !packetized) {
         fprintf(stderr,
                 "usage: %s INPUT.h265 EXPECTED_FRAMES\n"
-                "       %s --inspect INPUT.h265\n",
-                argv[0], argv[0]);
+                "       %s --packetized INPUT.h265 PACKET_SIZES EXPECTED_FRAMES\n"
+                "       %s --inspect INPUT.h265\n"
+                "environment: REPRO_IMMEDIATE_OUT=0|1 REPRO_AFBC=0|1 "
+                "REPRO_EXTERNAL_POOL=0|1 REPRO_NO_EOS=0|1\n",
+                argv[0], argv[0], argv[0]);
         return REPRO_USAGE;
     }
 
+    const char *input_path = packetized ? argv[2] : argv[1];
+    const char *expected_text = packetized ? argv[4] : argv[2];
     unsigned expected_frames = 0;
-    if (!parse_expected_frames(argv[2], &expected_frames)) {
+    if (!parse_expected_frames(expected_text, &expected_frames)) {
         fprintf(stderr, "INPUT_ERROR invalid expected frame count: %s\n",
-                argv[2]);
+                expected_text);
         return REPRO_USAGE;
     }
 
-    Repro repro = {0};
-    if (!read_input(argv[1], &repro.input, &repro.input_size))
+    Repro repro = {
+        .packetized = packetized,
+        .expected_frames = expected_frames,
+    };
+    if (!parse_toggle("REPRO_IMMEDIATE_OUT", &repro.immediate_out) ||
+        !parse_toggle("REPRO_AFBC", &repro.afbc_output) ||
+        !parse_toggle("REPRO_EXTERNAL_POOL", &repro.external_pool) ||
+        !parse_toggle("REPRO_NO_EOS", &repro.no_eos) ||
+        !read_input(input_path, &repro.input, &repro.input_size))
         return REPRO_USAGE;
+    if (packetized &&
+        !read_packet_sizes(argv[3], repro.input_size, &repro.packet_sizes,
+                           &repro.packet_count)) {
+        cleanup(&repro);
+        return REPRO_USAGE;
+    }
     print_nal_inventory(repro.input, repro.input_size);
 
     int status = configure_decoder(&repro);
@@ -436,7 +676,7 @@ int main(int argc, char **argv)
         return status;
     }
 
-    status = submit_packet(&repro);
+    status = submit_input(&repro);
     if (status == REPRO_CLEAN)
         status = drain_to_eos(&repro);
 
@@ -447,7 +687,7 @@ int main(int argc, char **argv)
                      &repro, expected_frames, status);
         result = status;
     } else if (repro.bad_frames || repro.frames != expected_frames ||
-               !repro.saw_eos) {
+               (!repro.no_eos && !repro.saw_eos)) {
         print_result("stream-error", &repro, expected_frames, status);
         result = REPRO_STREAM_FAILURE;
     } else {

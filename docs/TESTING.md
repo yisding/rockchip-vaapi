@@ -178,6 +178,53 @@ documented contract, and FFmpeg falls back to software.
 The script never edits the manifest. Promoting a vector stays a decision a
 maintainer makes after reading the report.
 
+## Reducing HEVC Main10 reconstruction failures
+
+`tests/minimize-hevc-main10-reconstruction.sh` separates the decoder layers
+before it accepts a result. FFmpeg's software HEVC decoder must decode the
+prefix, the original Annex-B prefix must repeatedly return the exact clean
+frame count through `tests/hevc_mpp_repro`, and the VA path must then expose a
+nonzero MPP `errinfo` or discard flag often enough to meet the configured
+threshold. An RGA conversion refusal is an infrastructure block and never
+counts as a rebuilt-packet failure.
+
+With no input, the reducer generates the long-GOP 240-frame Main10 pattern
+used by the Firefox display gate. A retained browser clip can be supplied
+directly:
+
+```sh
+make rockchip_drv_video.so tests/hevc_mpp_repro
+MAX_PREFIXES=32 ATTEMPTS=3 REQUIRED_FAILURES=2 \
+  tests/minimize-hevc-main10-reconstruction.sh \
+  /path/to/hevc-main10.mp4 /path/to/report-directory
+```
+
+The first qualifying prefix is retained as `minimal-original.h265`. Setting
+`RK_VAAPI_HEVC_DUMP` makes the driver append every complete reconstructed
+access unit to that path and its length to `PATH.sizes`; the reducer uses this
+hook automatically and retains `minimal-reconstructed.h265`, its packet-size
+manifest, original/reconstructed `trace_headers` output, all attempt logs, and
+a provenance report. It repeatedly submits the concatenated rebuilt stream to
+MPP as a whole-stream control, then replays the exact manifest below libva in
+three driver-shaped modes: external-pool AFBC, external-pool linear, and
+internal-pool AFBC. The packetized modes use `base:split_parse=0`, immediate
+output, no synthetic EOS packet, and a nonblocking input timeout.
+
+A clean whole-stream replay proves that the generated syntax is decodable as
+a complete stream; it does not prove that the same access-unit sequence is
+stable under MPP's packetized immediate-output path. If packetized AFBC emits
+bad-frame markers while the packetized linear control remains clean, the
+report uses `result=packetized-afbc-interaction`. Otherwise it conservatively
+uses `result=va-rebuilt-packet-path`. Neither result alone identifies malformed
+HEVC reconstruction. The retained mode logs are the boundary evidence for the
+next MPP/session investigation.
+
+Exit 0 means the expected state was observed: by default, a qualifying
+failure was reduced; with `EXPECTED_RESULT=fixed`, no qualifying failure was
+found. Exit 1 is expectation drift, 2 is invalid input, and 3 means the
+software/direct-MPP/environment controls were not clean enough to attribute a
+VA failure.
+
 ## ROCK 5B hardware gate
 
 On a ROCK 5B with the vendor MPP stack and a VA-capable system FFmpeg:
@@ -386,10 +433,11 @@ successful zero-copy plane-1 texture creation.
 Stock Firefox 153 completes the H.264 and HEVC Main cases. Its recorded Main10
 fallback was caused by the driver exporting `0x36315247` (`GR16`) instead of
 `DRM_FORMAT_GR1616` (`0x32335247`, `GR32`). Mesa therefore rejected an unknown
-fourcc before Panfrost import. `check-firefox-rdd-patch` now hash-pins and
-applies only the RDD sandbox patch; the corrected driver must pass the normal
-Firefox display gate without a browser chroma workaround. Full rebuilt-driver
-and sandboxed playback results are tracked separately.
+fourcc before Panfrost import. With installed `1.0.11+ysp7`, the corrected
+GR1616 plane imports zero-copy in both the RDD process and parent renderer;
+the later Main10 failure is an MPP-marked decode error, not an EGL-format
+failure. `check-firefox-rdd-patch` hash-pins only the RDD sandbox patch. Full
+Main10 playback and sandboxed playback results remain separate gates.
 
 Chromium is not gated. On this stack Chromium 150 cannot initialize a GL
 context at all -- ANGLE reports "Could not create a backing OpenGL context" on

@@ -150,12 +150,18 @@ check-conformance: $(TARGET) test
 check-hevc: $(TARGET) test
 	TEST_SET=hevc FAIL_FAST=1 FFMPEG_TIMEOUT=60 tests/validate.sh
 
-$(HEVC_MPP_REPRO): tests/hevc_mpp_repro.c
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(MPP_CFLAGS) $< \
+$(HEVC_MPP_REPRO): tests/hevc_mpp_repro.c src/frame_layout.c src/frame_layout.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(MPP_CFLAGS) -Isrc \
+		tests/hevc_mpp_repro.c src/frame_layout.c \
 		$(MPP_LIBS) -o $@
 
 check-hevc-tiles-backend: $(HEVC_MPP_REPRO)
 	EXPECTED_RESULT=fixed tests/minimize-hevc-tiles.sh
+
+# Diagnostic reducer, not a release gate: it succeeds when it captures the
+# known whole-stream-clean / VA rebuilt-packet-failing Main10 boundary.
+reduce-hevc-main10-reconstruction: $(TARGET) $(HEVC_MPP_REPRO)
+	tests/minimize-hevc-main10-reconstruction.sh
 
 fetch-hevc-sweep-vectors:
 	MANIFEST="$(HEVC_SWEEP_MANIFEST)" VECTOR_DIR="$(HEVC_SWEEP_DIR)" \
@@ -574,7 +580,8 @@ clean:
 .PHONY: all install package check-package-install fetch-vectors \
 	check check-conformance check-synthetic \
 	check-hevc check-hevc-sanitize \
-	check-hevc-tiles-backend fetch-hevc-sweep-vectors \
+	check-hevc-tiles-backend reduce-hevc-main10-reconstruction \
+	fetch-hevc-sweep-vectors \
 	check-hevc-conformance-sweep fetch-hevc-main10-sweep-vectors \
 	check-hevc-main10-conformance-sweep \
 	check-hevc-main10-narrow-fallback \

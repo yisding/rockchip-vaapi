@@ -503,6 +503,18 @@ preserves already-prefixed slices and adds a start code to bare NALs. HEVC
 shares H.264's token-based output routing because both codecs may reorder
 display output.
 
+For reconstruction triage only, `RK_VAAPI_HEVC_DUMP=/path/stream.h265`
+appends each complete Annex-B access unit immediately before the worker
+submits it to MPP. The driver also appends each unit's byte length to
+`/path/stream.h265.sizes`, preserving packet boundaries for replay. Both files
+are append-only and mode 0600; remove them before a new run. Dump I/O failure
+is logged but cannot change the decode result. The maintained caller is
+`tests/minimize-hevc-main10-reconstruction.sh`, which also establishes clean
+software and direct-MPP controls before using a dump as evidence.
+The companion `--packetized` mode in `tests/hevc_mpp_repro` consumes the
+`.sizes` manifest verbatim, allowing AFBC/linear and external/internal buffer
+group comparisons without changing the reconstructed bytes.
+
 This path is intentionally not advertised yet. Adding a profile requires
 changing `profile_supported`, its surface attributes, and the conformance
 manifest together only after the on-device bit-exact gate passes. VP9 Profile

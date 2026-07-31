@@ -1,11 +1,16 @@
 #include "mpp_dec.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <rockchip/mpp_buffer.h>
 #include <rockchip/mpp_frame.h>
@@ -59,6 +64,74 @@ static VAStatus packet_append(uint8_t **packet, size_t *packet_size,
     memcpy(*packet + *packet_size, data, data_size);
     *packet_size = needed;
     return VA_STATUS_SUCCESS;
+}
+
+static bool write_all(int fd, const void *data, size_t size)
+{
+    const uint8_t *cursor = data;
+
+    while (size > 0) {
+        ssize_t written = write(fd, cursor, size);
+        if (written < 0 && errno == EINTR)
+            continue;
+        if (written <= 0)
+            return false;
+        cursor += (size_t)written;
+        size -= (size_t)written;
+    }
+    return true;
+}
+
+/* Opt-in reducer hook. Each record is one complete Annex-B access unit in
+ * submission order; PATH.sizes records the corresponding byte lengths. The
+ * data-file lock preserves the same append order across frame threads and
+ * processes. The replay parser rejects an incomplete or mismatched pair after
+ * an I/O failure. Dump failures are diagnostic only and never change decode
+ * behavior. */
+static void dump_hevc_packet(const uint8_t *packet, size_t packet_size)
+{
+    const char *path = getenv("RK_VAAPI_HEVC_DUMP");
+    if (!path || !*path || !packet || packet_size == 0)
+        return;
+
+    int data_fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+    if (data_fd < 0) {
+        LOG_WARNING("HEVC dump: cannot open %s: %s", path, strerror(errno));
+        return;
+    }
+    if (flock(data_fd, LOCK_EX) != 0) {
+        LOG_WARNING("HEVC dump: cannot lock %s: %s", path, strerror(errno));
+        close(data_fd);
+        return;
+    }
+
+    bool data_ok = write_all(data_fd, packet, packet_size);
+    size_t path_length = strlen(path);
+    char *sizes_path = NULL;
+    if (path_length <= SIZE_MAX - sizeof(".sizes")) {
+        sizes_path = malloc(path_length + sizeof(".sizes"));
+        if (sizes_path)
+            snprintf(sizes_path, path_length + sizeof(".sizes"),
+                     "%s.sizes", path);
+    }
+
+    bool sizes_ok = false;
+    if (sizes_path) {
+        int sizes_fd = open(sizes_path,
+                            O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+        if (sizes_fd >= 0) {
+            char line[64];
+            int length = snprintf(line, sizeof(line), "%zu\n", packet_size);
+            sizes_ok = length > 0 && (size_t)length < sizeof(line) &&
+                       write_all(sizes_fd, line, (size_t)length);
+            close(sizes_fd);
+        }
+    }
+    if (!data_ok || !sizes_ok)
+        LOG_WARNING("HEVC dump: stream/manifest append failed for %s", path);
+    flock(data_fd, LOCK_UN);
+    close(data_fd);
+    free(sizes_path);
 }
 
 static int h264_profile_idc(VAProfile p) {
@@ -1053,6 +1126,9 @@ static void worker_submit_job(RKContext *c, RKDecodeJob *job)
         complete_surface_ref(job->surface, job->fence, true);
         return;
     }
+
+    if (c->coding == MPP_VIDEO_CodingHEVC)
+        dump_hevc_packet(job->data, job->size);
 
     if (codec_uses_token_routes(c)) {
         bool paired_field = c->coding == MPP_VIDEO_CodingAVC &&
