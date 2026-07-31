@@ -379,20 +379,17 @@ paths and ioctls, but they have to be applied to a Firefox source build. The
 default mode therefore proves the decode and export path, not the sandbox
 story. `FIREFOX_RDD_SANDBOX=enabled` instead removes the bypass and requires
 the live RDD process to be present with Linux seccomp filter mode 2 before the
-hardware evidence can pass. For Main10 it also enables Firefox's `Dmabuf` log
-and requires the measured Panfrost `EGL_BAD_MATCH` followed by the patched
-one-shot swapped-chroma retry.
+hardware evidence can pass. For Main10 the gate also enables Firefox's
+`Dmabuf` log and requires `DRM_FORMAT_GR1616` (`format=0x32335247`) plus
+successful zero-copy plane-1 texture creation.
 
-Stock Firefox 153 completes the H.264 and HEVC Main cases. Its Main10 case
-exports the standards-correct split P010 descriptor and reaches three hardware
-frames before falling back: Firefox creates the luma `R16` EGL image, then
-Panfrost rejects the chroma `GR1616` image with `EGL_BAD_MATCH`. The companion
-P010 patches preserve that first attempt and retry Firefox's existing RG/GR
-alternative once after a real creation failure. `check-firefox-rdd-patch`
-hash-pins all three relevant upstream files per version, applies both the RDD
-and P010 patches, and checks the retry contract. Source application and the
-152.0.6 release-object compile pass; the full package/sandboxed playback result
-is tracked separately.
+Stock Firefox 153 completes the H.264 and HEVC Main cases. Its recorded Main10
+fallback was caused by the driver exporting `0x36315247` (`GR16`) instead of
+`DRM_FORMAT_GR1616` (`0x32335247`, `GR32`). Mesa therefore rejected an unknown
+fourcc before Panfrost import. `check-firefox-rdd-patch` now hash-pins and
+applies only the RDD sandbox patch; the corrected driver must pass the normal
+Firefox display gate without a browser chroma workaround. Full rebuilt-driver
+and sandboxed playback results are tracked separately.
 
 Chromium is not gated. On this stack Chromium 150 cannot initialize a GL
 context at all -- ANGLE reports "Could not create a backing OpenGL context" on

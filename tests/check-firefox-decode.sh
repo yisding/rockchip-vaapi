@@ -239,10 +239,12 @@ PAGE
             FAIL=1
             return
         fi
-        if [ "$FIREFOX_RDD_SANDBOX" = enabled ] &&
-           ! grep -q 'EGL error EGL_BAD_MATCH; retrying swapped chroma format' \
-                   "$WORK/$label.firefox.log"; then
-            echo "FAIL  $label (missing Panfrost swapped-chroma retry audit)"
+        firefox_log=$WORK/$label.firefox.log
+        if grep -q '36315247' "$firefox_log" ||
+           ! grep -q 'format=0x32335247' "$firefox_log" ||
+           ! grep -q 'Plane 1: zero-copy EGLImageTargetTexture2D succeeded' \
+                   "$firefox_log"; then
+            echo "FAIL  $label (invalid or unsuccessful DRM_FORMAT_GR1616 import)"
             FAIL=1
             return
         fi

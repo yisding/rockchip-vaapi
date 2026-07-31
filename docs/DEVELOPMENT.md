@@ -642,13 +642,13 @@ for Firefox 152.0.6 and 153.0 are pinned and validated under
 those nodes exist and allowlist the four MPP/RGA requests measured on the
 audited stack.
 
-Firefox/Panfrost has a separate 10-bit consumer boundary. The driver exports
-the standards-correct split P010 descriptor (`R16` luma and `GR1616` chroma),
-but Panfrost can enumerate linear `GR1616` and reject its actual EGL image
-creation with `EGL_BAD_MATCH`. The version-pinned companion patches preserve
-that first attempt and, only after the real failure, retry Firefox's existing
-RG/GR alternate-format path once. This belongs in Firefox because changing the
-VA descriptor to misreport its plane format would break the producer contract.
+The split-P010 descriptor must use DRM fourcc values for both layer fields.
+The former driver literal `0x36315247` was `GR16`, not
+`DRM_FORMAT_GR1616` (`0x32335247`, `GR32`), so Mesa rejected it as an unknown
+format before reaching Panfrost. Export code and tests use `DRM_FORMAT_*`
+macros now, and the Firefox display gate requires the correct chroma fourcc and
+successful zero-copy plane-1 texture creation. No Firefox chroma retry is part
+of the fix.
 
 ---
 

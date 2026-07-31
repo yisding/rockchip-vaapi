@@ -592,18 +592,19 @@ the 64-pixel/16-row-aligned provisional P010 layout used by VLC's converter
 probe. It still refuses imported P010, compressed backing, and stale or
 unaligned provisional layouts. Stock VLC hardware-decodes and presents
 H.264 High, HEVC Main, and HEVC Main10 with 118, 120, and 120 external frames.
-Firefox 153 hardware-decodes H.264 and HEVC Main, while stock Firefox Main10
-reaches three hardware frames and then falls back because Panfrost rejects
-Firefox's plane-1 `DRM_FORMAT_GR1616` EGL image with `EGL_BAD_MATCH`. The
-driver's standards-correct P010 split descriptor exports cleanly; this is a
-measured Firefox/Panfrost consumer boundary, not a VA driver failure.
+Firefox 153 hardware-decodes H.264 and HEVC Main, while the recorded stock
+Firefox Main10 run reaches three hardware frames and then falls back at its
+plane-1 EGL import. Source inspection later identified the producer defect:
+the driver exported `0x36315247` (`GR16`) instead of
+`DRM_FORMAT_GR1616` (`0x32335247`, `GR32`), so Mesa correctly rejected an
+unknown fourcc before reaching Panfrost.
 
 **Gate:** ✅ HEVC Main bit-exact vs software on conformance vectors (8/8 pinned;
 144/163 complete exact-PPA-package sweep, 17 profile skips, two size refusals,
 zero backend/driver failures) and advertised by default;
 ✅ HEVC Main10 / VP9 P2 bit-exact after P010 repacking and measured above
 260 fps at 1080p; ✅ VLC Main10 decode/presentation; Firefox/Panfrost Main10
-consumer patch validation and physical HDR presentation remain open.
+corrected-export display validation and physical HDR presentation remain open.
 
 ### Phase 3 — Production hardening & the app matrix  (~2–3 wk)
 
@@ -740,16 +741,14 @@ piece was the dma-heap broker path. Patch application is checked against exact
 upstream source hashes. Building/installing the Firefox package and validating
 RDD playback in a real display session remain open.
 
-**Progress (2026-07-29, Firefox/Panfrost P010 source fix):** Firefox's
-existing DMA-BUF code already swaps GR/RG chroma formats when modifier
-enumeration reports the advertised format unsupported, but Panfrost enumerates
-linear GR1616 and rejects only the real `eglCreateImage` call. Version-pinned
-152.0.6 and 153.0 patches preserve GR1616 as the standards-correct first
-attempt, consume the first EGL error, and retry the same existing RG/GR
-alternative once. Both patches apply to exact official source preimages under
-the hash-pinned contract gate. The 152.0.6 change also compiles in its release
-unified object; full package and sandboxed playback validation are still
-pending and are not inferred from source application.
+**Progress (2026-07-30, P010 exporter correction):** The split-P010 exporter
+now uses `DRM_FORMAT_*` macros rather than hand-written fourcc literals. This
+changes chroma from the invalid `0x36315247` to
+`DRM_FORMAT_GR1616` (`0x32335247`) and corrects the test that had preserved the
+bad value. The speculative Firefox GR/RG retry patches and their contract gate
+were retired; the display gate now requires the correct exported fourcc and a
+successful plane-1 zero-copy import. Rebuilt-driver hardware validation in a
+real display session remains pending.
 
 **Progress (2026-07-27, structured logging):** The opt-in driver log now emits
 single-record structured text or newline-delimited JSON with realtime
@@ -1004,10 +1003,10 @@ concurrent with decode contexts are race-free.
   surface's own DMA-BUF, which is what unblocked VLC; completed linear P010
   and aligned provisional converter probes are accepted, while imported,
   still-compressed, stale-layout, imported-RGB, and encoder-input surfaces
-  fail closed. Stock Firefox Main10 is measured to fall back at Panfrost's
-  GR1616 EGL import, and exact-source 152.0.6/153.0 retry patches pass the
-  contract gate; the 152.0.6 release object compiles.
-  Open: the patched Firefox package and sandboxed playback gate are not yet
+  fail closed. The recorded stock Firefox Main10 fallback is now traced to the
+  driver's invalid `GR16` literal rather than a Panfrost GR1616 failure; the
+  exporter and regression gate use the correct DRM fourcc.
+  Open: rebuilt-driver and sandboxed Firefox playback gates are not yet
   complete; Chromium cannot
   initialize a GL context on this Mali-G610/Panfrost stack, so no Chromium
   claim is made; mpv 10-bit/HDR display presentation and fresh-image hardware

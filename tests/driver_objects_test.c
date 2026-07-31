@@ -874,7 +874,7 @@ static void test_surfaces(struct VADriverVTable *v, VADriverContextP ctx,
         descriptor.num_objects != 1 || descriptor.objects[0].fd < 0 ||
         descriptor.objects[0].size < 16u * 16u * 3u ||
         descriptor.num_layers != 1 ||
-        descriptor.layers[0].drm_format != VA_FOURCC_P010 ||
+        descriptor.layers[0].drm_format != DRM_FORMAT_P010 ||
         descriptor.layers[0].num_planes != 2 ||
         descriptor.layers[0].pitch[0] != 32 ||
         descriptor.layers[0].pitch[1] != 32 ||
@@ -894,8 +894,8 @@ static void test_surfaces(struct VADriverVTable *v, VADriverContextP ctx,
                  VA_STATUS_SUCCESS);
     if (descriptor.fourcc != VA_FOURCC_P010 ||
         descriptor.num_layers != 2 ||
-        descriptor.layers[0].drm_format != 0x20363152 ||
-        descriptor.layers[1].drm_format != 0x36315247 ||
+        descriptor.layers[0].drm_format != DRM_FORMAT_R16 ||
+        descriptor.layers[1].drm_format != DRM_FORMAT_GR1616 ||
         descriptor.layers[0].pitch[0] != 32 ||
         descriptor.layers[1].pitch[0] != 32 ||
         descriptor.layers[1].offset[0] != 16u * 16u * 2u) {

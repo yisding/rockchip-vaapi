@@ -1,3 +1,14 @@
+rockchip-vaapi (1.0.11+ysp7-0ubuntu1~rk1) resolute; urgency=medium
+
+  * Export split P010 chroma as DRM_FORMAT_GR1616 instead of the invalid
+    VA-style GR16 literal that Mesa correctly rejected with EGL_BAD_MATCH.
+  * Replace DRM format and modifier literals with DRM_FORMAT_* macros and make
+    the object and Firefox display gates enforce the corrected fourcc.
+  * Retire the speculative Firefox swapped-chroma workaround and preserve only
+    the independently required RDD sandbox patches.
+
+ -- Yi Ding <yi.s.ding@gmail.com>  Thu, 30 Jul 2026 21:58:44 -0700
+
 rockchip-vaapi (1.0.11+ysp6-0ubuntu1~rk1) resolute; urgency=medium
 
   * Complete the remaining Phase 2/4 roadmap gates: 1080p HEVC Main10 and VP9

@@ -1,13 +1,13 @@
-# Firefox RDD sandbox and Panfrost P010 patches
+# Firefox RDD sandbox patches
 
 Firefox runs Linux VA-API decode in the sandboxed RDD process. Its RDD broker
 permits `/dev/dri`, but not the Rockchip MPP, RGA, or dma-heap paths. Its
 seccomp policy permits DRM and DMA-BUF ioctl families, but not the MPP request
 or the RGA requests used by this driver.
 
-`patches/` holds two patches per pinned Firefox release; the current milestone
-is 153.0 and 152.0.6 is kept for older trees. Each pair is intended for an
-arm64 Firefox source package. The RDD patch keeps the sandbox enabled. Broker
+`patches/` holds one RDD patch per pinned Firefox release; the current
+milestone is 153.0 and 152.0.6 is kept for older trees. Each patch is intended
+for an arm64 Firefox source package and keeps the sandbox enabled. Broker
 permissions are added only when the corresponding device node or directory
 exists, and seccomp permits only the requests observed on the validated ROCK
 5B stack:
@@ -23,18 +23,17 @@ Firefox already permits the DMA-BUF `'b'` ioctl family. On arm64, its existing
 Tegra policy also permits the `'H'` family used by dma-heap allocation, but the
 broker still needs access to `/dev/dma_heap`.
 
-The second patch closes an independent P010 presentation failure. Firefox
-already retries GR/RG chroma formats when EGL modifier enumeration reports the
-first format as unsupported. Panfrost advertises linear `GR1616` but rejects
-the actual chroma-plane `eglCreateImage` call with `EGL_BAD_MATCH`; Firefox
-then abandons HEVC Main10 VA-API after the first frame. The patch preserves the
-standards-correct `GR1616` first attempt and retries Firefox's existing swapped
-format once only after real image creation fails.
+The former P010 chroma-retry patches were based on an exporter misdiagnosis and
+have been removed. The driver emitted `0x36315247` (`GR16`) in a DRM-format
+field, while `DRM_FORMAT_GR1616` is `0x32335247` (`GR32`). Mesa correctly
+reported the unknown fourcc as `EGL_BAD_MATCH`; the request never reached
+Panfrost. The fix belongs in this driver, and stock Firefox should import the
+correct split-P010 descriptor without a swapped-format retry.
 
 ## Version contract
 
-Each patch pair is pinned to an upstream Firefox release tag by the SHA-256 of
-all three preimage files. A tree that does not match is rejected instead of
+Each patch is pinned to an upstream Firefox release tag by the SHA-256 of its
+two preimage files. A tree that does not match is rejected instead of
 being force-patched.
 
 `FIREFOX_153_0_RELEASE`:
@@ -42,7 +41,6 @@ being force-patched.
 ```text
 b1dae2499ba9589cc41454cf7f73c332c82ed9d6c13710c0448fdc9c7507e1e9  security/sandbox/linux/SandboxFilter.cpp
 3eefffdd817ddebea6d029e5403a1f1d9536c7b49ef86e5c553e1ab77e6bddcb  security/sandbox/linux/broker/SandboxBrokerPolicyFactory.cpp
-2c44aa0a1597ec57cd597055d78b5aaecb645b3af33169fb6439fb37b04434df  widget/gtk/DMABufSurface.cpp
 ```
 
 `FIREFOX_152_0_6_RELEASE`:
@@ -50,7 +48,6 @@ b1dae2499ba9589cc41454cf7f73c332c82ed9d6c13710c0448fdc9c7507e1e9  security/sandb
 ```text
 7a9c7b4e56b5ed0401998f42242bd576bff5461e85df271d42f73844a2bf9f47  security/sandbox/linux/SandboxFilter.cpp
 0bc000706b11d7dcf54c71f67bd1cb32d2214e939fbb67634e0bd0036b805af0  security/sandbox/linux/broker/SandboxBrokerPolicyFactory.cpp
-e4ea08b2da7c1e21df520620f873eb1f3db180d71dee26872e28eb7456ad8777  widget/gtk/DMABufSurface.cpp
 ```
 
 Validate an unpacked source tree before adding the patch to the distribution
@@ -61,10 +58,10 @@ tests/check-firefox-rdd-patch.sh /path/to/firefox-153.0
 FIREFOX_VERSION=152.0.6 tests/check-firefox-rdd-patch.sh /path/to/firefox-152.0.6
 ```
 
-For a Debian-format Firefox source package, copy both version-matched patches
-into `debian/patches/`, append their filenames to `debian/patches/series`, add
-a local version suffix, and rebuild the binary package. Do not install these
-patches from the `rockchip-vaapi` binary package: changing another package's
+For a Debian-format Firefox source package, copy the version-matched patch into
+`debian/patches/`, append its filename to `debian/patches/series`, add a local
+version suffix, and rebuild the binary package. Do not install this patch from
+the `rockchip-vaapi` binary package: changing another package's
 source or binary files would be unowned and would be lost on Firefox upgrades.
 
 ## Revalidation
@@ -76,7 +73,7 @@ the rebuilt browser in a real Wayland or X11 session and confirm:
 1. `MOZ_DISABLE_RDD_SANDBOX` is unset.
 2. `about:support` reports hardware video decoding.
 3. HEVC Main10 remains on VA-API after the first frame and the DMA-BUF log
-   records the one-shot swapped-chroma retry after Panfrost's `EGL_BAD_MATCH`.
+   records plane 1 as `format=0x32335247` with zero-copy texture creation.
 4. the driver log shows MPP decode and P010 surface export.
 5. the RDD process remains sandboxed.
 
@@ -92,7 +89,7 @@ from the 152.0.6 measurement and has not been remeasured against a patched
 153.0 build, because that needs a Firefox source build. `make
 check-firefox-decode` exercises the stock decode path with the sandbox
 disabled by default. `FIREFOX_RDD_SANDBOX=enabled` removes that bypass and
-requires the live RDD process to report Linux seccomp filter mode 2. Stock
-Firefox 153.0 proves the H.264/HEVC Main paths but falls back after the first
-Main10 frame at the Panfrost `GR1616` import boundary; completing both the
-sandbox and P010 claims requires the rebuilt package in that enabled mode.
+requires the live RDD process to report Linux seccomp filter mode 2. The prior
+stock Firefox Main10 fallback was caused by the driver's invalid split-P010
+fourcc. Rebuilding the driver and rerunning the sandbox-enabled display gate
+remain required to validate the corrected end-to-end path.

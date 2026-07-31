@@ -217,7 +217,7 @@ VAStatus rk_ExportSurfaceHandle(VADriverContextP context, VASurfaceID id,
     desc->num_objects = 1;
     desc->objects[0].fd = export_fd;
     desc->objects[0].size = (uint32_t)object_size;
-    desc->objects[0].drm_format_modifier = 0; /* DRM_FORMAT_MOD_LINEAR */
+    desc->objects[0].drm_format_modifier = DRM_FORMAT_MOD_LINEAR;
 
     if (imported_rgb) {
         desc->fourcc = surface_fourcc;
@@ -238,7 +238,7 @@ VAStatus rk_ExportSurfaceHandle(VADriverContextP context, VASurfaceID id,
     if (!is_10bit && composed) {
         desc->fourcc = VA_FOURCC_NV12;
         desc->num_layers = 1;
-        desc->layers[0].drm_format = 0x3231564e; /* DRM_FORMAT_NV12 */
+        desc->layers[0].drm_format = DRM_FORMAT_NV12;
         desc->layers[0].num_planes = 2;
         desc->layers[0].object_index[0] = 0;
         desc->layers[0].offset[0] = 0;
@@ -252,7 +252,7 @@ VAStatus rk_ExportSurfaceHandle(VADriverContextP context, VASurfaceID id,
     if (is_10bit && composed) {
         desc->fourcc = VA_FOURCC_P010;
         desc->num_layers = 1;
-        desc->layers[0].drm_format = 0x30313050; /* DRM_FORMAT_P010 */
+        desc->layers[0].drm_format = DRM_FORMAT_P010;
         desc->layers[0].num_planes = 2;
         desc->layers[0].object_index[0] = 0;
         desc->layers[0].offset[0] = 0;
@@ -269,12 +269,12 @@ VAStatus rk_ExportSurfaceHandle(VADriverContextP context, VASurfaceID id,
     if (is_10bit) {
         /* P010 as R16 luma and GR1616 interleaved chroma layers. */
         desc->fourcc = VA_FOURCC_P010;
-        desc->layers[0].drm_format = 0x20363152; /* DRM_FORMAT_R16 */
+        desc->layers[0].drm_format = DRM_FORMAT_R16;
         desc->layers[0].num_planes = 1;
         desc->layers[0].object_index[0] = 0;
         desc->layers[0].offset[0] = 0;
         desc->layers[0].pitch[0] = (uint32_t)(hstride * 2);
-        desc->layers[1].drm_format = 0x36315247; /* DRM_FORMAT_GR1616 */
+        desc->layers[1].drm_format = DRM_FORMAT_GR1616;
         desc->layers[1].num_planes = 1;
         desc->layers[1].object_index[0] = 0;
         desc->layers[1].offset[0] = (uint32_t)(hstride * vstride * 2);
@@ -282,12 +282,12 @@ VAStatus rk_ExportSurfaceHandle(VADriverContextP context, VASurfaceID id,
     } else {
         /* NV12 as R8 luma and GR88 interleaved chroma layers. */
         desc->fourcc = VA_FOURCC_NV12;
-        desc->layers[0].drm_format = 0x20203852; /* DRM_FORMAT_R8 */
+        desc->layers[0].drm_format = DRM_FORMAT_R8;
         desc->layers[0].num_planes = 1;
         desc->layers[0].object_index[0] = 0;
         desc->layers[0].offset[0] = 0;
         desc->layers[0].pitch[0] = (uint32_t)hstride;
-        desc->layers[1].drm_format = 0x38385247; /* DRM_FORMAT_GR88 */
+        desc->layers[1].drm_format = DRM_FORMAT_GR88;
         desc->layers[1].num_planes = 1;
         desc->layers[1].object_index[0] = 0;
         desc->layers[1].offset[0] = (uint32_t)(hstride * vstride);
