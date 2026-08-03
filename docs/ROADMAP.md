@@ -1058,7 +1058,8 @@ concurrent with decode contexts are race-free.
   result; Chromium 151 now has accelerated Panfrost GL but its distro arm64
   binary lacks the libva backend and reports no hardware profiles; physical
   HDR-monitor presentation and fresh-image hardware decode remain untested.
-  Installed `1.0.11+ysp7` carries the corrected exporter.
+  The corrected exporter first shipped in `1.0.11+ysp7`; the host now has
+  `1.0.11+ysp9` installed.
 - Phase 4: complete for the deliberately advertised experimental scope;
   H.264 Main/High and HEVC Main
   encode pass FFmpeg and GStreamer CQP/CBR/VBR interoperability, parser, and
@@ -1079,16 +1080,37 @@ concurrent with decode contexts are race-free.
   growth. H.264 WebRTC-compatible RTP packetization is green. Its two missing
   GStreamer test packages were supplied from an extracted arm64 package root
   rather than installed system-wide.
-- Phase 5: in progress; the `1.0.11+ysp8` driver/config binaries pass build,
-  Lintian, and the isolated package lifecycle, are installed on the host, and
-  match the payload rebuilt from clean source commit `2b08f38`. The ysp9 RC
-  candidate adds explicit canceled-conversion accounting and a durable
+- Phase 5: in progress; `1.0.11+ysp9` is installed on the host and its
+  driver/config binaries pass build, Lintian, and the isolated package
+  lifecycle. It adds explicit canceled-conversion accounting and a durable
   repeated small-geometry RGA exactness gate. Its complete normal and
   ASan/UBSan hardware matrices are green with the former quarantined VP9
   vector required normally; the RGA gate is exact across 1,440 normal and 240
   sanitized frames, and all three codec parsers pass 20,000 fuzz executions.
-  A genuinely fresh-image hardware run, final Firefox sandbox runtime proof,
-  tag, GitHub Release, and PPA publication remain.
+  The installed packaged payload itself — not just a local build — then passed
+  the pinned conformance gate and a second 1,440-frame RGA small-geometry run
+  with a clean kernel journal.
+  Rebuilding ysp9 from its own clean commit did **not** reproduce its hash, and
+  the cause was in the packaging rather than the driver: the Debian build links
+  with `-flto`, LTO re-emits debug info for its own translation units at link
+  time, and the link rule passed `LDFLAGS` but not the `CFLAGS` that carry
+  dpkg's `-f*-prefix-map`. Two units recorded the absolute build directory, so
+  the GNU build-id and its derived `.gnu_debuglink` moved with the directory
+  while `.text`, `.rodata`, `.data` and every relocation section stayed
+  identical. Same-directory rebuilds still matched, so the earlier whole-file
+  provenance claims were true only by coincidence of where they were rebuilt.
+  `1.0.11+ysp10` passes `CFLAGS` to the link and adds
+  `make check-package-provenance`, which rebuilds the packaged driver from a
+  clean export of a commit at two deliberately different paths, requires one
+  payload hash, requires that neither the binary nor its debug info still
+  names its build directory, and compares the result against the installed
+  driver. ysp10 builds, passes Lintian and the isolated lifecycle, and three
+  independent build directories agree on SHA-256
+  `4d5d3ecaff81732cf7265044eb382690edcb21933ff615f4d9b9888d38584d5a`; its
+  generated code is byte-identical to ysp9.
+  Installing ysp10 on the host, a genuinely fresh-image hardware run, the
+  final Firefox sandbox runtime proof, tag, GitHub Release, and PPA
+  publication remain.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement
 map and driver-review finding as the decision/evidence record.

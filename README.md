@@ -88,18 +88,22 @@ Published MPP `3381fd2c` and FFmpeg `33a651a55b` package root, completing
   applications fall back instead of receiving an unsafe format or decode path.
 - Packaging/build hygiene: `DESTDIR`/`PREFIX`/multiarch-aware Makefile,
   no `sudo` in `make install`, `make check` validation gate. Version
-  `1.0.11+ysp8` is installed on the ROCK 5B; its payload is reproduced exactly
-  by clean source commit `2b08f38`. The current source passes the complete
-  normal and ASan/UBSan hardware gates on the audited production
-  `6.18.41-ysp-rockchip64` kernel.
+  `1.0.11+ysp9` is installed on the ROCK 5B and passes the pinned conformance
+  and repeated RGA small-geometry gates as the installed packaged payload. The
+  current source passes the complete normal and ASan/UBSan hardware gates on
+  the audited production `6.18.41-ysp-rockchip64` kernel.
   Packaging MPP `3381fd2c` plus an FFmpeg line containing upstream fix
   `265d39e551` is complete in the YSP PPA. An isolated extraction of the exact
   Published arm64 packages passes the complete 163-vector sweep and full
   shipping-profile matrix normally and with the complete ASan/UBSan driver.
-  The `1.0.11+ysp8` driver/config packages build and pass Lintian plus the
-  isolated clean install/upgrade/purge lifecycle. The ysp9 candidate adds
-  explicit terminal-conversion accounting and a repeated checksum-exact RGA
-  small-geometry gate. A genuinely fresh-image boot and hardware-decode run
+  The driver/config packages build and pass Lintian plus the isolated clean
+  install/upgrade/purge lifecycle at both `1.0.11+ysp9` and `1.0.11+ysp10`.
+  The ysp10 candidate makes the packaged driver byte-identical across build
+  directories — the Debian `-flto` link had been recording its own build
+  directory in LTO's debug info, which moved the GNU build-id and so the
+  payload hash of otherwise identical source — and adds
+  `make check-package-provenance` to gate that. Its generated code is
+  byte-identical to ysp9. A genuinely fresh-image boot and hardware-decode run
   remains separate qualification.
 
 ---

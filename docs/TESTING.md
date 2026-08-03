@@ -17,6 +17,7 @@ make test-fuzz
 make lint
 make check-firefox-rdd-patch
 make check-package-install
+make check-package-provenance
 shellcheck tests/*.sh
 python3 -c "import ast,pathlib; ast.parse(pathlib.Path('tests/webrtc_peer.py').read_text())"
 ```
@@ -56,6 +57,28 @@ checks the declared package dependencies and tests package lifecycle behavior,
 not dependency installation or hardware decode. Install `dpkg-dev`,
 `debhelper`, `lintian`, `bubblewrap`, `fakeroot`, and the normal build
 dependencies before running it.
+
+`make check-package-provenance` answers a different question: is the driver a
+package ships the driver this source tree produces? It rebuilds the packaged
+driver from a clean `git archive` export of a commit at two deliberately
+different paths, requires both to produce one payload SHA-256, requires that
+neither the binary nor its detached debug info still contains its own build
+directory, and then requires the reference driver to carry that same hash.
+`REFERENCE` defaults to the installed driver; set it to another file to check a
+different one, or to empty or `none` to only prove reproducibility. `COMMIT`
+selects the commit and `ALLOW_DIRTY=1` certifies the working tree instead,
+copying only tracked and newly added packaged files.
+
+Comparing whole-file hashes is what makes this gate worth running separately.
+Two builds of identical source used to differ, and the difference was 60 bytes:
+the 20-byte GNU build-id and the `.gnu_debuglink` that names the dbgsym file by
+that build-id. Every code, data, and relocation section already matched. The
+Debian build links with `-flto`, so the link re-emits debug info for LTO's own
+`<artificial>` translation units, and those take `DW_AT_comp_dir` from the link
+command line — which passed `LDFLAGS` but not the `CFLAGS` holding dpkg's
+`-ffile-prefix-map` and `-fdebug-prefix-map`. A rebuild in the original
+directory still matched, so nothing looked wrong until a rebuild happened
+somewhere else. The two differing paths are the point of the gate.
 
 `make test-tsan` stress-tests concurrent object insertion, lookup, removal,
 and refcounted destruction under ThreadSanitizer. The full two-decoder TSan
@@ -782,7 +805,9 @@ Lintian and the isolated clean install, upgrade, config purge, reinstall, and
 full-purge lifecycle. The rebuilt driver and installed driver both have
 SHA-256 `7fd9a7ba637f06e9bbbda90680adb8ada4d32ca831515a133cd637d31b59a732`,
 closing installed-payload source provenance. Host installation is complete;
-fresh-image qualification remains separate.
+fresh-image qualification remains separate. That match was weaker than it
+looked: it depended on the rebuild happening in the same directory as the
+original build. See the ysp10 record below.
 
 Later on 2026-08-02, the ysp9 RC candidate passed the complete normal and
 ASan/UBSan hardware matrices on kernel `6.18.41-ysp-rockchip64` with kernel
@@ -799,6 +824,53 @@ early-stop stress loop exercised the new terminal branch once and kept
 `assigned + canceled == converted` throughout. Finally, the committed H.264,
 HEVC, and VP9 fuzz seeds replayed cleanly and each parser completed 20,000
 ASan/UBSan libFuzzer executions.
+
+`1.0.11+ysp9-0ubuntu1~rk1` was then installed on the board, and its driver and
+config packages passed Lintian and the isolated clean install, upgrade, config
+purge, reinstall, and full-purge lifecycle. Both gates were re-run against the
+installed packaged payload itself rather than a local build, with
+`DRIVER_DIR=/usr/lib/aarch64-linux-gnu/dri`: the pinned conformance gate was
+bit-exact on all 17 vectors, and the repeated RGA small-geometry gate completed
+28 small runs and two 1280x720 controls for 1,440 exact P010 frames with a
+clean scoped kernel journal. Running that gate against an installed driver is
+what commit `43c3c35` enabled, since a packaged payload is mode 0644 rather
+than executable.
+
+On 2026-08-02, rebuilding `1.0.11+ysp9` from its own clean commit `43c3c35`
+produced SHA-256
+`3e62ac475ef3973ee5d6f5b951a418a3bbbde4b5adacaa488ea3b29cbc9de971`, which is
+not the installed
+`01b624a7985ffbe9167eaf051aca363e6d914888901fdd414438a8a6542ddd69`. The driver
+was not the difference. Exactly 60 bytes differed, in two ranges: the 20-byte
+GNU build-id at `0x280` and the `.gnu_debuglink` at `0x30030`, which names the
+matching dbgsym file by that build-id. `.text`, `.rodata`, `.data`,
+`.data.rel.ro`, `.eh_frame`, `.dynsym`, `.dynstr`, `.plt`, `.got`, and both
+relocation sections were byte-identical, and the section header table matched.
+
+The cause was in the packaging. Debian's `LDFLAGS` carry `-flto=auto`, so the
+link performs LTO and re-emits debug info for its own `<artificial>`
+translation units. Those take `DW_AT_comp_dir` from the link command line, and
+the Makefile's link rule passed `LDFLAGS` but not the `CFLAGS` holding
+`-ffile-prefix-map` and `-fdebug-prefix-map`. Two of the driver's compilation
+units therefore recorded the absolute build directory in `.debug_line_str`; the
+build-id hashes over that debug info, so it moved with the directory.
+Rebuilding in the original directory reproduced the hash exactly, which is why
+the ysp8 provenance check had passed.
+
+`1.0.11+ysp10-0ubuntu1~rk1` passes `CFLAGS` to the link. Every `DW_AT_comp_dir`
+is now the mapped `/usr/src/rockchip-vaapi-<version>`, no build path survives
+in the binary or its decompressed debug info, and three independent build
+directories — the repository itself and the gate's two scratch paths, which
+differ in both content and length — agree on SHA-256
+`4d5d3ecaff81732cf7265044eb382690edcb21933ff615f4d9b9888d38584d5a`. Its
+`.text`, `.rodata`, `.data`, relocation, and symbol sections are byte-identical
+to the installed ysp9 driver, so this changes packaging metadata and not
+generated code; the complete normal hardware gate was re-run on the ysp10
+build anyway and every vector, the H.264 reference/B-frame and 4K matrix, the
+five VP9 determinism runs, and the VP8 software fallback are green. ysp10 also
+passes Lintian and the isolated package lifecycle.
+`make check-package-provenance` now gates this. Installing ysp10 on the host,
+and fresh-image qualification, remain separate.
 
 On 2026-07-21, this board was booted into fixed kernel build `#3`, identified
 by kernel-notes SHA-256
