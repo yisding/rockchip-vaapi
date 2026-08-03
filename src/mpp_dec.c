@@ -573,8 +573,15 @@ static bool assign_mpp_frame(MppFrame frame, RKContext *c)
 
     if (usable) {
         pthread_mutex_lock(&s->lock);
-        if (s->fence != route->fence) {
+        uint64_t current_fence = s->fence;
+        if (current_fence != route->fence) {
             pthread_mutex_unlock(&s->lock);
+            LOG("assign_mpp_frame: output canceled surface=0x%x "
+                "route_fence=%llu current_fence=%llu converted_10bit=%d "
+                "external=%d",
+                (unsigned)sid, (unsigned long long)route->fence,
+                (unsigned long long)current_fence, converted_10bit,
+                external_ready);
             if (backing)
                 mpp_buffer_put(backing);
             if (pool)

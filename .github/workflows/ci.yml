@@ -10,12 +10,6 @@ on:
         required: false
         type: boolean
         default: false
-      run_risky_vectors:
-        description: Confirm the VP9 kernel fix is booted for hidden-reference validation
-        required: false
-        type: boolean
-        default: false
-
 permissions:
   contents: read
 
@@ -53,6 +47,7 @@ jobs:
             tests/check-firefox-decode.sh \
             tests/check-firefox-rdd-patch.sh \
             tests/check-mpv-display.sh tests/check-soak.sh \
+            tests/check-rga-small-geometry-repeat.sh \
             tests/check-vlc-display.sh \
             tests/check-zero-copy.sh \
             tests/fetch-vectors.sh tests/minimize-hevc-tiles.sh \
@@ -143,10 +138,8 @@ jobs:
       - name: Full conformance gate
         env:
           FFMPEG: /usr/bin/ffmpeg
-          RISKY_VECTORS: ${{ inputs.run_risky_vectors && 'run' || 'skip' }}
         run: make check-conformance
       - name: Full sanitizer gate
         env:
           FFMPEG: /usr/bin/ffmpeg
-          RISKY_VECTORS: ${{ inputs.run_risky_vectors && 'run' || 'skip' }}
         run: make check-sanitize

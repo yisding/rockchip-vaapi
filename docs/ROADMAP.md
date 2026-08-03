@@ -256,7 +256,7 @@ early-ready VP9 hidden-frame race. Focused follow-up passed the field vector
 The 1,440-frame normal and ASan/UBSan zero-copy gates remain bit-exact with
 matched worker start/stop and pool create/destroy counts, while the on-board
 lifecycle/fence gate is clean normally and under ASan/UBSan and TSan. After
-the worker slice, the complete risky-enabled Phase 0 normal and ASan/UBSan
+the worker slice, the complete Phase 0 normal and ASan/UBSan
 gates are green again. The subsequent module-separation and active-concurrency
 slices are described below.
 
@@ -288,7 +288,7 @@ frames with every observed external-pool and worker creation matched by
 teardown. Post-warmup RSS started at 191,288 KiB and ended at 203,512 KiB,
 with a 47,844 KiB span; the fd head/tail medians were both 55 with a bounded
 24-fd transient span. No fallback, stale route, submission, ownership, or
-unsafe-layout marker appeared. After the soak, the complete risky-enabled
+unsafe-layout marker appeared. After the soak, the complete
 Phase 0 gate was rerun on the final tree: all pinned vectors, supplemental
 H.264 matrix, 4K case, five VP9 determinism runs, and software fallback passed
 both normally and with the complete ASan/UBSan driver.
@@ -1080,9 +1080,15 @@ concurrent with decode contexts are race-free.
   GStreamer test packages were supplied from an extracted arm64 package root
   rather than installed system-wide.
 - Phase 5: in progress; the `1.0.11+ysp8` driver/config binaries pass build,
-  Lintian, and the isolated package lifecycle, and `1.0.11+ysp7` is installed
-  on the host. A genuinely fresh-image hardware run, final Firefox sandbox
-  runtime proof, tag, GitHub Release, and PPA publication remain.
+  Lintian, and the isolated package lifecycle, are installed on the host, and
+  match the payload rebuilt from clean source commit `2b08f38`. The ysp9 RC
+  candidate adds explicit canceled-conversion accounting and a durable
+  repeated small-geometry RGA exactness gate. Its complete normal and
+  ASan/UBSan hardware matrices are green with the former quarantined VP9
+  vector required normally; the RGA gate is exact across 1,440 normal and 240
+  sanitized frames, and all three codec parsers pass 20,000 fuzz executions.
+  A genuinely fresh-image hardware run, final Firefox sandbox runtime proof,
+  tag, GitHub Release, and PPA publication remain.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement
 map and driver-review finding as the decision/evidence record.

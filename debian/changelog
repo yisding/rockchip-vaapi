@@ -1,3 +1,17 @@
+rockchip-vaapi (1.0.11+ysp9-0ubuntu1~rk1) resolute; urgency=medium
+
+  * Log completed decode outputs that are intentionally canceled after a
+    surface fence advances, including whether the discarded work was a 10-bit
+    AFBC-to-P010 conversion.
+  * Make the 10-bit throughput gate account for assigned plus canceled
+    conversions while still requiring every requested visible frame.
+  * Add a repeated, checksum-exact 320x240/416x240 RGA small-geometry gate with
+    a 1280x720 control, concurrent workers, and a scoped kernel-journal scan.
+  * Retire the obsolete VP9 kernel-crash fingerprint interlock and run the
+    show-existing-frame vector as an ordinary required conformance case.
+
+ -- Yi Ding <yi.s.ding@gmail.com>  Sun, 02 Aug 2026 17:09:25 -0700
+
 rockchip-vaapi (1.0.11+ysp8-0ubuntu1~rk1) resolute; urgency=medium
 
   * Expand the Firefox, VLC, and mpv display gates to H.264 High, HEVC Main,

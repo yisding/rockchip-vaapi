@@ -97,6 +97,10 @@ run_case()
     assigned=$(grep -c \
         'assign_mpp_frame: surface=.*converted_10bit=1.*external=1' \
         "$driver_log" || true)
+    canceled=$(grep -c \
+        'assign_mpp_frame: output canceled.*converted_10bit=1.*external=1' \
+        "$driver_log" || true)
+    accounted=$((assigned + canceled))
     output_frames=$(sed -n 's/^frame=//p' "$progress" | tail -1)
     case $conversion_policy in
         exact)
@@ -117,7 +121,8 @@ run_case()
             ;;
     esac
     if [ "$output_frames" != "$FRAMES" ] ||
-       [ "$assigned" -ne "$conversions" ] ||
+       [ "$assigned" -lt "$FRAMES" ] ||
+       [ "$accounted" -ne "$conversions" ] ||
        [ "$conversion_count_ok" != true ] ||
        ! grep -q "10-bit output mode=AFBC_V2 profile=$expected_profile" \
             "$driver_log" ||
@@ -125,11 +130,11 @@ run_case()
             'BEGIN { exit !(actual + 0 >= minimum + 0) }' ||
        grep -Eq 'external buffer mismatch|decode failed|afbc=0|RGA .*failed' \
             "$driver_log"; then
-        echo "FAIL  $label throughput frames=$output_frames conversions=$conversions assigned=$assigned fps=$measured_fps minimum=$MIN_FPS" >&2
+        echo "FAIL  $label throughput frames=$output_frames conversions=$conversions assigned=$assigned canceled=$canceled accounted=$accounted fps=$measured_fps minimum=$MIN_FPS" >&2
         exit 1
     fi
 
-    echo "ok    $label ${WIDTH}x${HEIGHT} P010 throughput ${measured_fps} fps ($output_frames visible, $conversions decoded)"
+    echo "ok    $label ${WIDTH}x${HEIGHT} P010 throughput ${measured_fps} fps ($output_frames visible, $conversions converted, $assigned assigned, $canceled canceled)"
 }
 
 run_case hevc-main10 hevc-main10 "$hevc" 18 exact

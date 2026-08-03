@@ -16,7 +16,7 @@ cleanup()
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
-RK_VAAPI_LOG=$LOG TEST_SET=synthetic RISKY_VECTORS=skip \
+RK_VAAPI_LOG=$LOG TEST_SET=synthetic \
     "$SCRIPT_DIR/validate.sh"
 
 ready_count=$(awk '/external_group: ready/ { count++ } END { print count + 0 }' "$LOG")

@@ -271,8 +271,8 @@ FFMPEG=/usr/bin/ffmpeg make check-encode-decode-concurrent
 FFMPEG=/usr/bin/ffmpeg make check-encode-decode-same-process
 FFMPEG=/usr/bin/ffmpeg make check-encode-decode-same-process-sanitize
 FFMPEG=/usr/bin/ffmpeg make check-encode-decode-same-process-tsan
-FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-conformance
-FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-sanitize
+FFMPEG=/usr/bin/ffmpeg make check-conformance
+FFMPEG=/usr/bin/ffmpeg make check-sanitize
 ```
 
 The three display-app gates require an advertised display output, but that
@@ -391,9 +391,25 @@ Main10 and VP9 Profile 2 streams, downloads P010, and times the complete
 VA-API decode plus AFBC-to-RGA conversion path. It requires at least 60 fps,
 exact visible-frame count, no linear 10-bit fallback, and one audited
 conversion per decoded output. HEVC requires exactly 240 decoded frames; VP9
-allows additional hidden/reference outputs but requires conversions and
-assigned frames to match. The measured runs are 261.38 fps for HEVC (240
-visible/decoded) and 261.08 fps for VP9 (240 visible, 254 decoded).
+allows additional hidden/reference outputs. An explicit FFmpeg output limit
+can advance a reused surface fence after RGA completes the last hidden output;
+the driver logs that safe discard as `output canceled`. The gate requires
+assigned plus canceled 10-bit outputs to equal conversions, while assigned
+outputs must still cover every requested visible frame. This distinguishes
+validator accounting from a missing presentation frame. The original measured
+runs were 261.38 fps for HEVC (240 visible/decoded) and 261.08 fps for VP9 (240
+visible, 254 decoded).
+
+`check-rga-small-geometry-repeat-experimental` is the durable discriminator
+for the intermittent small-surface AFBC-to-P010 destination-write failure
+observed on the separate RGA rewrite kernel. It generates 48-frame, B-frame-
+free Main10 inputs at 320x240 and 416x240 plus a 1280x720 control, then compares
+software and hardware P010 `framemd5` output on every run. The default gate
+runs each small geometry ten times, two controls, and two four-worker mixed
+concurrent rounds: 30 decodes and 1,440 exact frames without retaining raw P010
+files. Every run also requires 48 AFBC conversions, 48 assigned outputs, zero
+cancellations, the expected Main10 context, and no driver failure marker. One
+kernel-journal cursor scopes an RGA/IOMMU/fatal scan to the complete gate.
 
 `check-vlc-display` plays generated H.264 High, HEVC Main, VP9 Profile 0,
 HEVC Main10, and VP9 Profile 2 clips through stock VLC with
@@ -699,29 +715,13 @@ MPP route. `vp90-2-20-big_superframe-01.webm` is the counterexample—VP9 reuse
 must advance the fence so an older hidden output cannot signal the newer
 picture ready. Both behaviors are required for the full gate to be bit-exact.
 
-Do not set `RISKY_VECTORS=run` until the kernel's VP9 probability-table bounds
-fix is installed and the board has booted that kernel. The
-`vp90-2-10-show-existing-frame2.webm` stream can otherwise panic the RK3588 VPU
-driver. The harness additionally requires both the exact running release and
-the SHA-256 of `/sys/kernel/notes` to match `RISKY_KERNEL_RELEASE` and
-`RISKY_KERNEL_NOTES_SHA256`. The defaults name the current audited production
-kernel, `6.18.41-ysp-rockchip64` with notes SHA-256
-`6388dd294ff782a438a3a1e03d2c21f033998566d048cc6feecdd315aa2250f8`;
-a stale checkbox or environment variable therefore cannot enable the vector
-on an older or merely same-version build. A future kernel must be audited
-before advancing both variables.
-Omitting `RISKY_VECTORS` quarantines the stream, but the full gate exits
-non-zero so a skipped required vector can never be reported as a pass.
-
-For diagnosis on a vulnerable boot, the safe subset is:
-
-```sh
-FFMPEG=/usr/bin/ffmpeg make check-safe
-FFMPEG=/usr/bin/ffmpeg make check-sanitize-safe
-```
-
-This command is not a release gate. It prints `SAFE SUBSET GREEN; FULL GATE
-STILL BLOCKED` only if all non-quarantined vectors pass.
+`vp90-2-10-show-existing-frame2.webm` is an ordinary required conformance case.
+It previously carried a kernel-build fingerprint interlock because it exposed
+a board-hard-lock bug in the old MPP kernel path. That kernel crash is fixed
+across the supported stack, so ysp9 removes the `RISKY_VECTORS` switch, the
+release/notes fingerprint, and the narrower `check-safe` targets. A complete
+gate always runs this vector and requires bit-exact output; it can no longer be
+silently blocked or skipped by configuration.
 
 The full synthetic reference/B-frame and repeatability matrix remains as a
 supplemental regression suite:
@@ -742,21 +742,19 @@ request:
 - an AArch64 cross-build of the normal and sanitized drivers against Rockchip
   MPP commit `1375813cbbae5ad6861b166475dd8fb672183220`.
 
-The on-board gate is a manual `workflow_dispatch` job. Its separate
-`run_risky_vectors` confirmation may be enabled only when the runner matches
-the exact audited release and notes fingerprint in `tests/validate.sh`; with it
-false, the required quarantine intentionally fails the job.
+The on-board gate is a manual `workflow_dispatch` job. Enabling `run_hardware`
+runs every required conformance vector normally and under ASan/UBSan; there is
+no separate VP9 confirmation switch.
 Register the board as a self-hosted runner with the default `self-hosted`,
 `linux`, and `ARM64` labels plus the custom `rk3588` label. GitHub documents
 the label routing in its
 [self-hosted runner guide](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/use-in-a-workflow).
 
-Before confirming risky vectors, verify the board has the fixed kernel, the
-driver build includes the hidden-reference bridge, `/usr/bin/ffmpeg` has
-VA-API, and the build dependencies, `curl`, `unzip`, and `sha256sum` are
-installed.
+Before running it, verify the driver build includes the hidden-reference
+bridge, `/usr/bin/ffmpeg` has VA-API, and the build dependencies, `curl`,
+`unzip`, and `sha256sum` are installed.
 
-On 2026-08-01, the current source passed the complete risky-enabled normal and
+On 2026-08-01, the current source passed the complete normal and
 ASan/UBSan hardware gates on the production-shaped stack:
 `6.18.41-ysp-rockchip64` (notes
 `6388dd294ff782a438a3a1e03d2c21f033998566d048cc6feecdd315aa2250f8`),
@@ -773,15 +771,34 @@ The earlier `1.0.11+ysp6` driver/config packages build with the native Debian
 toolchain and pass Lintian plus the isolated clean install, upgrade, config
 purge, reinstall, and full-purge lifecycle. Against checksum-verified exact
 Published MPP `3381fd2c` and FFmpeg `33a651a55b` binaries, the complete
-risky-enabled shipping matrix is also green with the full ASan/UBSan driver:
+shipping matrix is also green with the full ASan/UBSan driver:
 all pinned vectors, the H.264 reference/B-frame and 4K matrix, five VP9
 determinism runs, and VP8 software fallback. This is exact-package correctness
 evidence; host installation and installed-payload identity remain separate.
 
-On 2026-08-01, `1.0.11+ysp8-0ubuntu1~rk1` was rebuilt from the current tree.
-Both arm64 driver and architecture-independent config packages pass Lintian
-and the isolated clean install, upgrade, config purge, reinstall, and full
-purge lifecycle. The package gate does not install ysp8 on the host.
+On 2026-08-02, `1.0.11+ysp8-0ubuntu1~rk1` was rebuilt from clean commit
+`2b08f38`. Both arm64 driver and architecture-independent config packages pass
+Lintian and the isolated clean install, upgrade, config purge, reinstall, and
+full-purge lifecycle. The rebuilt driver and installed driver both have
+SHA-256 `7fd9a7ba637f06e9bbbda90680adb8ada4d32ca831515a133cd637d31b59a732`,
+closing installed-payload source provenance. Host installation is complete;
+fresh-image qualification remains separate.
+
+Later on 2026-08-02, the ysp9 RC candidate passed the complete normal and
+ASan/UBSan hardware matrices on kernel `6.18.41-ysp-rockchip64` with kernel
+notes SHA-256
+`20acca6b5e2e69b565f2d39e478cd78723424d14ff6bc9ba08b7189a7c673489`.
+The former crash-quarantined VP9 show-existing-frame vector was an ordinary
+required bit-exact case in both runs, and all five VP9 determinism repetitions
+were bit-exact in each mode. The default RGA small-geometry gate completed 30
+decodes and 1,440 exact frames with a clean scoped kernel journal; its focused
+ASan/UBSan run completed five decodes and 240 exact frames. The 10-bit
+throughput gate measured 93.53 fps for HEVC and 103.61 fps for VP9, with all
+240 visible frames assigned and zero cancellations. A separate 100-run VP9
+early-stop stress loop exercised the new terminal branch once and kept
+`assigned + canceled == converted` throughout. Finally, the committed H.264,
+HEVC, and VP9 fuzz seeds replayed cleanly and each parser completed 20,000
+ASan/UBSan libFuzzer executions.
 
 On 2026-07-21, this board was booted into fixed kernel build `#3`, identified
 by kernel-notes SHA-256
@@ -805,7 +822,7 @@ deterministic reproducer and `0057` cross reproducer passed on this exact boot
 with a zero-flagged kernel journal. On that basis the risky fingerprint
 defaults were advanced to build `#4`, and the full gate ladder passed on it:
 host checks, all three object-lifecycle gates, both zero-copy gates, all three
-concurrent-decode gates, and the risky-enabled normal plus ASan/UBSan
+concurrent-decode gates, and the complete normal plus ASan/UBSan
 conformance gates — every vector bit-exact including
 `vp90-2-10-show-existing-frame2.webm` and the five VP9 determinism runs, with
 zero fatal kernel-journal signatures across the window. Boundary: build `#4`
@@ -823,7 +840,7 @@ downloaded frames cleanly. The paced 4K soak then ran for 7,200 seconds and
 216,005 external frames. Post-warmup RSS was 191,288 KiB initially and 203,512
 KiB finally with a 47,844 KiB span; fd head/tail medians were 55/55 with a
 24-fd transient span, and every pool/worker lifecycle matched. The complete
-risky-enabled Phase 0 normal and ASan/UBSan gates were green again afterward.
+Phase 0 normal and ASan/UBSan gates were green again afterward.
 
 On 2026-07-29, the repaired gate was rerun for the full 7,200 seconds against
 the checksum-verified exact Published MPP `3381fd2c` and FFmpeg `33a651a55b`

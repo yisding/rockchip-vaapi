@@ -22,7 +22,7 @@ verify()
 }
 
 tab=$(printf '\t')
-while IFS="$tab" read -r codec output download url download_sha member payload_sha decode_path risk <&3; do
+while IFS="$tab" read -r codec output download url download_sha member payload_sha decode_path <&3; do
     case $codec in
         ''|'#'*) continue ;;
     esac
@@ -62,5 +62,5 @@ while IFS="$tab" read -r codec output download url download_sha member payload_s
         exit 1
     fi
     mv "$part" "$payload"
-    echo "ok    $codec/$output ($risk)"
+    echo "ok    $codec/$output"
 done 3<"$MANIFEST"

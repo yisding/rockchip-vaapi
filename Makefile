@@ -139,8 +139,7 @@ fetch-vectors:
 check-firefox-rdd-patch:
 	tests/check-firefox-rdd-patch.sh
 
-# Full hardware gates. The conformance gate remains non-green when a required
-# risky vector is quarantined; see docs/TESTING.md.
+# Full hardware gates.
 check: $(TARGET) test
 	TEST_SET=all tests/validate.sh
 
@@ -210,6 +209,9 @@ check-vp9-profile2-experimental: $(TARGET) test
 
 check-10bit-throughput-experimental: $(TARGET) test
 	tests/check-10bit-throughput.sh
+
+check-rga-small-geometry-repeat-experimental: $(TARGET) test
+	tests/check-rga-small-geometry-repeat.sh
 
 check-gstreamer-va: $(TARGET) test
 	tests/check-gstreamer-va.sh
@@ -349,11 +351,6 @@ check-concurrent-decode-tsan: $(TSAN_TARGET) test
 
 check-soak: $(TARGET) test
 	tests/check-soak.sh
-
-# Diagnostic subset for a kernel on which risky vectors cannot safely run.
-# This is intentionally not the release gate.
-check-safe: $(TARGET) test
-	TEST_SET=conformance ALLOW_QUARANTINE=1 tests/validate.sh
 
 tests/driver_objects_test: tests/driver_objects_test.c $(SRCS) \
 		src/buffer.h src/context.h src/convert.h src/driver_internal.h \
@@ -557,13 +554,6 @@ check-hevc-sanitize: sanitize
 	DRIVER_DIR="$(abspath $(SAN_DIR))" TEST_SET=hevc \
 		FAIL_FAST=1 FFMPEG_TIMEOUT=60 tests/validate.sh
 
-check-sanitize-safe: sanitize
-	LD_PRELOAD="$(shell $(CC) -print-file-name=libasan.so)" \
-	ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
-	UBSAN_OPTIONS=halt_on_error=1 \
-	DRIVER_DIR="$(abspath $(SAN_DIR))" TEST_SET=conformance \
-	ALLOW_QUARANTINE=1 tests/validate.sh
-
 lint:
 	@command -v clang-tidy >/dev/null || { echo "clang-tidy is required" >&2; exit 1; }
 	clang-tidy $(SRCS) -- $(CPPFLAGS) $(CFLAGS) $(WARNINGS) -fPIC \
@@ -588,6 +578,7 @@ clean:
 	probe-mpp-main10-encode probe-av1-platform \
 	check-hevc-main10-experimental check-hevc-main10-hdr-experimental \
 	check-vp9-profile2-experimental check-10bit-throughput-experimental \
+	check-rga-small-geometry-repeat-experimental \
 	check-gstreamer-va \
 	check-vlc-display check-mpv-display check-firefox-decode \
 	check-h264-encode-experimental check-h264-encode-experimental-sanitize \
@@ -604,9 +595,9 @@ clean:
 	check-encode-decode-concurrent check-encode-decode-same-process \
 	check-encode-decode-same-process-sanitize \
 	check-encode-decode-same-process-tsan \
-	check-safe check-zero-copy check-zero-copy-sanitize \
+	check-zero-copy check-zero-copy-sanitize \
 	check-concurrent-decode check-concurrent-decode-sanitize \
 	check-concurrent-decode-tsan check-soak test test-valgrind test-sanitize sanitize \
 	check-sanitize \
-	test-tsan test-fuzz check-sanitize-safe check-driver-objects \
+	test-tsan test-fuzz check-driver-objects \
 	check-driver-objects-sanitize check-driver-objects-tsan lint clean

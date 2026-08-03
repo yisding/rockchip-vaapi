@@ -17,20 +17,12 @@ RENDER_NODE=${RENDER_NODE:-/dev/dri/renderD128}
 VECTOR_DIR=${VECTOR_DIR:-$SCRIPT_DIR/vectors}
 MANIFEST=${MANIFEST:-$SCRIPT_DIR/conformance-vectors.tsv}
 TEST_SET=${TEST_SET:-all}
-RISKY_VECTORS=${RISKY_VECTORS:-skip}
-RISKY_KERNEL_RELEASE=${RISKY_KERNEL_RELEASE:-6.18.41-ysp-rockchip64}
-RISKY_KERNEL_NOTES_SHA256=${RISKY_KERNEL_NOTES_SHA256:-6388dd294ff782a438a3a1e03d2c21f033998566d048cc6feecdd315aa2250f8}
-ALLOW_QUARANTINE=${ALLOW_QUARANTINE:-0}
 VP9_RUNS=${VP9_RUNS:-5}
 KEEP_WORK=${KEEP_WORK:-0}
 
 case $TEST_SET in
     all|conformance|synthetic|hevc) ;;
     *) echo "error: TEST_SET must be all, conformance, synthetic, or hevc" >&2; exit 2 ;;
-esac
-case $RISKY_VECTORS in
-    skip|run) ;;
-    *) echo "error: RISKY_VECTORS must be skip or run" >&2; exit 2 ;;
 esac
 case $FAIL_FAST in
     0|1) ;;
@@ -39,30 +31,6 @@ esac
 case $FFMPEG_TIMEOUT in
     ''|*[!0-9]*) echo "error: FFMPEG_TIMEOUT must be a non-negative integer" >&2; exit 2 ;;
 esac
-
-# A typo or stale CI checkbox must not turn a conformance run into a kernel
-# panic. Kernel-crash vectors are enabled only on the exact release and GNU
-# notes fingerprint of the build whose RK3588 VP9 probability-table bounds fix
-# was audited. The current defaults name the production 6.18.41 package whose
-# full normal and ASan/UBSan gates passed on 2026-08-01. Future kernel builds
-# must be reviewed and then named explicitly through both variables.
-if [ "$RISKY_VECTORS" = run ] && [ "$TEST_SET" != synthetic ]; then
-    running_kernel=$(uname -r) || exit 2
-    running_notes_sha=$(sha256sum /sys/kernel/notes 2>/dev/null |
-        awk '{print $1}')
-    if [ "$running_kernel" != "$RISKY_KERNEL_RELEASE" ]; then
-        echo "error: refusing kernel-crash vectors on $running_kernel" >&2
-        echo "error: audited kernel release is $RISKY_KERNEL_RELEASE" >&2
-        exit 2
-    fi
-    if [ -z "$running_notes_sha" ] ||
-       [ "$running_notes_sha" != "$RISKY_KERNEL_NOTES_SHA256" ]; then
-        echo "error: refusing kernel-crash vectors on unaudited kernel build" >&2
-        echo "error: running kernel notes sha256 is ${running_notes_sha:-unavailable}" >&2
-        echo "error: audited kernel notes sha256 is $RISKY_KERNEL_NOTES_SHA256" >&2
-        exit 2
-    fi
-fi
 
 export LIBVA_DRIVER_NAME=rockchip
 export LIBVA_DRIVERS_PATH="$DRIVER_DIR"
@@ -106,7 +74,6 @@ trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
 FAIL=0
-BLOCKED=0
 INDEX=0
 
 checksum()
@@ -210,7 +177,7 @@ run_conformance()
 {
     echo "== Pinned conformance vectors =="
     tab=$(printf '\t')
-    while IFS="$tab" read -r codec output download url download_sha member payload_sha decode_path risk <&3; do
+    while IFS="$tab" read -r codec output download url download_sha member payload_sha decode_path <&3; do
         case $codec in
             ''|'#'*) continue ;;
         esac
@@ -228,11 +195,6 @@ run_conformance()
         if [ "$actual" != "$payload_sha" ]; then
             echo "FAIL  $codec/$output (payload checksum mismatch)"
             FAIL=1
-            continue
-        fi
-        if [ "$risk" != safe ] && [ "$RISKY_VECTORS" != run ]; then
-            echo "BLOCK $codec/$output ($risk; set RISKY_VECTORS=run only on a fixed kernel)"
-            BLOCKED=1
             continue
         fi
         case $decode_path in
@@ -310,17 +272,8 @@ case $TEST_SET in
     synthetic)   run_synthetic ;;
 esac
 
-if [ "$BLOCKED" -ne 0 ] && [ "$ALLOW_QUARANTINE" != 1 ]; then
-    echo "BLOCKED REQUIRED VECTORS"
-    FAIL=1
-fi
-
 if [ "$FAIL" -eq 0 ]; then
-    if [ "$BLOCKED" -ne 0 ]; then
-        echo "SAFE SUBSET GREEN; FULL GATE STILL BLOCKED"
-    else
-        echo "ALL GREEN"
-    fi
+    echo "ALL GREEN"
 else
     echo "FAILURES PRESENT"
 fi
