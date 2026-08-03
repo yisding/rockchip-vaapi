@@ -46,7 +46,8 @@ jobs:
           shellcheck tests/check-concurrent-decode.sh \
             tests/check-firefox-decode.sh \
             tests/check-firefox-rdd-patch.sh \
-            tests/check-mpv-display.sh tests/check-soak.sh \
+            tests/check-mpv-display.sh tests/check-package-provenance.sh \
+            tests/check-soak.sh \
             tests/check-rga-small-geometry-repeat.sh \
             tests/check-vlc-display.sh \
             tests/check-zero-copy.sh \

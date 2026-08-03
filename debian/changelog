@@ -1,3 +1,16 @@
+rockchip-vaapi (1.0.11+ysp10-0ubuntu1~rk1) resolute; urgency=medium
+
+  * Pass CFLAGS to the driver link so the Debian build's -flto link step also
+    receives the -f*-prefix-map flags. Without them, LTO recorded the absolute
+    build directory as DW_AT_comp_dir in its own translation units, which
+    changed the GNU build-id and the .gnu_debuglink of an otherwise identical
+    driver. The packaged code and data are byte-identical to ysp9.
+  * Add tests/check-package-provenance.sh, which rebuilds the packaged driver
+    from a clean export of a commit at two different paths and requires one
+    payload hash, then compares it against the installed driver.
+
+ -- Yi Ding <yi.s.ding@gmail.com>  Sun, 02 Aug 2026 22:05:00 -0700
+
 rockchip-vaapi (1.0.11+ysp9-0ubuntu1~rk1) resolute; urgency=medium
 
   * Log completed decode outputs that are intentionally canceled after a

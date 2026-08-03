@@ -94,8 +94,14 @@ FUZZ_COMPILE = $(FUZZ_CC) $(CPPFLAGS) $(FUZZ_CFLAGS) $(WARNINGS) \
 
 all: $(TARGET)
 
+# $(CFLAGS) has to reach the link, not just the compiles: the Debian build
+# links with -flto, and LTO re-emits debug info for its own <artificial>
+# translation units at link time. Those units take DW_AT_comp_dir from the
+# link command, so without the -f*-prefix-map flags they record the absolute
+# build directory, which changes the GNU build-id and therefore the payload
+# hash for a build of identical source in a different directory.
 $(TARGET): $(OBJS)
-	$(CC) $(LDFLAGS) -shared -o $@ $^ $(LDLIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -shared -o $@ $^ $(LDLIBS)
 
 src/%.o: src/%.c
 	$(DRIVER_COMPILE) -c $< -o $@
@@ -132,6 +138,11 @@ package:
 check-package-install: package
 	lintian --tag-display-limit 0 "$(DEB_CHANGES)"
 	tests/check-package-install.sh "$(DRIVER_DEB)" "$(CONFIG_DEB)"
+
+# Builds the package itself, twice, so it deliberately does not depend on
+# `package`. REFERENCE= compares nothing; it defaults to the installed driver.
+check-package-provenance:
+	tests/check-package-provenance.sh
 
 fetch-vectors:
 	tests/fetch-vectors.sh
