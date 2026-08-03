@@ -1080,9 +1080,9 @@ concurrent with decode contexts are race-free.
   growth. H.264 WebRTC-compatible RTP packetization is green. Its two missing
   GStreamer test packages were supplied from an extracted arm64 package root
   rather than installed system-wide.
-- Phase 5: in progress; `1.0.11+ysp9` is installed on the host and its
-  driver/config binaries pass build, Lintian, and the isolated package
-  lifecycle. It adds explicit canceled-conversion accounting and a durable
+- Phase 5: in progress; `1.0.11+ysp10` is installed on the host, and both it
+  and `1.0.11+ysp9` pass build, Lintian, and the isolated package lifecycle.
+  ysp9 added explicit canceled-conversion accounting and a durable
   repeated small-geometry RGA exactness gate. Its complete normal and
   ASan/UBSan hardware matrices are green with the former quarantined VP9
   vector required normally; the RGA gate is exact across 1,440 normal and 240
@@ -1107,10 +1107,12 @@ concurrent with decode contexts are race-free.
   driver. ysp10 builds, passes Lintian and the isolated lifecycle, and three
   independent build directories agree on SHA-256
   `4d5d3ecaff81732cf7265044eb382690edcb21933ff615f4d9b9888d38584d5a`; its
-  generated code is byte-identical to ysp9.
-  Installing ysp10 on the host, a genuinely fresh-image hardware run, the
-  final Firefox sandbox runtime proof, tag, GitHub Release, and PPA
-  publication remain.
+  generated code is byte-identical to ysp9. It is now the installed driver,
+  the provenance gate reproduces it exactly from commit `1ef451c` with no
+  reference override, and the installed ysp10 payload passes the pinned
+  conformance gate and its own 1,440-frame RGA small-geometry run.
+  A genuinely fresh-image hardware run, the final Firefox sandbox runtime
+  proof, tag, GitHub Release, and PPA publication remain.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement
 map and driver-review finding as the decision/evidence record.

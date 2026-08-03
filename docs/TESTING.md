@@ -869,8 +869,18 @@ generated code; the complete normal hardware gate was re-run on the ysp10
 build anyway and every vector, the H.264 reference/B-frame and 4K matrix, the
 five VP9 determinism runs, and the VP8 software fallback are green. ysp10 also
 passes Lintian and the isolated package lifecycle.
-`make check-package-provenance` now gates this. Installing ysp10 on the host,
-and fresh-image qualification, remain separate.
+`make check-package-provenance` now gates this.
+
+On 2026-08-03, `1.0.11+ysp10-0ubuntu1~rk1` was installed on the board. The
+installed driver's SHA-256 is
+`4d5d3ecaff81732cf7265044eb382690edcb21933ff615f4d9b9888d38584d5a`, and
+`make check-package-provenance` reproduces it from commit `1ef451c` with no
+`REFERENCE` override — so installed-payload provenance no longer depends on
+where the check is run. Re-run against that installed payload with
+`DRIVER_DIR=/usr/lib/aarch64-linux-gnu/dri`, the pinned conformance gate is
+bit-exact on all 17 vectors and the repeated RGA small-geometry gate completes
+28 small runs, two 1280x720 controls, and 1,440 exact P010 frames with a clean
+scoped kernel journal. Fresh-image qualification remains separate.
 
 On 2026-07-21, this board was booted into fixed kernel build `#3`, identified
 by kernel-notes SHA-256
