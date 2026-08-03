@@ -576,7 +576,8 @@ be reconstructed into the SPS sent privately to MPP. VA's HEVC picture
 parameters do not expose those original syntax elements, so the reconstructed
 SPS deliberately keeps `vui_parameters_present_flag=0`. This contract is now
 tested instead of depending on MPP to reproduce application-facing metadata.
-Actual HDR presentation in Firefox and mpv remains an app/display-system gate.
+Virtual-output HDR-tagged P010 presentation now passes in Firefox and mpv;
+physical HDR-monitor passthrough remains an app/display-system gate.
 
 **Progress (2026-07-26, P010 consumer contract):** Surface creation now
 validates the requested RT format and `VASurfaceAttribPixelFormat`, records
@@ -591,9 +592,9 @@ HDR Main10 and shipping-profile hardware regressions remain green.
 the 64-pixel/16-row-aligned provisional P010 layout used by VLC's converter
 probe. It still refuses imported P010, compressed backing, and stale or
 unaligned provisional layouts. Stock VLC hardware-decodes and presents
-H.264 High, HEVC Main, and HEVC Main10 with 118, 120, and 120 external frames.
-Firefox 153 hardware-decodes H.264 and HEVC Main, while the recorded stock
-Firefox Main10 run reaches three hardware frames and then falls back at its
+H.264 High, HEVC Main, and HEVC Main10. Firefox 153 hardware-decodes H.264 and
+HEVC Main, while the first recorded stock Firefox Main10 run reached three
+hardware frames and then fell back at its
 plane-1 EGL import. Source inspection later identified the producer defect:
 the driver exported `0x36315247` (`GR16`) instead of
 `DRM_FORMAT_GR1616` (`0x32335247`, `GR32`), so Mesa correctly rejected an
@@ -605,9 +606,9 @@ parent renderer. Later decode failure is below that EGL boundary.
 144/163 complete exact-PPA-package sweep, 17 profile skips, two size refusals,
 zero backend/driver failures) and advertised by default;
 ✅ HEVC Main10 / VP9 P2 bit-exact after P010 repacking and measured above
-260 fps at 1080p; ✅ VLC Main10 decode/presentation; ✅ Firefox/Panfrost
-GR1616 import in both processes; complete Firefox Main10 playback and physical
-HDR presentation remain open.
+260 fps at 1080p; ✅ all five codec/profile cases presented by VLC, Firefox,
+and mpv on a virtual output; ✅ Firefox/Panfrost GR1616 import in both
+processes; physical HDR presentation remains open.
 
 ### Phase 3 — Production hardening & the app matrix  (~2–3 wk)
 
@@ -685,12 +686,19 @@ to applying the 152.0.6 patch, and 153.0 was confirmed not to permit any of
 those paths or requests already. The ioctl set is inherited from the 152.0.6
 measurement rather than remeasured, which needs a Firefox source build.
 
-Chromium remains open for an environment reason rather than a driver one.
-Chromium 150 cannot initialize a GL context on this Mali-G610/Panfrost stack --
-ANGLE reports "Could not create a backing OpenGL context" under both X11 and
-Wayland -- so its GPU process never starts and no VA-API path is reachable. The
-same session runs accelerated GL for VLC and Firefox, so no Chromium claim is
-made in either direction.
+**Progress (2026-08-01, Chromium 151 boundary):** The Chromium 150 ANGLE
+failure is gone. Chromium 151 creates an accelerated ANGLE OpenGL ES context
+over Mali-G610/Panfrost on Wayland and plays the generated H.264 page. The
+remaining blocker is earlier than this driver: its live GPU report has an
+empty hardware-decoding profile list, media-internals selects
+`FFmpegVideoDecoder` with `kIsPlatformVideoDecoder=false`, and the Rockchip
+driver is never loaded. The arm64 binary contains its V4L2 decoder backend but
+not the libva implementation. The available Hantro V4L2 node advertises only
+MPEG-2 and VP8 compressed input, so it cannot substitute for MPP on the v1
+codec set. Runtime feature flags can turn the GPU feature label on but cannot
+add the missing backend/profiles. Stock Chromium VA-API therefore requires a
+distro build with libva enabled; the proposed device-node alias cannot solve
+this binary.
 
 **Progress (2026-07-29, mpv/Panfrost presentation slice):** Stock mpv 0.41.0
 selects VA-API decode and gpu-next's Wayland/OpenGL presentation for H.264.
@@ -769,6 +777,26 @@ one run but not deterministically isolated. No individual parameter-set
 rewrite is yet implicated. RGA multi-SG refusals are classified separately and
 never count toward the reducer result.
 
+**Progress (2026-08-01, complete virtual-output app matrix):** Mutter 50's
+headless virtual monitor supplies a real Wayland output backed by the board's
+Panthor/Panfrost GBM renderer; enabling its Xwayland server also gives VLC 3 a
+valid X11 EGL target. The expanded gates exercise H.264 High, HEVC Main, VP9
+Profile 0, HEVC Main10, and VP9 Profile 2 rather than only their earlier
+subsets. Stock mpv 0.41 presents 20 frames of every case through VA-API and
+Panfrost, including the CIF NV12 repack, both P010 paths, and BT.2020/PQ-tagged
+Main10 input. Stock VLC 3.0.23 presents 120 external-pool frames of every case.
+Stock Firefox 153.0.1, with its RDD sandbox explicitly disabled for this
+decode-only diagnostic, produces at least 350 external-pool frames and 696
+DMA-BUF exports per case; Main10 and Profile 2 both use corrected GR1616
+zero-copy imports without the earlier stateful failure.
+
+This is genuine Wayland/Xwayland, EGL and DMA-BUF presentation evidence, but a
+virtual monitor cannot validate a connector, display link, EDID, compositor
+HDR mode, or physical panel. Mutter reports no physical or logical monitors on
+this host, so physical HDR passthrough remains open. The Firefox RDD patch's
+sandbox-enabled runtime result is tracked separately from the unsandboxed app
+matrix.
+
 **Progress (2026-07-27, structured logging):** The opt-in driver log now emits
 single-record structured text or newline-delimited JSON with realtime
 nanoseconds, PID/TID, severity, source, line, function, and an escaped message.
@@ -778,11 +806,10 @@ reference-counted across VA displays and closes/reopens cleanly. Dedicated
 normal, ASan/UBSan, TSan, and Valgrind tests cover filtering, JSON control
 characters, nested lifecycle, and 800 concurrent records without interleaving.
 
-**Gate:** the app matrix passes on-device — ✅ stock FFmpeg, GStreamer `va`,
-VLC including Main10, and Firefox H.264/HEVC Main; ✅ mpv 8-bit H.264
-decode/presentation (current Main10/HDR rerun blocked by the session having no
-Wayland output and Mutter reporting no physical or logical monitors);
-⬜ Chromium (blocked on its GL stack here); ✅ conformance suite green; clean
+**Gate:** the app matrix passes on-device — ✅ stock FFmpeg and GStreamer
+`va`; ✅ VLC, Firefox, and mpv virtual-output presentation for H.264 High, HEVC
+Main, VP9 Profiles 0/2, and HEVC Main10; ⬜ physical HDR-monitor presentation;
+⬜ Chromium (arm64 distro binary lacks its libva backend); ✅ conformance suite green; clean
 soak; ✅ `.deb` + config packages install, upgrade and purge cleanly in an
 isolated root, ⬜ enabling HW decode from a genuinely clean image is untested.
 
@@ -966,16 +993,16 @@ concurrent with decode contexts are race-free.
   2 AFBC paths, pinned Main10 weighted-prediction and official VP9 Profile 2
   vectors, and the 24-frame HDR10 vector. RGA performs a pure NV15-to-P010
   repack and every gate is byte-exact. Static BT.2020/PQ HDR metadata survives
-  the hardware frame path; broader HEVC conformance and app/display HDR
-  presentation remain open.
+  the hardware frame path. Broad HEVC conformance and virtual-output app
+  presentation are green; physical HDR-monitor passthrough remains open.
 - **Encode conformance:** encoders aren't spec-exact; the gate must be
   round-trip PSNR + interop, and depends on the kernel RKVENC2 hardening.
 - **Sandbox upstreamability:** the Firefox RDD source patch is hash-pinned and
   request-specific but must be rebased and remeasured per milestone -- it is
-  pinned to 153.0 with 152.0.6 kept alongside, and the 153.0 rebase inherits
-  rather than remeasures the ioctl set; the Chromium aliasing sidestep depends on the GPU
-  sandbox continuing to allow `ioctl` without arg inspection — verify against
-  the shipping Chromium, don't assume.
+  pinned to 153.0/153.0.1 with 152.0.6 kept alongside, and the 153.x rebase
+  inherits rather than remeasures the ioctl set. Chromium's proposed aliasing
+  sidestep cannot help the current arm64 distro binary because that binary has
+  no libva backend.
 - **MPP threading contract:** the dedicated-worker model is validated for the
   normal single-decoder H.264/VP9 matrix, nine simultaneous idle MPP contexts,
   two active H.264/VP9 contexts, and a same-process two-decode/two-encode
@@ -984,9 +1011,9 @@ concurrent with decode contexts are race-free.
 ## Status
 
 - Phase 0: complete on `main`; the normal and sanitized full hardware gates are
-  green after the Phase 2 slice on audited fixed kernel build `#4`. The normal
-  full gate is also green through installed `1.0.11+ysp5` on the audited
-  production 6.18.40 kernel.
+  green after the Phase 2 slice on audited fixed kernel build `#4`, and again
+  through the current source on the audited production
+  `6.18.41-ysp-rockchip64` kernel (notes SHA-256 `6388dd294ff782a438a3a1e03d2c21f033998566d048cc6feecdd315aa2250f8`).
 - Phase 1: complete on `main`; object heap/object migrations, external-buffer
   zero-copy, worker/fence synchronization, module separation, two active
   decoders, sanitizer gates, and the multi-hour 4K resource soak are green.
@@ -1003,17 +1030,17 @@ concurrent with decode contexts are race-free.
   10-frame Profile 2, and 24-frame Main10 HDR10 AFBC-to-P010 gates are
   bit-exact, 1080p throughput exceeds 260 fps for both codecs, and static
   BT.2020/PQ HDR metadata is preserved. Both 10-bit profiles stay hidden until
-  broader app/physical HDR display presentation is validated.
-- Phase 3: in progress; five app-matrix slices now pass on-device. Stock FFmpeg
+  physical HDR and release/distribution qualification are complete.
+- Phase 3: in progress; five app-matrix consumers now pass on-device. Stock FFmpeg
   is the conformance gate itself, the stock GStreamer 1.28 `va` plugin
   system-memory gate is byte-exact for H.264, HEVC Main10, and VP9 Profiles
-  0/2. Stock VLC 3.0.23 hardware-decodes H.264 High, HEVC Main, and HEVC
-  Main10; stock Firefox 153.0 hardware-decodes H.264 High and HEVC Main in a
-  real display session with clean driver logs
-  (`check-vlc-display`, `check-firefox-decode`). Stock mpv 0.41.0 also renders
-  the 8-bit H.264 CIF path through Wayland/Panfrost after a selective
-  352-to-384-byte NV12 export repack (`check-mpv-display`). The display gates
-  refuse to run headless.
+  0/2. Stock VLC 3.0.23, Firefox 153.0.1, and mpv 0.41.0 hardware-decode and
+  present H.264 High, HEVC Main, VP9 Profiles 0/2, and HEVC Main10 with clean
+  driver logs (`check-vlc-display`, `check-firefox-decode`,
+  `check-mpv-display`) on a Mutter virtual monitor. The mpv H.264 CIF case also
+  requires the selective 352-to-384-byte NV12 export repack. The display gates
+  refuse to run without a real or virtual output; virtual presentation is not
+  physical HDR-monitor proof.
   Split driver/config Debian packaging no longer weakens Firefox's sandbox
   globally, structured leveled text/JSON logging is lifecycle-, sanitizer-,
   thread-, and leak-tested, and clean-image package lifecycle validation is
@@ -1025,15 +1052,13 @@ concurrent with decode contexts are race-free.
   fail closed. The first recorded stock Firefox Main10 fallback was the
   driver's invalid `GR16` literal, not a Panfrost GR1616 limitation. Installed
   ysp7 proves the corrected GR1616 import in both Firefox processes; the next
-  failure is the stateful MPP-marked Main10 decode boundary covered by the
-  reducer.
-  Open: complete Main10 and sandboxed Firefox playback gates are not yet
-  green; Chromium cannot
-  initialize a GL context on this Mali-G610/Panfrost stack, so no Chromium
-  claim is made; mpv 10-bit/HDR display presentation and fresh-image hardware
-  decode remain untested. Installed `1.0.11+ysp7` carries the corrected
-  exporter; its GR1616 boundary is measured separately from the open decode
-  failure.
+  failure was a stateful MPP-marked Main10 boundary covered by the reducer;
+  the expanded Firefox run is now stable across all five cases.
+  Open: sandbox-enabled Firefox playback is awaiting the patched-build runtime
+  result; Chromium 151 now has accelerated Panfrost GL but its distro arm64
+  binary lacks the libva backend and reports no hardware profiles; physical
+  HDR-monitor presentation and fresh-image hardware decode remain untested.
+  Installed `1.0.11+ysp7` carries the corrected exporter.
 - Phase 4: complete for the deliberately advertised experimental scope;
   H.264 Main/High and HEVC Main
   encode pass FFmpeg and GStreamer CQP/CBR/VBR interoperability, parser, and
@@ -1054,10 +1079,10 @@ concurrent with decode contexts are race-free.
   growth. H.264 WebRTC-compatible RTP packetization is green. Its two missing
   GStreamer test packages were supplied from an extracted arm64 package root
   rather than installed system-wide.
-- Phase 5: in progress; final `1.0.11+ysp6` driver/config binaries pass build,
-  Lintian, and the isolated package lifecycle. Host installation, final
-  Firefox package/runtime proof, tag, GitHub Release, and PPA publication
-  remain.
+- Phase 5: in progress; the `1.0.11+ysp8` driver/config binaries pass build,
+  Lintian, and the isolated package lifecycle, and `1.0.11+ysp7` is installed
+  on the host. A genuinely fresh-image hardware run, final Firefox sandbox
+  runtime proof, tag, GitHub Release, and PPA publication remain.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement
 map and driver-review finding as the decision/evidence record.

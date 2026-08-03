@@ -13,6 +13,7 @@ tests/hevc_mpp_repro
 tests/av1_mpp_caps
 tests/driver_objects_test
 tests/va_rgb_dmabuf_encode
+tests/va_multiplane_dmabuf_encode
 tests/object_heap_test
 tests/vp9_test
 tests/*.san

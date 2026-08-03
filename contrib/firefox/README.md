@@ -5,9 +5,10 @@ permits `/dev/dri`, but not the Rockchip MPP, RGA, or dma-heap paths. Its
 seccomp policy permits DRM and DMA-BUF ioctl families, but not the MPP request
 or the RGA requests used by this driver.
 
-`patches/` holds one RDD patch per pinned Firefox release; the current
-milestone is 153.0 and 152.0.6 is kept for older trees. Each patch is intended
-for an arm64 Firefox source package and keeps the sandbox enabled. Broker
+`patches/` holds one RDD patch per pinned Firefox source revision; the current
+milestones are 153.0 and 153.0.1, whose two patched files are byte-identical,
+and 152.0.6 is kept for older trees. Each patch is intended for an arm64
+Firefox source package and keeps the sandbox enabled. Broker
 permissions are added only when the corresponding device node or directory
 exists, and seccomp permits only the requests observed on the validated ROCK
 5B stack:
@@ -36,7 +37,7 @@ Each patch is pinned to an upstream Firefox release tag by the SHA-256 of its
 two preimage files. A tree that does not match is rejected instead of
 being force-patched.
 
-`FIREFOX_153_0_RELEASE`:
+`FIREFOX_153_0_RELEASE` and `FIREFOX_153_0_1_RELEASE` (shared preimages):
 
 ```text
 b1dae2499ba9589cc41454cf7f73c332c82ed9d6c13710c0448fdc9c7507e1e9  security/sandbox/linux/SandboxFilter.cpp
@@ -51,10 +52,13 @@ b1dae2499ba9589cc41454cf7f73c332c82ed9d6c13710c0448fdc9c7507e1e9  security/sandb
 ```
 
 Validate an unpacked source tree before adding the patch to the distribution
-package. `FIREFOX_VERSION` selects the milestone and defaults to 153.0:
+package. `FIREFOX_VERSION` selects the milestone and defaults to 153.0.1. The
+153.0.1 selector intentionally reuses the 153.0 patch because both preimages
+have the hashes above:
 
 ```sh
-tests/check-firefox-rdd-patch.sh /path/to/firefox-153.0
+tests/check-firefox-rdd-patch.sh /path/to/firefox-153.0.1
+FIREFOX_VERSION=153.0 tests/check-firefox-rdd-patch.sh /path/to/firefox-153.0
 FIREFOX_VERSION=152.0.6 tests/check-firefox-rdd-patch.sh /path/to/firefox-152.0.6
 ```
 
@@ -63,6 +67,9 @@ For a Debian-format Firefox source package, copy the version-matched patch into
 version suffix, and rebuild the binary package. Do not install this patch from
 the `rockchip-vaapi` binary package: changing another package's
 source or binary files would be unowned and would be lost on Firefox upgrades.
+Mozilla builds are incremental: an interrupted build can be resumed from the
+same configured source tree with `./mach build -j2`. Do not remove its object
+directory between the build and the sandbox-enabled runtime gate.
 
 ## Revalidation
 
@@ -82,11 +89,11 @@ librockchip-mpp 1.5.0, librga 2.2.0, and the audited RK3588 kernel. H.264
 encode and HEVC Main10 decode/RGA gates used the same request set.
 
 The 153.0 patch is a rebase of that measurement, not a new one. It was verified
-to apply cleanly to `FIREFOX_153_0_RELEASE` and to produce byte-identical
-sources to applying the 152.0.6 patch, and 153.0 was confirmed not to permit
-any of these paths or requests already. The request set itself is inherited
-from the 152.0.6 measurement and has not been remeasured against a patched
-153.0 build, because that needs a Firefox source build. `make
+to apply cleanly to `FIREFOX_153_0_RELEASE` and
+`FIREFOX_153_0_1_RELEASE` and to produce byte-identical sources to applying the
+152.0.6 patch. Neither 153.0 release permitted these paths or requests already.
+The request set itself is inherited from the 152.0.6 measurement and has not
+yet been remeasured against a patched 153.x build. `make
 check-firefox-decode` exercises the stock decode path with the sandbox
 disabled by default. `FIREFOX_RDD_SANDBOX=enabled` removes that bypass and
 requires the live RDD process to report Linux seccomp filter mode 2. The prior

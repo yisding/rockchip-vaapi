@@ -9,7 +9,8 @@
 # evidence of nothing, so this script refuses to run without a display.
 #
 # Environment:
-#   FFMPEG VLC DRIVER_DIR RENDER_NODE VLC_TIMEOUT DISPLAY WAYLAND_DISPLAY
+#   FFMPEG VLC DRIVER_DIR RENDER_NODE VLC_TIMEOUT VLC_CASES KEEP_WORK
+#   DISPLAY WAYLAND_DISPLAY
 
 set -eu
 
@@ -21,6 +22,8 @@ REPO_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)
 DRIVER_DIR=${DRIVER_DIR:-$REPO_ROOT}
 RENDER_NODE=${RENDER_NODE:-/dev/dri/renderD128}
 MIN_FRAMES=${MIN_FRAMES:-100}
+VLC_CASES=${VLC_CASES:-h264,hevc,vp9,hevc-main10,vp9-profile2}
+KEEP_WORK=${KEEP_WORK:-0}
 
 case $VLC_TIMEOUT in
     ''|*[!0-9]*)
@@ -50,7 +53,11 @@ WORK=$(mktemp -d "$REPO_ROOT/.test-work.vlc-display.XXXXXX") || exit 1
 # shellcheck disable=SC2317,SC2329 # Invoked by the EXIT trap.
 cleanup()
 {
-    rm -rf "$WORK"
+    if [ "$KEEP_WORK" = 1 ]; then
+        echo "work files retained in $WORK"
+    else
+        rm -rf "$WORK"
+    fi
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
@@ -67,10 +74,17 @@ ERROR_MARKERS="$ERROR_MARKERS|pool exhausted|reconstruction failed"
 
 generate()
 {
-    "$FFMPEG" -nostdin -y -v error -f lavfi \
-        -i testsrc2=size=1280x720:rate=30:duration=4 \
-        -c:v "$1" -profile:v "$2" -pix_fmt "$3" "$4" \
-        >"$WORK/generate.log" 2>&1
+    if [ "$1" = libvpx-vp9 ]; then
+        "$FFMPEG" -nostdin -y -v error -f lavfi \
+            -i testsrc2=size=1280x720:rate=30:duration=4 \
+            -c:v "$1" -profile:v "$2" -pix_fmt "$3" \
+            -deadline good -cpu-used 4 "$4" >"$WORK/generate.log" 2>&1
+    else
+        "$FFMPEG" -nostdin -y -v error -f lavfi \
+            -i testsrc2=size=1280x720:rate=30:duration=4 \
+            -c:v "$1" -profile:v "$2" -pix_fmt "$3" "$4" \
+            >"$WORK/generate.log" 2>&1
+    fi
 }
 
 play()
@@ -79,14 +93,25 @@ play()
     clip=$2
     profiles=$3
     expected_format=$4
+    expected_profile=$5
+    case ",$VLC_CASES," in
+        *",$label,"*)
+            ;;
+        *)
+            return
+            ;;
+    esac
     log=$WORK/$label.vlc.log
     driver_log=$WORK/$label.driver.log
 
     if ! RK_VAAPI_EXPERIMENTAL_PROFILES=$profiles \
             RK_VAAPI_LOG=$driver_log \
             timeout --kill-after=5s "$VLC_TIMEOUT" \
-            "$VLC" -I dummy --no-audio --avcodec-hw=vaapi --play-and-exit \
-            -vvv "$clip" >"$log" 2>&1; then
+            "$VLC" -I dummy --no-audio --avcodec-hw=vaapi \
+            --avcodec-threads=1 --no-avcodec-hurry-up \
+            --no-drop-late-frames --no-skip-frames \
+            --play-and-exit -vvv "$clip" \
+            >"$log" 2>&1; then
         echo "FAIL  $label (VLC exited non-zero)"
         tail -20 "$log"
         FAIL=1
@@ -127,7 +152,7 @@ play()
                       "$driver_log" || true)
         if [ "$conversions" -lt "$MIN_FRAMES" ] ||
            [ "$derived" -lt 1 ] ||
-           ! grep -q 'CreateContext: 10-bit output mode=AFBC_V2 profile=18' \
+           ! grep -q "CreateContext: 10-bit output mode=AFBC_V2 profile=$expected_profile" \
                    "$driver_log"; then
             echo "FAIL  $label (P010 audit conversions=$conversions derived=$derived)"
             FAIL=1
@@ -148,11 +173,15 @@ play()
 
 echo "== VLC display-session hardware decode =="
 generate libx264 high yuv420p "$WORK/h264.mp4"
-play h264 "$WORK/h264.mp4" "" NV12
+play h264 "$WORK/h264.mp4" "" NV12 0
 generate libx265 main yuv420p "$WORK/hevc.mp4"
-play hevc "$WORK/hevc.mp4" "" NV12
+play hevc "$WORK/hevc.mp4" "" NV12 0
+generate libvpx-vp9 0 yuv420p "$WORK/vp9.webm"
+play vp9 "$WORK/vp9.webm" "" NV12 0
 generate libx265 main10 yuv420p10le "$WORK/hevc-main10.mp4"
-play hevc-main10 "$WORK/hevc-main10.mp4" hevc-main10 P010
+play hevc-main10 "$WORK/hevc-main10.mp4" hevc-main10 P010 18
+generate libvpx-vp9 2 yuv420p10le "$WORK/vp9-profile2.webm"
+play vp9-profile2 "$WORK/vp9-profile2.webm" vp9-profile2 P010 21
 
 if [ "$FAIL" -ne 0 ]; then
     echo "FAILURES PRESENT"

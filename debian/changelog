@@ -1,3 +1,21 @@
+rockchip-vaapi (1.0.11+ysp8-0ubuntu1~rk1) resolute; urgency=medium
+
+  * Expand the Firefox, VLC, and mpv display gates to H.264 High, HEVC Main,
+    VP9 Profiles 0/2, and HEVC Main10, with 10-bit export/import auditing and
+    deterministic VLC correctness settings.
+  * Validate every display-app profile through VA-API and Panfrost on a Mutter
+    virtual output while keeping physical HDR passthrough as a separate gate.
+  * Pin the Firefox RDD source-policy contract to 153.0.1 as well as 153.0 and
+    retain the runtime seccomp-mode audit for patched sandbox-enabled builds.
+  * Advance the risky-vector guard to the audited 6.18.41 production kernel
+    after complete normal and ASan/UBSan hardware regression runs.
+  * Fix the structured logger's varargs formatting path so Clang's static
+    analyzer can prove every copied va_list is paired with va_end.
+  * Document Chromium 151's working Panfrost GL path and the arm64 distro
+    binary's missing libva backend and hardware-decode profiles.
+
+ -- Yi Ding <yi.s.ding@gmail.com>  Sat, 01 Aug 2026 20:09:28 -0700
+
 rockchip-vaapi (1.0.11+ysp7-0ubuntu1~rk1) resolute; urgency=medium
 
   * Export split P010 chroma as DRM_FORMAT_GR1616 instead of the invalid

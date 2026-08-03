@@ -50,7 +50,11 @@ jobs:
       - name: Shell analysis
         run: |
           shellcheck tests/check-concurrent-decode.sh \
-            tests/check-soak.sh tests/check-zero-copy.sh \
+            tests/check-firefox-decode.sh \
+            tests/check-firefox-rdd-patch.sh \
+            tests/check-mpv-display.sh tests/check-soak.sh \
+            tests/check-vlc-display.sh \
+            tests/check-zero-copy.sh \
             tests/fetch-vectors.sh tests/minimize-hevc-tiles.sh \
             tests/validate.sh
 

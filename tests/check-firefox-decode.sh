@@ -24,7 +24,7 @@ FFMPEG=${FFMPEG:-ffmpeg}
 FIREFOX=${FIREFOX:-firefox}
 PLAY_SECONDS=${PLAY_SECONDS:-30}
 MIN_FRAMES=${MIN_FRAMES:-120}
-FIREFOX_CASES=${FIREFOX_CASES:-h264,hevc,hevc-main10}
+FIREFOX_CASES=${FIREFOX_CASES:-h264,hevc,vp9,hevc-main10,vp9-profile2}
 FIREFOX_RDD_SANDBOX=${FIREFOX_RDD_SANDBOX:-disabled}
 KEEP_WORK=${KEEP_WORK:-0}
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
@@ -167,6 +167,8 @@ play()
     pixel_format=$4
     profiles=$5
     expected_format=$6
+    expected_profile=$7
+    container=$8
     case ",$FIREFOX_CASES," in
         *",$label,"*)
             ;;
@@ -174,18 +176,26 @@ play()
             return
             ;;
     esac
-    clip=$WORK/$label.mp4
+    clip=$WORK/$label.$container
     page=$WORK/$label.html
     driver_log=$WORK/$label.driver.log
 
-    "$FFMPEG" -nostdin -y -v error -f lavfi \
-        -i testsrc2=size=1280x720:rate=30:duration=8 \
-        -c:v "$encoder" -profile:v "$profile" -pix_fmt "$pixel_format" \
-        -movflags +faststart "$clip" >"$WORK/$label.encode.log" 2>&1
+    if [ "$container" = mp4 ]; then
+        "$FFMPEG" -nostdin -y -v error -f lavfi \
+            -i testsrc2=size=1280x720:rate=30:duration=8 \
+            -c:v "$encoder" -profile:v "$profile" -pix_fmt "$pixel_format" \
+            -movflags +faststart "$clip" >"$WORK/$label.encode.log" 2>&1
+    else
+        "$FFMPEG" -nostdin -y -v error -f lavfi \
+            -i testsrc2=size=1280x720:rate=30:duration=8 \
+            -c:v "$encoder" -profile:v "$profile" -pix_fmt "$pixel_format" \
+            -deadline good -cpu-used 4 "$clip" \
+            >"$WORK/$label.encode.log" 2>&1
+    fi
     cat >"$page" <<PAGE
 <!doctype html><meta charset=utf-8><title>rockchip-vaapi</title>
 <body style="margin:0;background:#000">
-<video src="$label.mp4" autoplay muted loop playsinline
+<video src="$label.$container" autoplay muted loop playsinline
        width=1280 height=720></video>
 PAGE
 
@@ -233,7 +243,7 @@ PAGE
             "$driver_log" || true)
         if [ "$conversions" -lt "$MIN_FRAMES" ] ||
            [ "$p010_exports" -lt 1 ] ||
-           ! grep -q 'CreateContext: 10-bit output mode=AFBC_V2 profile=18' \
+           ! grep -q "CreateContext: 10-bit output mode=AFBC_V2 profile=$expected_profile" \
                    "$driver_log"; then
             echo "FAIL  $label (P010 audit conversions=$conversions exports=$p010_exports)"
             FAIL=1
@@ -267,9 +277,11 @@ if [ "$FIREFOX_RDD_SANDBOX" = enabled ]; then
 else
     echo "note  RDD sandbox disabled for this run; see contrib/firefox"
 fi
-play h264 libx264 high yuv420p "" NV12
-play hevc libx265 main yuv420p "" NV12
-play hevc-main10 libx265 main10 yuv420p10le hevc-main10 P010
+play h264 libx264 high yuv420p "" NV12 0 mp4
+play hevc libx265 main yuv420p "" NV12 0 mp4
+play vp9 libvpx-vp9 0 yuv420p "" NV12 0 webm
+play hevc-main10 libx265 main10 yuv420p10le hevc-main10 P010 18 mp4
+play vp9-profile2 libvpx-vp9 2 yuv420p10le vp9-profile2 P010 21 webm
 
 if [ "$FAIL" -ne 0 ]; then
     echo "FAILURES PRESENT"

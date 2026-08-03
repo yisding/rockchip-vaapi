@@ -7,13 +7,16 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)
-FIREFOX_VERSION=${FIREFOX_VERSION:-153.0}
-PATCH=$REPO_ROOT/contrib/firefox/patches/firefox-$FIREFOX_VERSION-rdd-rockchip-vaapi.patch
+FIREFOX_VERSION=${FIREFOX_VERSION:-153.0.1}
+PATCH_VERSION=$FIREFOX_VERSION
 SOURCE_ROOT=${1:-${FIREFOX_SOURCE_ROOT:-}}
 FILTER=security/sandbox/linux/SandboxFilter.cpp
 BROKER=security/sandbox/linux/broker/SandboxBrokerPolicyFactory.cpp
 case $FIREFOX_VERSION in
-    153.0)
+    153.0|153.0.1)
+        # Mozilla's two sandbox preimages are byte-identical in 153.0 and
+        # 153.0.1, so both releases intentionally share one patch artifact.
+        PATCH_VERSION=153.0
         FILTER_SHA256=b1dae2499ba9589cc41454cf7f73c332c82ed9d6c13710c0448fdc9c7507e1e9
         BROKER_SHA256=3eefffdd817ddebea6d029e5403a1f1d9536c7b49ef86e5c553e1ab77e6bddcb
         ;;
@@ -27,6 +30,7 @@ case $FIREFOX_VERSION in
         exit 2
         ;;
 esac
+PATCH=$REPO_ROOT/contrib/firefox/patches/firefox-$PATCH_VERSION-rdd-rockchip-vaapi.patch
 if [ ! -f "$PATCH" ]; then
     echo "error: missing patch $PATCH" >&2
     exit 2

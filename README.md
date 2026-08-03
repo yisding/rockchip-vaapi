@@ -71,11 +71,12 @@ Published MPP `3381fd2c` and FFmpeg `33a651a55b` package root, completing
   see [`docs/HEVC_TILES_BACKEND.md`](docs/HEVC_TILES_BACKEND.md).
 - **Honest capability advertising.** HEVC Main10 has a separate opt-in
   gate whose generated 48-frame and pinned 256-frame MPP AFBC-to-RGA P010
-  paths are bit-exact, but it remains hidden pending broader conformance and
-  app/display HDR presentation. A 10-bit context narrower than RGA3's
+  paths are bit-exact, but it remains hidden pending physical-HDR and release
+  qualification. A 10-bit context narrower than RGA3's
   68-pixel active-width minimum is refused at context creation so applications
   fall back before MPP or RGA setup. VP9 Profile 2 has generated and official
-  libvpx P010-exact AFBC/RGA gates and remains hidden pending app validation.
+  libvpx P010-exact AFBC/RGA gates and remains hidden pending the same release
+  qualification.
   HEVC Main10 additionally has a 24-frame HDR10 gate
   proving byte-exact P010 output and preservation of BT.2020/PQ, mastering
   display, and content-light metadata. A control-gated Main10 prefix reducer
@@ -87,17 +88,16 @@ Published MPP `3381fd2c` and FFmpeg `33a651a55b` package root, completing
   applications fall back instead of receiving an unsafe format or decode path.
 - Packaging/build hygiene: `DESTDIR`/`PREFIX`/multiarch-aware Makefile,
   no `sudo` in `make install`, `make check` validation gate. Version
-  `1.0.11+ysp5` is installed on the ROCK 5B; its payload matches the built deb,
-  and the installed driver passes the complete eight-vector pinned conformance
-  gate plus the 64-pixel Main10 software-fallback audit on the production
-  6.18.40 kernel.
+  `1.0.11+ysp7` is installed on the ROCK 5B; the current source passes the
+  complete risky-enabled normal and ASan/UBSan hardware gates on the audited
+  production `6.18.41-ysp-rockchip64` kernel.
   Packaging MPP `3381fd2c` plus an FFmpeg line containing upstream fix
   `265d39e551` is complete in the YSP PPA. An isolated extraction of the exact
   Published arm64 packages passes the complete 163-vector sweep and full
   shipping-profile matrix normally and with the complete ASan/UBSan driver.
-  Final driver/config version `1.0.11+ysp6` also builds and passes Lintian plus
-  the isolated clean install/upgrade/purge lifecycle; installing those
-  binaries system-wide remains the package-lifecycle gate.
+  The `1.0.11+ysp8` driver/config packages build and pass Lintian plus the
+  isolated clean install/upgrade/purge lifecycle. A genuinely fresh-image boot
+  and hardware-decode run remains separate qualification.
 
 ---
 
@@ -117,9 +117,12 @@ Key features:
   64-pixel-aligned provisional P010 converter probes, so VLC's OpenGL VA-API
   converters can import decoded frames as EGLImages
 - App gates on-device for stock FFmpeg, GStreamer `va`, VLC 3.0.23,
-  Firefox 153.0, and mpv 0.41.0. The display gates refuse to run headless;
-  mpv additionally proves Panfrost can EGL-import a repacked 64-byte-aligned
-  CIF NV12 pitch without falling back to a software download
+  Firefox 153.0/153.0.1, and mpv 0.41.0. H.264 High, HEVC Main, VP9 Profiles
+  0/2, and HEVC Main10 all pass the three display-app gates on a Mutter virtual
+  output; mpv additionally proves Panfrost can EGL-import a repacked
+  64-byte-aligned CIF NV12 pitch without falling back to a software download.
+  This exercises Wayland/Xwayland, EGL and DMA-BUF presentation, but does not
+  certify physical HDR-monitor passthrough
 - Measured 10-bit decode throughput above 260 fps for 1080p HEVC Main10 and
   VP9 Profile 2 through the audited MPP AFBC-to-RGA P010 path
 - Experimental H.264 High encode through `h264_vaapi` and GStreamer
@@ -220,7 +223,7 @@ an isolated root.
 
 Firefox additionally needs a distribution sandbox policy that permits the RDD
 process to use Rockchip MPP, RGA, and dma-heap devices. Version-pinned Firefox
-152.0.6 and 153.0 source patches and validators are provided in
+152.0.6 and 153.0/153.0.1 source patches and validators are provided in
 [`contrib/firefox`](contrib/firefox/README.md). Disabling the RDD sandbox is
 only appropriate as a short, per-process diagnostic because it broadens the
 attack surface for untrusted media. With a suitable policy, enable:

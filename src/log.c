@@ -142,32 +142,23 @@ static uint64_t realtime_nanoseconds(void)
     return seconds * 1000000000u + (uint64_t)timestamp.tv_nsec;
 }
 
-static void format_message(char *message, size_t capacity,
-                           const char *format, va_list arguments)
-{
-    int result = vsnprintf(message, capacity, format, arguments);
-    if (result < 0) {
-        (void)snprintf(message, capacity, "%s", "[format-error]");
-        return;
-    }
-    if ((size_t)result < capacity)
-        return;
-
-    static const char suffix[] = "...[truncated]";
-    size_t suffix_length = sizeof(suffix) - 1;
-    if (capacity > suffix_length)
-        memcpy(message + capacity - suffix_length - 1, suffix,
-               suffix_length + 1);
-}
-
 void rk_log_message(RKLogLevel level, const char *source, int line,
                     const char *function, const char *format, ...)
 {
     char message[RK_LOG_MESSAGE_CAPACITY];
     va_list arguments;
     va_start(arguments, format);
-    format_message(message, sizeof(message), format, arguments);
+    int result = vsnprintf(message, sizeof(message), format, arguments);
     va_end(arguments);
+
+    if (result < 0) {
+        (void)snprintf(message, sizeof(message), "%s", "[format-error]");
+    } else if ((size_t)result >= sizeof(message)) {
+        static const char suffix[] = "...[truncated]";
+        size_t suffix_length = sizeof(suffix) - 1;
+        memcpy(message + sizeof(message) - suffix_length - 1, suffix,
+               suffix_length + 1);
+    }
 
     pthread_mutex_lock(&log_lock);
     if (!log_file || level > log_threshold) {

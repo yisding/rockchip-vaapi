@@ -36,11 +36,13 @@ one-record-per-line framing, nested init/finalize plus sink reopen, and 800
 concurrent records from eight threads without interleaving.
 
 `make check-firefox-rdd-patch` checks the committed policy contract without
-network access. Pass an unpacked exact Firefox 153.0 source tree to validate
-the two upstream source hashes and dry-run/apply the patch:
+network access. Pass an unpacked exact Firefox 153.0.1 source tree to validate
+the two upstream source hashes and dry-run/apply the patch. Firefox 153.0 has
+the same two preimages and can be selected explicitly:
 
 ```sh
-tests/check-firefox-rdd-patch.sh /path/to/firefox-153.0
+tests/check-firefox-rdd-patch.sh /path/to/firefox-153.0.1
+FIREFOX_VERSION=153.0 tests/check-firefox-rdd-patch.sh /path/to/firefox-153.0
 ```
 
 `make check-package-install` builds both binary packages in the repository's
@@ -273,6 +275,36 @@ FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-conformance
 FFMPEG=/usr/bin/ffmpeg RISKY_VECTORS=run make check-sanitize
 ```
 
+The three display-app gates require an advertised display output, but that
+output may be Mutter's virtual monitor when the physical display is
+unavailable. Keep the runtime directory inside the checkout rather than using
+`/tmp`:
+
+```sh
+install -d -m 700 "$PWD/.test-work.mutter-headless"
+env XDG_RUNTIME_DIR="$PWD/.test-work.mutter-headless" \
+  FFMPEG=/usr/bin/ffmpeg \
+  dbus-run-session -- mutter --wayland --headless \
+    --virtual-monitor 1280x720 -- make check-mpv-display
+```
+
+Use the same wrapper for `check-vlc-display` and `check-firefox-decode`.
+Leave Mutter's Xwayland server enabled for VLC 3: its OpenGL VA-API converter
+uses X11 EGL on this stack. For the patched Firefox policy gate, point at the
+completed source build and explicitly require the sandbox:
+
+```sh
+env XDG_RUNTIME_DIR="$PWD/.test-work.mutter-headless" \
+  FIREFOX=/path/to/firefox-build/dist/bin/firefox \
+  FIREFOX_RDD_SANDBOX=enabled FFMPEG=/usr/bin/ffmpeg \
+  dbus-run-session -- mutter --wayland --headless \
+    --virtual-monitor 1280x720 -- make check-firefox-decode
+```
+
+The gate walks the launched process tree and requires the live RDD process to
+report `Seccomp: 2`. A virtual monitor exercises compositor, EGL, Panfrost and
+DMA-BUF presentation; it does not prove physical HDR link or panel behavior.
+
 `check-hevc` runs only the pinned HEVC vectors and fails fast with a bounded
 FFmpeg timeout. All eight are bit-exact as of 2026-07-28, normally and with the
 complete ASan/UBSan driver, and `VAProfileHEVCMain` is advertised by default.
@@ -343,7 +375,7 @@ rejects linear fallback, buffer mismatch, or decode failure. Both cases are
 bit-exact on the tested 2026-07-25 kernel/librga stack. MPP AFBC is mandatory
 here because VDPU383's linear NV15 stride is not always RGA-expressible; the
 conversion also applies MPP's AFBC crop offset. Main10 stays hidden until
-broader conformance and HDR playback checks pass.
+physical HDR and release/distribution qualification are complete.
 
 `check-hevc-main10-hdr-experimental` generates 24 Main10 HDR10 frames at
 320x240. It requires P010 byte equality with software decode, one audited
@@ -363,8 +395,9 @@ allows additional hidden/reference outputs but requires conversions and
 assigned frames to match. The measured runs are 261.38 fps for HEVC (240
 visible/decoded) and 261.08 fps for VP9 (240 visible, 254 decoded).
 
-`check-vlc-display` plays generated H.264 High, HEVC Main, and HEVC Main10
-clips through stock VLC with `--avcodec-hw=vaapi` and requires that VLC select its VA-API
+`check-vlc-display` plays generated H.264 High, HEVC Main, VP9 Profile 0,
+HEVC Main10, and VP9 Profile 2 clips through stock VLC with
+`--avcodec-hw=vaapi` and requires that VLC select its VA-API
 hardware decoder, name this driver, call `vaDeriveImage`, and produce at least
 `MIN_FRAMES` external-pool frames with no driver error markers. It refuses to
 run without `DISPLAY` or `WAYLAND_DISPLAY`: headless VLC reports "no hw decoder
@@ -379,17 +412,21 @@ the layout, the aliasing (a write through the mapping is visible through a
 second map), the DRM PRIME handle, and the refusal of other memory types,
 normally and under ASan/UBSan and TSan. Completed driver-owned P010 and an
 aligned provisional P010 converter probe are accepted; imported, stale, or
-unaligned provisional P010 layouts fail closed. The measured display run
-produces 118 H.264, 120 HEVC Main, and 120 HEVC Main10 external frames.
+unaligned provisional P010 layouts fail closed. On 2026-08-01, a Mutter
+virtual monitor with its own Xwayland display produced 120 external frames for
+each of the five cases. VLC 3 uses its X11 EGL converter here; running the
+virtual compositor with Xwayland disabled makes VLC inherit an unusable host
+X display and is not a valid gate.
 
 VLC destroys its decoder mid-stream at exit with the last pictures still in
 flight. The driver reports that as a teardown-drain note and fails those
 fences rather than waiting forever; it is not an error and the gate does not
 treat it as one.
 
-`check-mpv-display` first generates 20 H.264 High CIF frames at 352x288 and
-plays the complete clip through stock mpv 0.41.0 with `--hwdec=vaapi`,
-gpu-next, OpenGL, and the active Wayland context. It requires VA-API hardware decode,
+`check-mpv-display` generates H.264 High, HEVC Main, VP9 Profile 0, VP9
+Profile 2, and HEVC Main10 HDR10 clips and plays them through stock mpv 0.41.0
+with `--hwdec=vaapi`, gpu-next, OpenGL, and the active Wayland context. It
+requires VA-API hardware decode,
 the VAAPI NV12 video-output path, exactly one MPP info-change, at least 20
 external-pool frames, and at least 20 352-to-384-byte RGA repacks. It rejects
 Panfrost's `WSI pitch not properly aligned`, EGL mapping/import failures,
@@ -405,24 +442,26 @@ repacks to 384 stride, and compares every active output byte. The gate then
 plays a generated HEVC Main10 HDR10 clip and requires VA-API P010 output,
 BT.2020/PQ input metadata, one AFBC conversion per frame, and successful EGL
 presentation. Passing this proves the HDR-tagged P010 presentation path, not
-physical HDR-monitor passthrough. The current GNOME session has no Wayland
-`wl_output`; Mutter's `GetCurrentState` also returns empty physical-monitor
-and logical-monitor arrays. The expanded gate is therefore
-environment-blocked before either case; the earlier 8-bit H.264 result remains
-the last completed mpv evidence.
+physical HDR-monitor passthrough. On 2026-08-01, all five 20-frame cases passed
+under a headless Mutter virtual monitor backed by Panthor/Panfrost GBM. That
+closes virtual Wayland/EGL/DMA-BUF presentation, including P010 and HDR-tagged
+input. Mutter still reports empty physical-monitor and logical-monitor arrays,
+so physical HDR output remains unqualified.
 
-`check-firefox-decode` selects H.264 High, HEVC Main, and/or HEVC Main10
-through `FIREFOX_CASES` and plays them in stock Firefox with a throwaway
-profile. It requires at least `MIN_FRAMES` external frames plus DMA-BUF
-exports, with no driver error markers. `KEEP_WORK=1` preserves the exact page,
-media, browser log, and driver log for boundary diagnosis. Like the VLC gate
-it refuses to run headless.
+`check-firefox-decode` selects H.264 High, HEVC Main, VP9 Profile 0, HEVC
+Main10, and/or VP9 Profile 2 through `FIREFOX_CASES` and plays them in Firefox
+with a throwaway profile. It requires at least `MIN_FRAMES` external frames
+plus DMA-BUF exports, with no driver error markers. Both 10-bit cases also
+require the AFBC-to-P010 conversion, corrected GR1616 plane descriptor, and
+successful zero-copy plane-1 EGL import. `KEEP_WORK=1` preserves the exact
+page, media, browser log, and driver log for boundary diagnosis. Like the VLC
+gate it refuses to run headless.
 
 By default it runs with `MOZ_DISABLE_RDD_SANDBOX=1` and says so in its own
 output. The stock Firefox binary cannot reach `/dev/mpp_service`, `/dev/rga`
 or `/dev/dma_heap` from a sandboxed RDD process; `contrib/firefox` holds
-version-pinned 152.0.6 and 153.0 source patches that add exactly those broker
-paths and ioctls, but they have to be applied to a Firefox source build. The
+version-pinned 152.0.6 and 153.0/153.0.1 source patches that add exactly those
+broker paths and ioctls, but they have to be applied to a Firefox source build. The
 default mode therefore proves the decode and export path, not the sandbox
 story. `FIREFOX_RDD_SANDBOX=enabled` instead removes the bypass and requires
 the live RDD process to be present with Linux seccomp filter mode 2 before the
@@ -430,21 +469,31 @@ hardware evidence can pass. For Main10 the gate also enables Firefox's
 `Dmabuf` log and requires `DRM_FORMAT_GR1616` (`format=0x32335247`) plus
 successful zero-copy plane-1 texture creation.
 
-Stock Firefox 153 completes the H.264 and HEVC Main cases. Its recorded Main10
+Stock Firefox 153.0.1 completes all five cases with the sandbox disabled as an
+explicit diagnostic: H.264 High, HEVC Main, VP9 Profile 0, HEVC Main10, and
+VP9 Profile 2 each produced at least 350 hardware frames and 696 DMA-BUF
+exports during the 15-second virtual-monitor run. Its earlier recorded Main10
 fallback was caused by the driver exporting `0x36315247` (`GR16`) instead of
 `DRM_FORMAT_GR1616` (`0x32335247`, `GR32`). Mesa therefore rejected an unknown
 fourcc before Panfrost import. With installed `1.0.11+ysp7`, the corrected
-GR1616 plane imports zero-copy in both the RDD process and parent renderer;
-the later Main10 failure is an MPP-marked decode error, not an EGL-format
-failure. `check-firefox-rdd-patch` hash-pins only the RDD sandbox patch. Full
-Main10 playback and sandboxed playback results remain separate gates.
+GR1616 plane now imports zero-copy in both the RDD process and parent renderer,
+and the expanded run is stable. `check-firefox-rdd-patch` hash-pins only the
+RDD sandbox patch. Unsandboxed decode and sandboxed playback remain separate
+gates.
 
-Chromium is not gated. On this stack Chromium 150 cannot initialize a GL
-context at all -- ANGLE reports "Could not create a backing OpenGL context" on
-Mali-G610/Panfrost under both X11 and Wayland -- so its GPU process never
-starts and no VA-API decode path is reachable. The same session runs accelerated
-GL for VLC and Firefox, so this is a Chromium/ANGLE limitation rather than a
-driver one, and no Chromium claim is made either way.
+Chromium is not gated. Chromium 151 fixes the earlier ANGLE failure and now
+creates an accelerated OpenGL ES context over Panfrost on Wayland. Its live
+DevTools `SystemInfo.getInfo` report nevertheless returns an empty
+`videoDecoding` profile list, and `chrome://media-internals` selects
+`FFmpegVideoDecoder` with `kIsPlatformVideoDecoder=false` for H.264 High. The
+driver is never loaded. The arm64 package contains Chromium's V4L2 decoder
+backend but no libva wrapper/entry points; the board's exposed Hantro decoder
+node advertises only MPEG-2 and VP8 compressed input. A consolidated
+`AcceleratedVideoDecoder,VaapiVideoDecoder,AcceleratedVideoDecodeLinuxGL`
+feature switch can change the GPU feature label to enabled, but cannot create
+missing hardware profiles. This is a distro Chromium build/backend boundary,
+not a runtime-flag or `/dev/dri` aliasing problem, so no Chromium VA-API claim
+is made.
 
 `check-vp9-profile2-experimental` generates a lossless 48-frame VP9 Profile 2
 stream at 320x240 and runs the checksum-pinned official WebM/libvpx
@@ -455,7 +504,8 @@ conversion and rejects linear fallback, buffer mismatch, or decode failure.
 The official vector additionally audits its 11 decoded frames, including one
 hidden/reference output. This validates the VP9 uncompressed-header parser and
 profile-matched hidden-reference handling in addition to the shared 10-bit
-conversion/export path. The profile remains hidden pending app validation.
+conversion/export path. The profile remains hidden pending the same physical
+display and release/distribution qualification as Main10.
 
 `check-gstreamer-va` rescans GStreamer 1.28's `va` plugin against the local
 driver, requires registration of `vah264dec`, `vah265dec`, and `vavp9dec`,
@@ -655,8 +705,8 @@ fix is installed and the board has booted that kernel. The
 driver. The harness additionally requires both the exact running release and
 the SHA-256 of `/sys/kernel/notes` to match `RISKY_KERNEL_RELEASE` and
 `RISKY_KERNEL_NOTES_SHA256`. The defaults name the current audited production
-kernel, `6.18.40-ysp-rockchip64` with notes SHA-256
-`db18acdddf7ba9de84590a5816911ed2d929643980057d639a90c2b1337d900c`;
+kernel, `6.18.41-ysp-rockchip64` with notes SHA-256
+`6388dd294ff782a438a3a1e03d2c21f033998566d048cc6feecdd315aa2250f8`;
 a stale checkbox or environment variable therefore cannot enable the vector
 on an older or merely same-version build. A future kernel must be audited
 before advancing both variables.
@@ -706,19 +756,20 @@ driver build includes the hidden-reference bridge, `/usr/bin/ffmpeg` has
 VA-API, and the build dependencies, `curl`, `unzip`, and `sha256sum` are
 installed.
 
-On 2026-07-29, installed `rockchip-vaapi 1.0.11+ysp5` was verified byte-for-byte
-against its built deb payload on the production-shaped stack:
-`6.18.40-ysp-rockchip64` (notes
-`db18acdddf7ba9de84590a5816911ed2d929643980057d639a90c2b1337d900c`),
-`librockchip-mpp1 1.5.0+git20260727.d8c6b88a`, and
+On 2026-08-01, the current source passed the complete risky-enabled normal and
+ASan/UBSan hardware gates on the production-shaped stack:
+`6.18.41-ysp-rockchip64` (notes
+`6388dd294ff782a438a3a1e03d2c21f033998566d048cc6feecdd315aa2250f8`),
+`librockchip-mpp1 1.5.0+git20260730.ad325345`, and
 `librga2 2.2.0+git20260725.26a50ef`. The installed-driver 64x240 Main10 gate
 software-decoded all 48 frames after one up-front context refusal with zero
 RGA submissions and zero kernel `no core match` messages. The complete pinned
 conformance gate then passed, including the guarded VP9 hidden-reference
-vector. These are installed-package correctness results; they do not substitute
-for a genuinely clean-image install or the two-hour resource soaks.
+vector. Installed `rockchip-vaapi 1.0.11+ysp7` supplies the current GR1616
+exporter. These are on-board correctness results; they do not substitute for a
+genuinely clean-image install or the two-hour resource soaks.
 
-The final `1.0.11+ysp6` driver/config packages build with the native Debian
+The earlier `1.0.11+ysp6` driver/config packages build with the native Debian
 toolchain and pass Lintian plus the isolated clean install, upgrade, config
 purge, reinstall, and full-purge lifecycle. Against checksum-verified exact
 Published MPP `3381fd2c` and FFmpeg `33a651a55b` binaries, the complete
@@ -726,6 +777,11 @@ risky-enabled shipping matrix is also green with the full ASan/UBSan driver:
 all pinned vectors, the H.264 reference/B-frame and 4K matrix, five VP9
 determinism runs, and VP8 software fallback. This is exact-package correctness
 evidence; host installation and installed-payload identity remain separate.
+
+On 2026-08-01, `1.0.11+ysp8-0ubuntu1~rk1` was rebuilt from the current tree.
+Both arm64 driver and architecture-independent config packages pass Lintian
+and the isolated clean install, upgrade, config purge, reinstall, and full
+purge lifecycle. The package gate does not install ysp8 on the host.
 
 On 2026-07-21, this board was booted into fixed kernel build `#3`, identified
 by kernel-notes SHA-256

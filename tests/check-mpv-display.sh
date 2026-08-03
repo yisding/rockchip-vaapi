@@ -106,6 +106,95 @@ fi
 echo "ok    mpv rendered $MIN_FRAMES H.264 VA-API frames through Panfrost EGL"
 echo "ok    decoded=$decoded repacks=$repacks info_changes=$info_changes"
 
+play_matrix_case()
+{
+    label=$1
+    encoder=$2
+    profile=$3
+    pixel_format=$4
+    container=$5
+    profiles=$6
+    expected_format=$7
+    expected_profile=$8
+    clip=$WORK/$label.$container
+    mpv_log=$WORK/$label.mpv.log
+    driver_log=$WORK/$label.driver.log
+
+    if [ "$container" = webm ]; then
+        "$FFMPEG" -nostdin -y -v error -f lavfi \
+            -i "testsrc2=size=320x240:rate=25" -frames:v "$MIN_FRAMES" \
+            -c:v "$encoder" -profile:v "$profile" -pix_fmt "$pixel_format" \
+            -deadline good -cpu-used 4 "$clip"
+    else
+        "$FFMPEG" -nostdin -y -v error -f lavfi \
+            -i "testsrc2=size=320x240:rate=25" -frames:v "$MIN_FRAMES" \
+            -c:v "$encoder" -profile:v "$profile" -pix_fmt "$pixel_format" \
+            "$clip"
+    fi
+
+    if ! RK_VAAPI_EXPERIMENTAL_PROFILES=$profiles \
+            RK_VAAPI_LOG=$driver_log \
+            timeout --kill-after=5s "$MPV_TIMEOUT" \
+            "$MPV" --no-config --input-terminal=no \
+            --input-default-bindings=no --osc=no --deinterlace=no \
+            --hwdec=vaapi --hwdec-software-fallback=no --vo=gpu-next \
+            --gpu-api=opengl --gpu-context=wayland --no-audio \
+            --msg-level=all=info "$clip" >"$mpv_log" 2>&1; then
+        echo "FAIL  mpv $label exited non-zero" >&2
+        tail -40 "$mpv_log" >&2
+        exit 1
+    fi
+
+    if ! grep -q 'Using hardware decoding (vaapi)' "$mpv_log" ||
+       ! grep -qE "VO: \[gpu-next\] 320x240 vaapi\[$expected_format\]" \
+               "$mpv_log"; then
+        echo "FAIL  mpv did not present $label as $expected_format" >&2
+        grep -E 'Using .*decoding|VO:' "$mpv_log" >&2 || true
+        exit 1
+    fi
+    if grep -qE "$APP_ERRORS" "$mpv_log"; then
+        echo "FAIL  mpv $label/EGL presentation error" >&2
+        grep -nE "$APP_ERRORS" "$mpv_log" | head -10 >&2
+        exit 1
+    fi
+
+    info_changes=$(grep -c 'assign_mpp_frame: info_change' \
+                        "$driver_log" || true)
+    if [ "$expected_format" = nv12 ]; then
+        decoded=$(grep -c \
+            'assign_mpp_frame: surface=.*zero_copy=1.*external=1' \
+            "$driver_log" || true)
+    else
+        decoded=$(grep -c \
+            'assign_mpp_frame: surface=.*converted_10bit=1.*external=1' \
+            "$driver_log" || true)
+        conversions=$(grep -c 'convert: NV15->P010.*afbc=1' \
+                           "$driver_log" || true)
+        if [ "$conversions" -lt "$MIN_FRAMES" ] ||
+           ! grep -q "CreateContext: 10-bit output mode=AFBC_V2 profile=$expected_profile" \
+                   "$driver_log"; then
+            echo "FAIL  $label P010 audit: conversions=$conversions" >&2
+            exit 1
+        fi
+    fi
+    exports=$(grep -c 'ExportSurfaceHandle: surface=.*decoded=1' \
+                  "$driver_log" || true)
+    if [ "$info_changes" -ne 1 ] || [ "$decoded" -lt "$MIN_FRAMES" ] ||
+       [ "$exports" -lt "$MIN_FRAMES" ] ||
+       grep -qE 'decode failed|external buffer mismatch|unsafe internal layout|RGA .*failed' \
+               "$driver_log"; then
+        echo "FAIL  $label driver audit: info_changes=$info_changes decoded=$decoded exports=$exports" >&2
+        exit 1
+    fi
+
+    echo "ok    mpv rendered $decoded $label VA-API frames through Panfrost EGL"
+}
+
+play_matrix_case hevc-main libx265 main yuv420p mp4 "" nv12 0
+play_matrix_case vp9-profile0 libvpx-vp9 0 yuv420p webm "" nv12 0
+play_matrix_case vp9-profile2 libvpx-vp9 2 yuv420p10le webm \
+    vp9-profile2 'p010(le)?' 21
+
 main10_clip=$WORK/hevc-main10-hdr.mkv
 main10_mpv_log=$WORK/hevc-main10-hdr.mpv.log
 main10_driver_log=$WORK/hevc-main10-hdr.driver.log

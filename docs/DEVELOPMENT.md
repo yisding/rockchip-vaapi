@@ -649,7 +649,7 @@ seccomp boundary.
 For a hardened deployment, a distribution Firefox sandbox policy must permit
 the required MPP, RGA, and dma-heap operations in RDD. The driver and optional
 config package deliberately do not weaken that sandbox. Source-package patches
-for Firefox 152.0.6 and 153.0 are pinned and validated under
+for Firefox 152.0.6 and 153.0/153.0.1 are pinned and validated under
 `contrib/firefox`; they add the missing broker paths only on systems where
 those nodes exist and allowlist the four MPP/RGA requests measured on the
 audited stack.
