@@ -40,8 +40,9 @@ for value in "$CONTROL_RUNS" "$CONCURRENT_ROUNDS"; do
             ;;
     esac
 done
-if [ ! -x "$DRIVER_DIR/rockchip_drv_video.so" ]; then
-    echo "error: driver is missing from $DRIVER_DIR; run make first" >&2
+if [ ! -f "$DRIVER_DIR/rockchip_drv_video.so" ] ||
+   [ ! -r "$DRIVER_DIR/rockchip_drv_video.so" ]; then
+    echo "error: driver is missing or unreadable in $DRIVER_DIR" >&2
     exit 2
 fi
 if [ ! -e "$RENDER_NODE" ]; then
