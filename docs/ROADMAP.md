@@ -1024,14 +1024,63 @@ should learn it did not get it.
   the serialization story has to be explicit, and concurrency with decode and
   encode contexts is a gate rather than an assumption.
 
-#### The gate cannot be "bit-exact vs a software reference"
+#### How to gate output that has no canonical answer
 
-Every decode gate in this document is bit-exactness against a software decoder.
-Deinterlacing has no such reference — there is no canonical correct output.
-Use `iep2_test` as the golden generator instead: for the same input, mode and
-field order, this driver's VPP path drives the same hardware through the same
-API, so its output should be **byte-identical to `iep2_test`**. That restores an
-exact gate without inventing a quality metric.
+Every decode gate in this document is bit-exactness against a software decoder,
+and that bar cannot transfer here. It is worth being precise about why, because
+the conclusion is *not* that exact gates are unavailable — three of them are.
+
+**Why decode gets a bit-exact answer.** The codec specs define decoding
+normatively: integer transforms with specified rounding, exactly defined
+prediction and reconstruction. Every conformant decoder must produce identical
+samples, and the conformance suites ship the expected output. There is one right
+answer by construction.
+
+**Why deinterlacing does not.** No standard specifies it — it is post-processing
+outside every codec spec. More fundamentally it is *ill-posed*: interlaced
+capture samples only alternate lines at each instant, so the missing lines at
+that instant were never captured and exist nowhere in the bitstream. A
+deinterlacer estimates them. Bob, weave, yadif, bwdif and IEP2's
+motion-compensated I5O2 all produce different pixels and all are legitimately
+correct. The problem is not a missing reference; it is that "what is the correct
+output?" has no unique answer, so invented data cannot be checked against a
+canonical version of itself.
+
+Three gates remain available, and they answer different questions:
+
+1. **Structural exactness — prefer this one.** In a single-field mode the
+   emitted field's lines pass through unchanged, so they can be compared byte
+   for byte against the source while the interpolated parity is ignored. This is
+   exact, and it verifies real properties: the right field was selected and
+   genuine samples were not corrupted. It is what settled I1O1T/I1O1B parity on
+   2026-08-04 — 1.0000 on the emitted parity against ~0.92 on the interpolated
+   one — without needing to know what the invented lines should be. Look for a
+   structural invariant before reaching for either gate below.
+2. **Golden self-reference.** For the same input, mode and field order, this
+   driver's VPP path drives the same hardware through the same API as
+   `iep2_test`, so its output should be **byte-identical**. Exact, and the right
+   regression gate. **Its limit matters:** the golden inherits any error IEP2
+   makes, so this answers "did this change alter the output?" and never "is the
+   output correct?". Do not let it stand in for correctness.
+3. **Synthetic ground truth.** Take progressive source, split it into fields,
+   deinterlace, and compare against the original progressive frames. A true
+   reference genuinely exists here, but the deinterlacer will not reproduce it
+   exactly because it is reconstructing information that was deliberately
+   discarded. This yields PSNR/SSIM — a quality gate, not an exact one.
+
+**Precondition for 1 and 2: determinism**, which is not free. The 2026-08-03
+IEP2 investigation recorded ten runs of one input producing ten different
+outputs, root-caused to a missing dma-buf cache sync in Rockchip's harness
+rather than the driver. Re-checked 2026-08-04 on the production kernel: three
+identical runs produced one SHA-256. Re-establish this before trusting any byte
+comparison, and treat a determinism failure as a sync bug until proven
+otherwise.
+
+This is the same shape as the encode gates in Phase 4, not special pleading:
+encoders are not spec-exact either, which is why that phase gates on round-trip
+PSNR plus interop. Decode is the unusual stage — the only one with a normative
+bit-exact answer, which is exactly why the rest of this document leans on it so
+heavily.
 
 #### Phasing
 
@@ -1039,10 +1088,10 @@ exact gate without inventing a quality metric.
 |---|---|---|
 | 6.0 | ~~Close the open TFF/BFF question~~ **DONE 2026-08-04** | Settled on hardware: the mode T/B suffix selects the emitted field and `dil_order` has no effect on it (same input, `-f TFF` vs `-f BFF` byte-identical; `-m 5` vs `-m 6` differ). All 14 mode x field-order runs clean with a silent kernel journal, closing the IEP2 audit gate. It also found a real libmpp bug — the hardcoded `I1O1T` bootstrap emits the top field for BFF streams — fixed in `yisding/mpp@7e2c24bd` |
 | 6.1 | Export `iep2_api.h`/`iep_api.h` from the libmpp fork; package it | Driver builds against installed headers, no vendored declarations |
-| 6.2 | Standalone IEP2 wrapper inside the driver, no VA surface yet | One field pair converted; output byte-identical to `iep2_test` |
+| 6.2 | Standalone IEP2 wrapper inside the driver, no VA surface yet | One field pair converted; output byte-identical to `iep2_test` (gate 2), after confirming determinism |
 | 6.3 | VPP entrypoint skeleton: `VAProfileNone` + `VAEntrypointVideoProc`, filter and cap queries, surface attributes; everything else fails closed | `vainfo` lists VideoProc; every unsupported request returns a real `VAStatus`; decode and encode gates unchanged |
-| 6.4 | Bob via I1O1T/I1O1B | `ffmpeg -vf deinterlace_vaapi=mode=bob` yields 2x frame count, byte-identical to the `iep2_test` reference, on TFF and BFF |
-| 6.5 | Motion-compensated I5O2 with forward references | Correct cadence and field order on TFF and BFF clips; reference-starved requests refused; clean kernel journal across the run |
+| 6.4 | Bob via I1O1T/I1O1B | `ffmpeg -vf deinterlace_vaapi=mode=bob` yields 2x frame count and is byte-identical to the `iep2_test` reference (gate 2) on TFF and BFF; the emitted parity matches the source exactly (gate 1) |
+| 6.5 | Motion-compensated I5O2 with forward references | Both output parities exact against the source (gate 1) and cadence correct on TFF and BFF clips; reference-starved requests refused; clean kernel journal across the run |
 | 6.6 | Robustness | Sanitizer and TSan clean; VPP concurrent with decode and encode contexts; IOMMU-fault/reset recovery; absent-IEP2 kernel path; soak |
 | 6.7 | App enablement | `deinterlace_vaapi` and GStreamer `vapostproc` both work on-device |
 
