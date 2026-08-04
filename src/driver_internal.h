@@ -18,8 +18,26 @@
 #include "log.h"
 #include "object_heap.h"
 
-#define RK_MAX_WIDTH 7680
-#define RK_MAX_HEIGHT 4320
+/*
+ * The only picture-size range RK3588 actually publishes: the RK3588S datasheet
+ * (V1.3) states "Encoder size is from 96x96 to 8192x8192". It documents no
+ * geometric range for the decoder at all -- its decoder rows are throughput
+ * figures ("8K@60fps (7680x4320)"), not limits.
+ *
+ * These were 7680x4320 until 2026-08-04. That pair was never measured: it
+ * entered upstream as a bare literal in the Firefox capability-advertisement
+ * recipe, became an enforced rejection during an unrelated refactor, and was
+ * then reused for encode. It is demonstrably too strict -- 7688, 8064 and 8192
+ * wide all decode clean, as does 8440 tall.
+ *
+ * Both HEVC PICSIZE conformance vectors carry an 8440 dimension
+ * (PICSIZE_A 1056x8440, PICSIZE_B 8440x1056), so they stay refused here and
+ * neither changes class. That matters for PICSIZE_B specifically: at 8440 wide
+ * it provokes an rkvdec2 watchdog timeout (err 0x23), and nothing below this
+ * driver enforces any size limit.
+ */
+#define RK_MAX_WIDTH 8192
+#define RK_MAX_HEIGHT 8192
 
 typedef struct {
     RKObjectBase base;

@@ -379,9 +379,9 @@ attrs[1].value.value.i = VA_SURFACE_ATTRIB_MEM_TYPE_VA
                        | VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2;
 // Max dimensions
 attrs[2].type  = VASurfaceAttribMaxWidth;
-attrs[2].value.value.i = 7680;
+attrs[2].value.value.i = 8192;
 attrs[3].type  = VASurfaceAttribMaxHeight;
-attrs[3].value.value.i = 4320;
+attrs[3].value.value.i = 8192;
 ```
 
 ---
@@ -529,7 +529,7 @@ stream rather than rebuilt -- `ReferenceFrames[]` carries no ordering, and
 RefPicSetLtCurr order decides the initial reference list. All eight pinned
 vectors are bit-exact, as are 142 of the 163 HEVC Main candidates in the FATE
 conformance suite, with zero driver failures. The remainder are two streams MPP
-itself cannot decode and two pictures beyond the advertised 7680x4320
+itself cannot decode and two pictures beyond the advertised 8192x8192
 constraint; all four fail closed. Errored or discarded MPP frames still become
 decode failures rather than bound corrupt output.
 
@@ -671,7 +671,7 @@ of the fix.
   Bitrate and frame-rate distinctions cannot be recovered from this buffer.
 - HEVC Main is advertised. Two FATE conformance streams -- `NUT_A_ericsson_4`
   and `_5` -- cannot be decoded by MPP itself and fail closed, as do pictures
-  beyond the advertised 7680x4320 constraint.
+  beyond the advertised 8192x8192 constraint.
 - HEVC Main10 has bit-exact generated 48-frame and pinned FATE 256-frame AFBC
   NV15-to-P010 development gates.
   VP9 Profile 2 has a separate bit-exact 48-frame gate through the same

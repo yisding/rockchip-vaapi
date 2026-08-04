@@ -483,7 +483,7 @@ were fixed driver limits; see the Phase 1 note below. After those fixes the
 sweep is **134 bit-exact, zero driver failures**. The remainder are 17
 candidates that are not Main 8-bit 4:2:0, `PICSIZE_A_Bossen_1.bit` at
 1056x8440 which the driver correctly refuses against its advertised
-7680x4320 constraint, and streams direct MPP cannot decode either.
+8192x8192 constraint, and streams direct MPP cannot decode either.
 `make check-hevc-conformance-sweep` pins every class in
 `tests/hevc-sweep-vectors.tsv` and fails on divergence in either direction.
 
