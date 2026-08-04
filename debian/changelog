@@ -1,3 +1,24 @@
+rockchip-vaapi (1.0.11+ysp12-0ubuntu1~rk1) resolute; urgency=medium
+
+  * Disable MPP's decoder-internal deinterlacer at decode-context creation.
+    MPP enables it by default and expects consumers to opt out; this driver
+    never did, which was harmless only while RK3588 kernels shipped no IEP2
+    client and vproc init failed. Kernel 6.18.42 enables IEP2, so the path went
+    live and broke interlaced decode: the deinterlacer emits two frames per
+    field pair with a synthesized PTS, which cannot route through VA-API
+    decode's 1:1 surface contract. Measured on CABREF3_Sand_D.264, 50 coded
+    pictures produced 98 frames, 48 unroutable, and surfaces that never
+    completed returned VA_STATUS_ERROR_DECODING_ERROR. Deinterlacing belongs to
+    VAEntrypointVideoProc, which this driver does not implement.
+  * Derive the driver_objects_test picture-size rejection boundary from
+    RK_MAX_WIDTH instead of pinning the literal 7681, which the 8192 limit made
+    legal.
+  * ysp11 was prepared but never published or installed; it carried the
+    8192x8192 picture-size change without the deinterlace fix above, so it is
+    superseded rather than shipped.
+
+ -- Yi Ding <yi.s.ding@gmail.com>  Tue, 04 Aug 2026 09:49:12 -0700
+
 rockchip-vaapi (1.0.11+ysp11-0ubuntu1~rk1) resolute; urgency=medium
 
   * Raise the advertised and enforced picture-size limits from 7680x4320 to
