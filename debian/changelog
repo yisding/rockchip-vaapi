@@ -1,3 +1,24 @@
+rockchip-vaapi (1.0.11+ysp11-0ubuntu1~rk1) resolute; urgency=medium
+
+  * Raise the advertised and enforced picture-size limits from 7680x4320 to
+    8192x8192, the only picture-size range RK3588 publishes ("Encoder size is
+    from 96x96 to 8192x8192", RK3588S datasheet V1.3; the decoder rows are
+    throughput figures, not limits). The previous pair was never measured: it
+    entered upstream as a bare literal in a Firefox capability-advertisement
+    recipe, became an enforced rejection during an unrelated refactor, and was
+    then reused for encode. Widths 7688, 8064 and 8192 all decode clean, as
+    does 8440 tall.
+  * No conformance class changes: both HEVC PICSIZE vectors carry an 8440
+    dimension (PICSIZE_A 1056x8440, PICSIZE_B 8440x1056), so both still exceed
+    the new limit and still fail closed. PICSIZE_B matters specifically because
+    at 8440 wide it provokes an rkvdec2 watchdog timeout, and nothing below
+    this driver enforces any size limit.
+  * As a consequence, VAConfigAttribEncMaxSlices is derived from the height
+    limit and rises from 68 to 128 for HEVC Main, and from 270 to 512 for
+    H.264.
+
+ -- Yi Ding <yi.s.ding@gmail.com>  Tue, 04 Aug 2026 08:40:20 -0700
+
 rockchip-vaapi (1.0.11+ysp10-0ubuntu1~rk1) resolute; urgency=medium
 
   * Pass CFLAGS to the driver link so the Debian build's -flto link step also
