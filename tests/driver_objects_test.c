@@ -94,7 +94,8 @@ static void test_experimental_h264_encode(struct VADriverVTable *v,
     if (attrs[0].value != VA_RT_FORMAT_YUV420 ||
         attrs[1].value != (VA_RC_CQP | VA_RC_CBR | VA_RC_VBR) ||
         attrs[2].value != VA_ENC_PACKED_HEADER_NONE ||
-        attrs[3].value != 270 ||
+        /* (RK_MAX_HEIGHT + 15) / 16, one slice per macroblock row. */
+        attrs[3].value != 512 ||
         attrs[4].value !=
             (VA_ENC_SLICE_STRUCTURE_POWER_OF_TWO_ROWS |
              VA_ENC_SLICE_STRUCTURE_EQUAL_ROWS |
@@ -224,7 +225,8 @@ static void test_experimental_hevc_encode(struct VADriverVTable *v,
         block_sizes.bits.log2_max_coding_tree_block_size_minus3 != 3 ||
         block_sizes.bits.log2_min_coding_tree_block_size_minus3 != 3 ||
         block_sizes.bits.log2_min_luma_coding_block_size_minus3 != 0 ||
-        attrs[4].value != 68 ||
+        /* (RK_MAX_HEIGHT + 63) / 64, one slice per CTU64 row. */
+        attrs[4].value != 128 ||
         attrs[5].value !=
             (VA_ENC_SLICE_STRUCTURE_POWER_OF_TWO_ROWS |
              VA_ENC_SLICE_STRUCTURE_EQUAL_ROWS |
