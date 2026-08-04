@@ -956,6 +956,109 @@ concurrent with decode contexts are race-free.
 - Offer the correctness fixes and the driver upstream (libva ecosystem /
   original author) if there's appetite.
 
+### Phase 6 — Hardware deinterlacing (`VAEntrypointVideoProc`)  (~2-3 wk)
+
+Proposed 2026-08-04, not started. RK3588 has a working deinterlacer (IEP2) and
+this driver exposes no way to reach it. Nothing here is required for the
+shipping decode/encode set; it is the honest home for a capability the hardware
+has and the VA-API surface currently lacks.
+
+#### Why this is a new entrypoint and not a decode-path option
+
+MPP's decoder will deinterlace internally, and that is exactly what must not be
+used. Decode is **1:1 by construction**: the client allocates one surface per
+coded picture and brackets it with `vaBeginPicture`/`vaEndPicture`. The
+deinterlacer is **1:N with synthesized timestamps** — `mpp_dec_vproc.c` emits
+two frames per field pair and gives the interpolated one
+`(prev_pts + curr_pts) / 2`, a PTS matching no submitted picture. Wiring that
+into decode produced 98 output frames for 50 coded pictures, of which 48 had no
+route and were dropped, and surfaces that never completed returned
+`VA_STATUS_ERROR_DECODING_ERROR`. The driver now disables MPP's internal vproc
+for that reason (`src/context.c`), and that decision is not revisited here.
+
+VPP inverts the ownership that made this impossible. Under
+`VAEntrypointVideoProc` the **client** allocates every output surface and calls
+the pipeline once per output frame, selecting field parity through
+`VAProcPipelineParameterBuffer.filter_flags` (`VA_TOP_FIELD` /
+`VA_BOTTOM_FIELD`). One input field pair becomes two client-driven pipeline
+calls, each producing one client-owned surface. The cardinality expansion
+becomes legal because the client asked for it.
+
+#### Backend
+
+Drive IEP2 through libmpp's standalone vproc API — `get_iep_ctx()` /
+`put_iep_ctx()` plus the `IEP_CMD_*` control set — **not** through
+`mpp_dec_vproc`, which is decoder-coupled and carries the frame-cardinality
+behavior above. `mpp/vproc/iep2/test/iep2_test.c` is a complete working
+reference for this API and was re-confirmed on `6.18.42-ysp-rockchip64`
+(2026-08-04): I5O2 and I1O1T both produced correct-size output with a clean
+kernel journal.
+
+`get_iep_ctx`, `put_iep_ctx` and `rockchip_iep2_api_alloc_ctx` are already
+exported from the shipped `librockchip_mpp.so`; only the headers
+(`mpp/vproc/inc/iep2_api.h`, `iep_api.h`) are unexported. Since we build and
+package libmpp, exporting them is the clean fix — do not vendor copies.
+
+#### Filter mapping
+
+| VA algorithm | IEP2 mode | References needed |
+|---|---|---|
+| `VAProcDeinterlacingBob` | `IEP2_DIL_MODE_I1O1T` / `I1O1B` | none |
+| `VAProcDeinterlacingMotionCompensated` | `IEP2_DIL_MODE_I5O2` | 2 forward |
+| `VAProcDeinterlacingWeave` | not advertised — the client already has this for free | — |
+
+Refuse motion-compensated requests that arrive without enough references rather
+than silently degrading to Bob: a client that asked for the better algorithm
+should learn it did not get it.
+
+#### Constraints to encode as capability, not discover at runtime
+
+- **<=1920x1088.** `iep2.c` allocates the motion-data buffer at a hardcoded
+  `1920 * 1088`. Advertise the bound and fail closed above it.
+- **8-bit NV12 only** to start. IEP2 10-bit support is unverified; do not
+  advertise P010 deinterlacing on a guess.
+- **Requires an IEP2-capable kernel** (mpp_service client 28). When absent,
+  `vaQueryVideoProcFilters` must return no deinterlacing filter rather than
+  failing later, and decode/encode must be entirely unaffected.
+- **IEP2 is a single hardware block.** VPP contexts contend with each other, so
+  the serialization story has to be explicit, and concurrency with decode and
+  encode contexts is a gate rather than an assumption.
+
+#### The gate cannot be "bit-exact vs a software reference"
+
+Every decode gate in this document is bit-exactness against a software decoder.
+Deinterlacing has no such reference — there is no canonical correct output.
+Use `iep2_test` as the golden generator instead: for the same input, mode and
+field order, this driver's VPP path drives the same hardware through the same
+API, so its output should be **byte-identical to `iep2_test`**. That restores an
+exact gate without inventing a quality metric.
+
+#### Phasing
+
+| Step | Work | Exit gate |
+|---|---|---|
+| 6.0 | Close the open TFF/BFF question: `I1O1B` is never selected anywhere in `mpp_dec_vproc.c`, and the IEP2 audit still lists "top- and bottom-field-first content plus I5O2, I2O2, and I1O1 modes behave correctly" as unmet | `iep2_test -m 5` vs `-m 6` on both TFF and BFF inputs, with field-parity semantics settled against the TRM. **Blocks the rest** — field parity is load-bearing |
+| 6.1 | Export `iep2_api.h`/`iep_api.h` from the libmpp fork; package it | Driver builds against installed headers, no vendored declarations |
+| 6.2 | Standalone IEP2 wrapper inside the driver, no VA surface yet | One field pair converted; output byte-identical to `iep2_test` |
+| 6.3 | VPP entrypoint skeleton: `VAProfileNone` + `VAEntrypointVideoProc`, filter and cap queries, surface attributes; everything else fails closed | `vainfo` lists VideoProc; every unsupported request returns a real `VAStatus`; decode and encode gates unchanged |
+| 6.4 | Bob via I1O1T/I1O1B | `ffmpeg -vf deinterlace_vaapi=mode=bob` yields 2x frame count, byte-identical to the `iep2_test` reference, on TFF and BFF |
+| 6.5 | Motion-compensated I5O2 with forward references | Correct cadence and field order on TFF and BFF clips; reference-starved requests refused; clean kernel journal across the run |
+| 6.6 | Robustness | Sanitizer and TSan clean; VPP concurrent with decode and encode contexts; IOMMU-fault/reset recovery; absent-IEP2 kernel path; soak |
+| 6.7 | App enablement | `deinterlace_vaapi` and GStreamer `vapostproc` both work on-device |
+
+#### Risks
+
+- **Unversioned internal API.** Exporting libmpp internals forks us further from
+  upstream and the ABI is not stable. Keep the wrapper narrow and pin the libmpp
+  version it is validated against.
+- **Cache synchronization.** The 2026-08-03 IEP2 non-determinism investigation
+  root-caused irreproducible output to a missing dma-buf cache sync in
+  *Rockchip's harness*, not the driver. That is the failure mode this wrapper is
+  most likely to reproduce; make the sync explicit and test it early.
+- **Scope creep into general VPP.** Exposing `VAEntrypointVideoProc` invites
+  scaling and colour conversion too, which RGA could serve. Out of scope here —
+  deinterlacing only, so the entrypoint does not become an open-ended surface.
+
 ---
 
 ## Cross-cutting concerns
@@ -1113,6 +1216,15 @@ concurrent with decode contexts are race-free.
   conformance gate and its own 1,440-frame RGA small-geometry run.
   A genuinely fresh-image hardware run, the final Firefox sandbox runtime
   proof, tag, GitHub Release, and PPA publication remain.
+- Phase 6: **proposed 2026-08-04, not started.** There is no hardware
+  deinterlacing on this pipeline today and never has been: the driver
+  advertises only `VAEntrypointVLD` and `VAEntrypointEncSlice`, so a client
+  cannot request it. MPP's decoder-internal deinterlacer is deliberately
+  disabled — it is 1:N with synthesized timestamps and is incompatible with
+  VA-API decode's 1:1 surface contract. IEP2 itself is working and was
+  re-confirmed standalone on `6.18.42-ysp-rockchip64` on 2026-08-04, so the
+  gap is entirely the missing VPP entrypoint. Step 6.0 (settling I1O1T/I1O1B
+  field parity) blocks the rest.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement
 map and driver-review finding as the decision/evidence record.

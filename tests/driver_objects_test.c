@@ -154,8 +154,14 @@ static void test_experimental_h264_encode(struct VADriverVTable *v,
         exit(1);
     }
 
+    /*
+     * One past the limit, whatever the limit currently is. Unlike the
+     * advertised attribute values above, this asserts a property -- that the
+     * driver enforces its own cap -- so it should follow RK_MAX_WIDTH rather
+     * than pin a literal that needs editing every time the cap moves.
+     */
     VAContextID invalid_context;
-    CHECK_STATUS(v->vaCreateContext(ctx, config, 7681, 16, 0,
+    CHECK_STATUS(v->vaCreateContext(ctx, config, RK_MAX_WIDTH + 1, 16, 0,
                                    NULL, 0, &invalid_context),
                  VA_STATUS_ERROR_RESOLUTION_NOT_SUPPORTED);
 

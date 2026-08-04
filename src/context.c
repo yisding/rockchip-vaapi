@@ -170,6 +170,28 @@ VAStatus rk_CreateContext(VADriverContextP ctx,
             return enc_status;
         }
     } else {
+        /*
+         * VA-API decode returns the coded pictures; deinterlacing belongs to
+         * VAEntrypointVideoProc, not here. MPP's decoder enables its internal
+         * vproc path by default ("MPP enable deinterlace by default. Vpuapi
+         * can disable it", rk_mpi_cmd.h) and routes interlaced content through
+         * IEP2, so a VA client would receive frames that do not correspond to
+         * the pictures it submitted.
+         *
+         * This went unnoticed while the RK3588 kernels in use shipped no IEP2
+         * client: vproc init failed harmlessly and MPP fell back to a plain
+         * decode, which is why the interlaced conformance vector was bit-exact
+         * by accident. Once the forward-port kernel enabled IEP2, the same
+         * default began routing through hardware that then failed the frame.
+         */
+        RK_U32 enable_deinterlace = 0;
+        if (c->mpi->control(c->mpp, MPP_DEC_SET_ENABLE_DEINTERLACE,
+                            &enable_deinterlace) != MPP_OK)
+            LOG_WARNING("CreateContext: could not disable MPP deinterlacing; "
+                        "interlaced streams may decode through vproc");
+        else
+            LOG("CreateContext: MPP deinterlace disabled");
+
         if (output_10bit) {
             RK_U32 output_format = MPP_FRAME_FBC_AFBC_V2;
             if (!rk_rga_available() ||
