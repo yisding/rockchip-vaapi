@@ -1037,7 +1037,7 @@ exact gate without inventing a quality metric.
 
 | Step | Work | Exit gate |
 |---|---|---|
-| 6.0 | Close the open TFF/BFF question: `I1O1B` is never selected anywhere in `mpp_dec_vproc.c`, and the IEP2 audit still lists "top- and bottom-field-first content plus I5O2, I2O2, and I1O1 modes behave correctly" as unmet | `iep2_test -m 5` vs `-m 6` on both TFF and BFF inputs, with field-parity semantics settled against the TRM. **Blocks the rest** — field parity is load-bearing |
+| 6.0 | ~~Close the open TFF/BFF question~~ **DONE 2026-08-04** | Settled on hardware: the mode T/B suffix selects the emitted field and `dil_order` has no effect on it (same input, `-f TFF` vs `-f BFF` byte-identical; `-m 5` vs `-m 6` differ). All 14 mode x field-order runs clean with a silent kernel journal, closing the IEP2 audit gate. It also found a real libmpp bug — the hardcoded `I1O1T` bootstrap emits the top field for BFF streams — fixed in `yisding/mpp@7e2c24bd` |
 | 6.1 | Export `iep2_api.h`/`iep_api.h` from the libmpp fork; package it | Driver builds against installed headers, no vendored declarations |
 | 6.2 | Standalone IEP2 wrapper inside the driver, no VA surface yet | One field pair converted; output byte-identical to `iep2_test` |
 | 6.3 | VPP entrypoint skeleton: `VAProfileNone` + `VAEntrypointVideoProc`, filter and cap queries, surface attributes; everything else fails closed | `vainfo` lists VideoProc; every unsupported request returns a real `VAStatus`; decode and encode gates unchanged |
@@ -1223,8 +1223,10 @@ exact gate without inventing a quality metric.
   disabled — it is 1:N with synthesized timestamps and is incompatible with
   VA-API decode's 1:1 surface contract. IEP2 itself is working and was
   re-confirmed standalone on `6.18.42-ysp-rockchip64` on 2026-08-04, so the
-  gap is entirely the missing VPP entrypoint. Step 6.0 (settling I1O1T/I1O1B
-  field parity) blocks the rest.
+  gap is entirely the missing VPP entrypoint. Step 6.0 is **closed** as of
+  2026-08-04: field parity is settled on hardware, the IEP2 audit's TFF/BFF gate
+  passed, and the libmpp bug it exposed is fixed. 6.1 is now the head of the
+  phase.
 
 Tracked in the ROCK 5B project as status **track 14** with the enablement
 map and driver-review finding as the decision/evidence record.
