@@ -292,7 +292,16 @@ static VAStatus create_surfaces(VADriverContextP ctx, int width, int height,
                     surf->priv_buf   = buf;
                     if (!imports || surf->imported_rgb ||
                         surf->imported_multiplane) {
-                        surf->hstride = (int)((width  + 15) & ~15);
+                        /* A decoder surface can be exported before its first
+                         * picture and then become permanent external storage.
+                         * Give linear NV12 that stable, Panfrost-importable
+                         * pitch from the outset. */
+                        unsigned int horizontal_alignment =
+                            !imports && !encoder_input && !is_10bit ? 64u
+                                                                    : 16u;
+                        surf->hstride = (int)((width +
+                            horizontal_alignment - 1u) &
+                            ~(horizontal_alignment - 1u));
                         surf->vstride = (int)((height + 15) & ~15);
                     }
                     surf->encoder_input = encoder_input;
@@ -416,6 +425,70 @@ bool rk_surface_normalize_multiplane_import(RKSurface *surface)
             "stride=%dx%d", p010 ? "P010" : "NV12", surface->width,
             surface->height, surface->hstride, surface->vstride);
     return copied && sync_ok;
+}
+
+bool rk_surface_copy_to_stable_export(
+    RKSurface *surface, MppBuffer source, uint32_t width, uint32_t height,
+    uint32_t source_stride, uint32_t source_vertical_stride, bool is_10bit,
+    uint64_t expected_fence, bool *copied_out,
+    uint32_t *destination_stride_out,
+    uint32_t *destination_vertical_stride_out)
+{
+    if (!surface || !copied_out || !destination_stride_out ||
+        !destination_vertical_stride_out)
+        return false;
+
+    *copied_out = false;
+    *destination_stride_out = source_stride;
+    *destination_vertical_stride_out = source_vertical_stride;
+
+    pthread_mutex_lock(&surface->lock);
+    bool stable_export = surface->stable_export;
+    if (!stable_export) {
+        pthread_mutex_unlock(&surface->lock);
+        return true;
+    }
+    MppBuffer destination = surface->priv_buf;
+    int surface_width = surface->width;
+    int surface_height = surface->height;
+    int destination_stride = surface->hstride;
+    int destination_vertical_stride = surface->vstride;
+    if (!source || !destination || width != (uint32_t)surface_width ||
+        height != (uint32_t)surface_height || destination_stride <= 0 ||
+        destination_vertical_stride <= 0 ||
+        surface->fence != expected_fence) {
+        pthread_mutex_unlock(&surface->lock);
+        return false;
+    }
+
+    bool copied = is_10bit
+        ? rk_repack_p010(source, width, height, source_stride,
+                         source_vertical_stride, destination,
+                         (uint32_t)destination_stride,
+                         (uint32_t)destination_vertical_stride)
+        : rk_repack_nv12(source, width, height, source_stride,
+                         source_vertical_stride, destination,
+                         (uint32_t)destination_stride,
+                         (uint32_t)destination_vertical_stride);
+    if (!copied) {
+        LOG("surface: stable %s export copy failed %ux%u %ux%u -> %dx%d",
+            is_10bit ? "P010" : "NV12", width, height, source_stride,
+            source_vertical_stride, destination_stride,
+            destination_vertical_stride);
+        pthread_mutex_unlock(&surface->lock);
+        return false;
+    }
+
+    *copied_out = true;
+    *destination_stride_out = (uint32_t)destination_stride;
+    *destination_vertical_stride_out =
+        (uint32_t)destination_vertical_stride;
+    LOG("surface: refreshed stable %s export %ux%u %ux%u -> %dx%d fd=%d",
+        is_10bit ? "P010" : "NV12", width, height, source_stride,
+        source_vertical_stride, destination_stride,
+        destination_vertical_stride, mpp_buffer_get_fd(destination));
+    pthread_mutex_unlock(&surface->lock);
+    return true;
 }
 
 /* vaCreateSurfaces (old API, redirected) */

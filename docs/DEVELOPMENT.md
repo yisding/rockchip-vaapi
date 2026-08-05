@@ -329,6 +329,25 @@ fd rather than closing it. Context and bound surfaces share a refcounted
 decode-pool object, so group teardown occurs only after the final frame and
 backing reference is returned; no MPP orphan group is left until process exit.
 
+Chromium uses the inverse lifetime: it calls `vaExportSurfaceHandle` while a
+new driver-owned surface is still empty, imports the returned DMA-BUF into a
+persistent NativePixmap, and expects later decoded pictures to appear in that
+same object. Replacing the surface's active buffer after MPP completes is
+therefore incorrect even if every later VA export would describe the new
+buffer. The first pre-decode export marks `priv_buf` as stable external
+storage. Linear NV12 output is copied into it with RGA; converted P010 is
+copied with synchronized CPU row copies because the qualified RK3588 RGA stack
+reports success for P010-to-P010 but leaves the destination unchanged. The
+surface lock and generation fence cover the copy, so reuse cannot publish a
+late frame into a newer picture. Driver-owned NV12 placeholders start with a
+64-byte-aligned pitch so the persistent object is also Panfrost-importable.
+
+This is deliberately conditional. If the first export happens after decode,
+the surface continues to expose the retained MPP external-pool buffer directly
+and no per-frame copy is introduced. Imported decode surfaces are already
+address-stable and encoder inputs have separate ownership rules, so neither is
+marked by the pre-decode export path.
+
 `vaGetImage` reads through the retained backing object and brackets CPU access
 with `DMA_BUF_IOCTL_SYNC` start/end operations. Without that ownership
 transition, the direct VPU-written mapping produced an intermittent stale

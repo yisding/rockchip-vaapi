@@ -37,4 +37,11 @@ bool rk_repack_nv12(MppBuffer source, uint32_t width, uint32_t height,
                     MppBuffer destination, uint32_t destination_stride,
                     uint32_t destination_vertical_stride);
 
+bool rk_repack_p010(MppBuffer source, uint32_t width, uint32_t height,
+                    uint32_t source_pixel_stride,
+                    uint32_t source_vertical_stride,
+                    MppBuffer destination,
+                    uint32_t destination_pixel_stride,
+                    uint32_t destination_vertical_stride);
+
 #endif

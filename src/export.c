@@ -124,7 +124,7 @@ VAStatus rk_ExportSurfaceHandle(VADriverContextP context, VASurfaceID id,
     int width = surface->width;
     int height = surface->height;
     bool decoded = surface->decoded;
-    bool is_placeholder = surface->import_buf == NULL &&
+    bool is_placeholder = !decoded && surface->import_buf == NULL &&
                           surface->frame == NULL &&
                           surface->backing_buf == NULL;
     bool is_10bit = MPP_FRAME_FMT_IS_YUV_10BIT(surface->fmt);
@@ -132,6 +132,13 @@ VAStatus rk_ExportSurfaceHandle(VADriverContextP context, VASurfaceID id,
     uint32_t import_pitch = surface->import_pitch;
     uint32_t import_drm_format = surface->import_drm_format;
     uint32_t surface_fourcc = surface->fourcc;
+    if (is_placeholder && !surface->imported_rgb &&
+        !surface->imported_multiplane && !surface->encoder_input) {
+        surface->stable_export = true;
+        LOG("ExportSurfaceHandle: surface=0x%x established stable %s "
+            "pre-decode export fd=%d stride=%dx%d", id,
+            is_10bit ? "P010" : "NV12", fd, hstride, vstride);
+    }
 
     /* Panfrost rejects a linear NV12 EGL import whose pitch is not 64-byte
      * aligned. MPP's RK3588 H.264 output is only 16-byte aligned for widths

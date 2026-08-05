@@ -1,3 +1,25 @@
+rockchip-vaapi (1.0.11+ysp13-0ubuntu1~rk1) resolute; urgency=medium
+
+  * Preserve the storage identity of driver-owned NV12 and P010 surfaces that
+    are exported before their first decode. Google Chrome 151 imports those
+    empty exports into persistent NativePixmaps; replacing the VA surface's
+    active buffer with MPP output left Chrome presenting the original all-zero
+    allocation as green video.
+  * Copy completed pictures into that stable allocation under the surface
+    generation fence. NV12 uses RGA; P010 uses synchronized CPU row copies
+    because the qualified RK3588 stack reports success for P010-to-P010 RGA
+    blits without writing the destination. Post-decode exports retain the
+    external-pool zero-copy path.
+  * Give driver-owned NV12 placeholders a 64-byte-aligned pitch from creation
+    so retained pre-decode exports remain Panfrost-importable at widths such as
+    CIF.
+  * Add NV12/P010 identity and byte-exact lifecycle coverage plus a hardware
+    gate that decodes 24 VP9 frames through eight DMA-BUFs retained before
+    decode. The 17-vector conformance and 1,440-frame zero-copy gates remain
+    green.
+
+ -- Yi Ding <yi.s.ding@gmail.com>  Tue, 04 Aug 2026 22:07:43 -0700
+
 rockchip-vaapi (1.0.11+ysp12-0ubuntu1~rk1) resolute; urgency=medium
 
   * Disable MPP's decoder-internal deinterlacer at decode-context creation.

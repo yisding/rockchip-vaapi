@@ -2,6 +2,7 @@
 
 #include <limits.h>
 #include <stddef.h>
+#include <string.h>
 
 #include <va/va.h>
 
@@ -204,6 +205,86 @@ bool rk_repack_nv12(MppBuffer source, uint32_t width, uint32_t height,
         destination_vertical_stride, source_fd, destination_fd);
     return true;
 #endif
+}
+
+bool rk_repack_p010(MppBuffer source, uint32_t width, uint32_t height,
+                    uint32_t source_pixel_stride,
+                    uint32_t source_vertical_stride,
+                    MppBuffer destination,
+                    uint32_t destination_pixel_stride,
+                    uint32_t destination_vertical_stride)
+{
+    size_t source_layout_size = 0;
+    size_t destination_layout_size = 0;
+    if (!source || !destination || !width || !height || (width & 1u) ||
+        (height & 1u) || source_pixel_stride < width ||
+        source_vertical_stride < height ||
+        destination_pixel_stride < width ||
+        destination_vertical_stride < height ||
+        !rk_p010_layout_size(source_pixel_stride, source_vertical_stride,
+                             &source_layout_size) ||
+        !rk_p010_layout_size(destination_pixel_stride,
+                             destination_vertical_stride,
+                             &destination_layout_size) ||
+        source_layout_size > mpp_buffer_get_size(source) ||
+        destination_layout_size > mpp_buffer_get_size(destination)) {
+        LOG("convert: invalid P010 repack layout size=%ux%u source=%ux%u "
+            "destination=%ux%u source_size=%zu destination_size=%zu",
+            width, height, source_pixel_stride, source_vertical_stride,
+            destination_pixel_stride, destination_vertical_stride,
+            source ? mpp_buffer_get_size(source) : 0,
+            destination ? mpp_buffer_get_size(destination) : 0);
+        return false;
+    }
+
+    /* RK3588 RGA reports success for a P010-to-P010 blit but leaves the
+     * destination unchanged on the qualified stack. Both objects are MPP DRM
+     * buffers and CPU-mappable, so use explicit cache ownership and checked
+     * row copies for this opt-in 10-bit stable-export path. */
+    if (mpp_buffer_sync_ro_begin(source) != MPP_OK)
+        return false;
+    bool destination_started =
+        mpp_buffer_sync_begin(destination) == MPP_OK;
+    uint8_t *source_bytes = mpp_buffer_get_ptr(source);
+    uint8_t *destination_bytes = mpp_buffer_get_ptr(destination);
+    bool copied = destination_started && source_bytes && destination_bytes;
+    if (copied) {
+        size_t source_byte_stride = (size_t)source_pixel_stride * 2u;
+        size_t destination_byte_stride =
+            (size_t)destination_pixel_stride * 2u;
+        size_t row_bytes = (size_t)width * 2u;
+        memset(destination_bytes, 0, destination_layout_size);
+        for (uint32_t row = 0; row < height; row++)
+            memcpy(destination_bytes +
+                       (size_t)row * destination_byte_stride,
+                   source_bytes + (size_t)row * source_byte_stride,
+                   row_bytes);
+        uint8_t *source_uv = source_bytes +
+            source_byte_stride * source_vertical_stride;
+        uint8_t *destination_uv = destination_bytes +
+            destination_byte_stride * destination_vertical_stride;
+        for (uint32_t row = 0; row < height / 2u; row++)
+            memcpy(destination_uv +
+                       (size_t)row * destination_byte_stride,
+                   source_uv + (size_t)row * source_byte_stride,
+                   row_bytes);
+    }
+    bool sync_ok = true;
+    if (destination_started)
+        sync_ok = mpp_buffer_sync_end(destination) == MPP_OK;
+    sync_ok &= mpp_buffer_sync_ro_end(source) == MPP_OK;
+    if (!copied || !sync_ok) {
+        LOG("convert: synchronized P010 repack failed %ux%u %ux%u -> "
+            "%ux%u", width, height, source_pixel_stride,
+            source_vertical_stride, destination_pixel_stride,
+            destination_vertical_stride);
+        return false;
+    }
+
+    LOG("convert: synchronized P010 repack %ux%u %ux%u -> %ux%u",
+        width, height, source_pixel_stride, source_vertical_stride,
+        destination_pixel_stride, destination_vertical_stride);
+    return true;
 }
 
 bool rk_convert_nv15_to_p010(MppBufferGroup group, MppBuffer source,

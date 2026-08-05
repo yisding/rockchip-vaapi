@@ -35,6 +35,7 @@ OBJS   := $(SRCS:.c=.o)
 UNIT_TESTS := tests/object_heap_test tests/frame_layout_test tests/h264_test \
 	tests/hevc_test tests/vp9_test tests/log_test
 HARDWARE_TESTS := tests/driver_objects_test
+STABLE_EXPORT_DECODE_TEST := tests/va_stable_export_decode
 RGB_ENCODE_TEST := tests/va_rgb_dmabuf_encode
 MULTIPLANE_ENCODE_TEST := tests/va_multiplane_dmabuf_encode
 HEVC_MPP_REPRO := tests/hevc_mpp_repro
@@ -118,7 +119,7 @@ src/log.o: src/log.h
 src/convert.o: src/convert.h src/frame_layout.h src/log.h
 src/mpp_dec.o: src/convert.h src/driver_internal.h src/frame_layout.h \
 	src/h264.h src/log.h src/hevc.h src/mpp_dec.h src/object_heap.h \
-	src/vp9.h
+	src/surface.h src/vp9.h
 src/mpp_enc.o: src/buffer.h src/convert.h src/driver_internal.h src/log.h \
 	src/mpp_enc.h
 src/object_heap.o: src/object_heap.h
@@ -151,8 +152,9 @@ check-firefox-rdd-patch:
 	tests/check-firefox-rdd-patch.sh
 
 # Full hardware gates.
-check: $(TARGET) test
+check: $(TARGET) test $(STABLE_EXPORT_DECODE_TEST)
 	TEST_SET=all tests/validate.sh
+	tests/check-stable-export-decode.sh
 
 check-conformance: $(TARGET) test
 	TEST_SET=conformance tests/validate.sh
@@ -339,6 +341,13 @@ check-synthetic: $(TARGET) test
 
 check-zero-copy: $(TARGET) test
 	tests/check-zero-copy.sh
+
+$(STABLE_EXPORT_DECODE_TEST): src/va_test.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(VA_CFLAGS) $< \
+		$(VA_CLIENT_LIBS) -o $@
+
+check-stable-export-decode: $(TARGET) $(STABLE_EXPORT_DECODE_TEST)
+	tests/check-stable-export-decode.sh
 
 check-zero-copy-sanitize: sanitize
 	LD_PRELOAD="$(shell $(CC) -print-file-name=libasan.so)" \
@@ -573,7 +582,8 @@ lint:
 clean:
 	rm -f $(OBJS) $(SAN_OBJS) $(TSAN_OBJS) $(TARGET) $(UNIT_TESTS) $(SAN_TESTS) \
 		$(TSAN_TESTS) $(HARDWARE_TESTS) $(RGB_ENCODE_TEST) \
-		$(MULTIPLANE_ENCODE_TEST) $(HEVC_MPP_REPRO) $(AV1_MPP_CAPS) \
+		$(MULTIPLANE_ENCODE_TEST) $(STABLE_EXPORT_DECODE_TEST) \
+		$(HEVC_MPP_REPRO) $(AV1_MPP_CAPS) \
 		tests/driver_objects_test.san \
 		tests/driver_objects_test.tsan
 	rm -rf $(SAN_DIR) $(TSAN_DIR) $(FUZZ_DIR)
@@ -606,7 +616,7 @@ clean:
 	check-encode-decode-concurrent check-encode-decode-same-process \
 	check-encode-decode-same-process-sanitize \
 	check-encode-decode-same-process-tsan \
-	check-zero-copy check-zero-copy-sanitize \
+	check-zero-copy check-zero-copy-sanitize check-stable-export-decode \
 	check-concurrent-decode check-concurrent-decode-sanitize \
 	check-concurrent-decode-tsan check-soak test test-valgrind test-sanitize sanitize \
 	check-sanitize \

@@ -700,6 +700,55 @@ add the missing backend/profiles. Stock Chromium VA-API therefore requires a
 distro build with libva enabled; the proposed device-node alias cannot solve
 this binary.
 
+**Progress (2026-08-04, Google Chrome stable-export boundary):** Google Chrome
+151 is built differently from the XtraDeb Chromium package. Its live GPU
+report enumerates this driver's H.264 Main/High, VP9 Profile 0, HEVC Main and
+HEVC Main still-picture profiles, and Vimeo selected `VaapiVideoDecoder` for a
+1920x1080 H.264 High stream. The decoded picture was entirely green.
+
+Chromium's VA decoder exports each empty VA surface into a NativePixmap before
+submitting decode and retains that DMA-BUF. This driver exported its zeroed
+`priv_buf` placeholder at that point, then replaced the surface's active
+storage with an MPP external-pool output buffer. Chrome therefore continued
+presenting the unchanged placeholder even though MPP had decoded the picture.
+Pre-decode export now establishes permanent NV12/P010 storage for the surface;
+each completed output is copied into it under the surface fence, while clients
+that export only after decode retain the existing zero-copy path. Driver-owned
+NV12 placeholders also start 64-byte pitch-aligned so a retained CIF-sized
+object is Panfrost-importable. P010 uses a synchronized CPU copy after an
+on-device test found RGA reporting P010-to-P010 success without writing.
+
+The exact lifecycle is hardware-gated with 24 lossless 352x288 VP9 pictures
+read through eight DMA-BUFs retained before decode, including surface reuse.
+Focused NV12/P010 lifecycle tests, ASan/UBSan, static analysis, all 17 pinned
+conformance cases, and the complementary 1,440-frame zero-copy audit pass.
+Replaying Vimeo in Google Chrome with the fixed driver remains the visual app
+gate; this result proves the storage contract rather than browser presentation.
+
+**Progress (2026-08-05, installed Google Chrome replay):** The locally built
+`1.0.11+ysp13-0ubuntu1~rk1` driver and config packages are installed, and the
+installed `rockchip_drv_video.so` is byte-identical to the deb payload (SHA-256
+`ed578a241803f35f51ccc6afe38b1d132539ae48ca691b5a3180e37565fe56c0`). The
+operator confirms that H.264 now renders correctly in Google Chrome instead of
+green. `chrome://media-internals` also records `VaapiVideoDecoder` for an
+unencrypted 640x480 VP9 Profile 0 stream. A separate 384x240 VP9 Profile 0
+stream selects `VpxVideoDecoder`; Chromium deliberately prefers software below
+its 360-pixel visible-height cutoff, so this is expected selection policy and
+not a VP9 capability or initialization failure. This closes the installed
+H.264 visual regression and proves Chrome can select the driver for VP9.
+Automated browser presentation and GPU-sandbox qualification remain open.
+
+**Progress (2026-08-05, stock Chrome sandbox discriminator):** The working
+browser is the Google-provided deb launched normally, without `--no-sandbox`,
+`--disable-gpu-sandbox`, or VA-API feature overrides. This rules out an
+operator-added sandbox bypass. It does not close sandbox qualification:
+`chrome://gpu` reports `Sandboxed: false`, and the live GPU process has
+`NoNewPrivs: 1` and zero effective capabilities but `Seccomp: 0`, zero seccomp
+filters, and an unconfined LSM label. Chrome logs `InitializeSandbox() called
+with multiple threads in process gpu-process`; that is the next discriminator,
+but the thread's owner is not yet attributed among Chrome, ANGLE/Mesa, libva,
+MPP, or RGA initialization.
+
 **Progress (2026-07-29, mpv/Panfrost presentation slice):** Stock mpv 0.41.0
 selects VA-API decode and gpu-next's Wayland/OpenGL presentation for H.264.
 The first real probe exposed a driver/display contract gap: MPP emitted the
@@ -809,7 +858,9 @@ characters, nested lifecycle, and 800 concurrent records without interleaving.
 **Gate:** the app matrix passes on-device — ✅ stock FFmpeg and GStreamer
 `va`; ✅ VLC, Firefox, and mpv virtual-output presentation for H.264 High, HEVC
 Main, VP9 Profiles 0/2, and HEVC Main10; ⬜ physical HDR-monitor presentation;
-⬜ Chromium (arm64 distro binary lacks its libva backend); ✅ conformance suite green; clean
+✅ Google Chrome H.264 presentation and VP9 Profile 0 hardware selection with
+installed ysp13 (GPU sandbox still open; the distro Chromium binary still lacks
+libva); ✅ conformance suite green; clean
 soak; ✅ `.deb` + config packages install, upgrade and purge cleanly in an
 isolated root, ⬜ enabling HW decode from a genuinely clean image is untested.
 
@@ -1154,7 +1205,10 @@ heavily.
   pinned to 153.0/153.0.1 with 152.0.6 kept alongside, and the 153.x rebase
   inherits rather than remeasures the ioctl set. Chromium's proposed aliasing
   sidestep cannot help the current arm64 distro binary because that binary has
-  no libva backend.
+  no libva backend. Google Chrome reaches the VA driver with its GPU sandbox
+  disabled even under the stock launch with no sandbox-disabling flags;
+  installed ysp13 corrects H.264 presentation and Chrome selects it for
+  640x480 VP9 Profile 0. Automated replay and sandbox policy remain.
 - **MPP threading contract:** the dedicated-worker model is validated for the
   normal single-decoder H.264/VP9 matrix, nine simultaneous idle MPP contexts,
   two active H.264/VP9 contexts, and a same-process two-decode/two-encode
@@ -1207,11 +1261,13 @@ heavily.
   failure was a stateful MPP-marked Main10 boundary covered by the reducer;
   the expanded Firefox run is now stable across all five cases.
   Open: sandbox-enabled Firefox playback is awaiting the patched-build runtime
-  result; Chromium 151 now has accelerated Panfrost GL but its distro arm64
-  binary lacks the libva backend and reports no hardware profiles; physical
-  HDR-monitor presentation and fresh-image hardware decode remain untested.
+  result; the distro Chromium 151 binary lacks libva, while Google Chrome 151
+  now presents H.264 correctly through installed ysp13 and selects VA-API for
+  640x480 VP9 Profile 0. Automated browser replay and sandbox qualification,
+  physical HDR-monitor presentation, and fresh-image hardware decode remain
+  untested.
   The corrected exporter first shipped in `1.0.11+ysp7`; the host now has
-  `1.0.11+ysp9` installed.
+  `1.0.11+ysp13-0ubuntu1~rk1` installed.
 - Phase 4: complete for the deliberately advertised experimental scope;
   H.264 Main/High and HEVC Main
   encode pass FFmpeg and GStreamer CQP/CBR/VBR interoperability, parser, and

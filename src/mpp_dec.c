@@ -21,6 +21,7 @@
 #include "frame_layout.h"
 #include "h264.h"
 #include "hevc.h"
+#include "surface.h"
 #include "vp9.h"
 
 static void decode_pool_destroy(void *opaque) {
@@ -540,9 +541,15 @@ static bool assign_mpp_frame(MppFrame frame, RKContext *c)
     bool external_ready = pool != NULL;
     bool usable = layout_valid && (!external_ready || pool_match);
     bool converted_10bit = false;
+    bool stable_export_copy = false;
+    bool stable_export_copy_failed = false;
     MppBuffer backing = NULL;
+    MppBuffer output_buffer = buf;
     MppFrame stored_frame = frame;
     int output_hstride = src_hs;
+    int output_vstride = src_vs;
+    int output_fd = buf ? mpp_buffer_get_fd(buf) : -1;
+    RKDecodePool *retained_pool = NULL;
 
     if (usable && nv15) {
         MppBuffer converted = NULL;
@@ -556,19 +563,54 @@ static bool assign_mpp_frame(MppFrame frame, RKContext *c)
         if (usable) {
             converted_10bit = true;
             backing = converted;
+            output_buffer = converted;
             stored_frame = NULL;
             output_hstride = src_hs_pixels;
+            output_fd = mpp_buffer_get_fd(converted);
         }
-    } else if (usable && external_ready) {
+    }
+
+    if (usable) {
+        uint32_t stable_hstride = (uint32_t)output_hstride;
+        uint32_t stable_vstride = (uint32_t)output_vstride;
+        bool copy_ok = rk_surface_copy_to_stable_export(
+            s, output_buffer, (uint32_t)frame_w, (uint32_t)frame_h,
+            (uint32_t)output_hstride, (uint32_t)output_vstride,
+            converted_10bit, route->fence, &stable_export_copy,
+            &stable_hstride, &stable_vstride);
+        if (!copy_ok) {
+            if (backing)
+                mpp_buffer_put(backing);
+            backing = NULL;
+            usable = false;
+            stable_export_copy_failed = true;
+        } else if (stable_export_copy) {
+            if (backing)
+                mpp_buffer_put(backing);
+            backing = NULL;
+            if (stored_frame) {
+                mpp_frame_deinit(&frame);
+                stored_frame = NULL;
+            }
+            output_hstride = (int)stable_hstride;
+            output_vstride = (int)stable_vstride;
+        }
+    }
+
+    if (usable && !stable_export_copy && !converted_10bit &&
+        external_ready) {
         backing = pool->buffers[pool_index];
         if (backing && mpp_buffer_inc_ref(backing) != MPP_OK)
             usable = false;
     }
-    if (usable && pool && !rk_object_ref(&pool->base)) {
+    if (usable && !stable_export_copy && pool &&
+        !rk_object_ref(&pool->base)) {
         if (backing)
             mpp_buffer_put(backing);
         backing = NULL;
         usable = false;
+    } else if (usable && !stable_export_copy) {
+        retained_pool = pool;
     }
 
     if (usable) {
@@ -584,8 +626,8 @@ static bool assign_mpp_frame(MppFrame frame, RKContext *c)
                 external_ready);
             if (backing)
                 mpp_buffer_put(backing);
-            if (pool)
-                rk_object_unref(&pool->base);
+            if (retained_pool)
+                rk_object_unref(&retained_pool->base);
             frame_route_destroy(route);
             mpp_frame_deinit(&frame);
             return true;
@@ -595,12 +637,12 @@ static bool assign_mpp_frame(MppFrame frame, RKContext *c)
         RKDecodePool *old_pool = s->decode_pool;
         s->frame = stored_frame;
         s->backing_buf = backing;
-        s->decode_pool = pool;
+        s->decode_pool = retained_pool;
         s->fmt = ffmt;
         if (fwidth  > 0) s->width   = fwidth;
         if (fheight > 0) s->height  = fheight;
         if (output_hstride > 0) s->hstride = output_hstride;
-        if (fvs     > 0) s->vstride = fvs;
+        if (output_vstride > 0) s->vstride = output_vstride;
         s->decoded = true;
         s->decode_failed = false;
         s->h264_field_pending = false;
@@ -615,17 +657,28 @@ static bool assign_mpp_frame(MppFrame frame, RKContext *c)
         if (old_pool)
             rk_object_unref(&old_pool->base);
         LOG("assign_mpp_frame: surface=0x%x MPP %dx%d stride=%dx%d "
-            "fmt=0x%x zero_copy=%d converted_10bit=%d external=%d "
-            "pool_index=%d fd=%d fence=%llu",
-            (unsigned)sid, fwidth, fheight, output_hstride, fvs,
-            (unsigned)ffmt, !converted_10bit, converted_10bit,
-            external_ready, pool_index,
-            backing ? mpp_buffer_get_fd(backing) : mpp_buffer_get_fd(buf),
+            "fmt=0x%x zero_copy=%d converted_10bit=%d "
+            "stable_export_copy=%d external=%d pool_index=%d fd=%d "
+            "fence=%llu",
+            (unsigned)sid, fwidth, fheight, output_hstride,
+            output_vstride, (unsigned)ffmt,
+            !converted_10bit && !stable_export_copy, converted_10bit,
+            stable_export_copy, external_ready, pool_index, output_fd,
             (unsigned long long)route->fence);
         frame_route_destroy(route);
         return true;
     }
 
+    if (stable_export_copy_failed) {
+        LOG("assign_mpp_frame: stable export copy failed surface=0x%x "
+            "fmt=0x%x stride=%dx%d size=%zu",
+            (unsigned)sid, (unsigned)ffmt, output_hstride,
+            output_vstride, src_size);
+        mpp_frame_deinit(&frame);
+        complete_surface_ref(s, route->fence, false);
+        frame_route_destroy(route);
+        return true;
+    }
     if (external_ready) {
         LOG("assign_mpp_frame: external buffer mismatch surface=0x%x "
             "index=%d fd=%d fmt=0x%x stride=%dx%d layout=%zu size=%zu",

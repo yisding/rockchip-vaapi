@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include <rockchip/mpp_buffer.h>
 #include <va/va_backend.h>
 
 typedef struct RKSurface RKSurface;
@@ -28,5 +29,15 @@ VAStatus rk_GetImage(VADriverContextP context, VASurfaceID surface,
 /* Caller holds surface->lock. Refresh the driver's contiguous backing buffer
  * from a two-object linear NV12/P010 import. */
 bool rk_surface_normalize_multiplane_import(RKSurface *surface);
+
+/* Copy a completed linear NV12/P010 picture into a surface buffer that was
+ * exported before decode. A successful no-op means no stable export exists;
+ * copied_out distinguishes that zero-copy case from an actual copy. */
+bool rk_surface_copy_to_stable_export(
+    RKSurface *surface, MppBuffer source, uint32_t width, uint32_t height,
+    uint32_t source_stride, uint32_t source_vertical_stride, bool is_10bit,
+    uint64_t expected_fence, bool *copied_out,
+    uint32_t *destination_stride_out,
+    uint32_t *destination_vertical_stride_out);
 
 #endif

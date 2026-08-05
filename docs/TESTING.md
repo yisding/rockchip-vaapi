@@ -520,19 +520,36 @@ and the expanded run is stable. `check-firefox-rdd-patch` hash-pins only the
 RDD sandbox patch. Unsandboxed decode and sandboxed playback remain separate
 gates.
 
-Chromium is not gated. Chromium 151 fixes the earlier ANGLE failure and now
-creates an accelerated OpenGL ES context over Panfrost on Wayland. Its live
-DevTools `SystemInfo.getInfo` report nevertheless returns an empty
-`videoDecoding` profile list, and `chrome://media-internals` selects
-`FFmpegVideoDecoder` with `kIsPlatformVideoDecoder=false` for H.264 High. The
-driver is never loaded. The arm64 package contains Chromium's V4L2 decoder
-backend but no libva wrapper/entry points; the board's exposed Hantro decoder
-node advertises only MPEG-2 and VP8 compressed input. A consolidated
-`AcceleratedVideoDecoder,VaapiVideoDecoder,AcceleratedVideoDecodeLinuxGL`
-feature switch can change the GPU feature label to enabled, but cannot create
-missing hardware profiles. This is a distro Chromium build/backend boundary,
-not a runtime-flag or `/dev/dri` aliasing problem, so no Chromium VA-API claim
-is made.
+Chromium/Chrome presentation is not automated. The XtraDeb Chromium 151 arm64
+binary fixes the earlier ANGLE failure but omits libva and exposes only its
+Hantro V4L2 VP8 profile. Google Chrome 151 is a different build: its exported
+GPU report enumerates this driver's H.264 Main/High, VP9 Profile 0 and HEVC
+Main/still-picture profiles, and `chrome://media-internals` selected
+`VaapiVideoDecoder` for Vimeo H.264 High. Playback was entirely green because
+Chrome had retained the all-zero DMA-BUF exported before decode while the
+driver later switched the VA surface to MPP's output allocation.
+
+The stable-export fix is hardware-verified by
+`check-stable-export-decode`; the full pinned conformance suite remains green,
+and `check-zero-copy` still records 1,440 ordinary external-pool frames. The
+resulting `1.0.11+ysp13-0ubuntu1~rk1` packages are installed and their installed
+driver matches the deb payload. In a user-observed Google Chrome replay, H.264
+now renders correctly rather than green. Media Internals selects
+`VaapiVideoDecoder` for an unencrypted 640x480 VP9 Profile 0 stream and
+`VpxVideoDecoder` for a separate 384x240 Profile 0 stream. Chromium's decoder
+selector intentionally prefers software below 360 pixels of visible height,
+so the small-stream result is not fallback evidence. These manual observations
+close the green H.264 regression and confirm VP9 hardware selection; an
+automated visual browser gate and GPU-sandbox qualification remain.
+
+The working Chrome is the Google-provided deb launched without extra options.
+That does not itself close the sandbox gate: `chrome://gpu` reports
+`Sandboxed: false`, while the live GPU process has `NoNewPrivs: 1`, no effective
+capabilities, `Seccomp: 0`, zero seccomp filters, and an unconfined LSM label.
+Its command line contains neither `--no-sandbox` nor `--disable-gpu-sandbox`.
+The GPU log warning that `InitializeSandbox()` was called with multiple threads
+is a lead for attribution, not yet proof of which component created the thread
+or why the sandbox remained inactive.
 
 `check-vp9-profile2-experimental` generates a lossless 48-frame VP9 Profile 2
 stream at 320x240 and runs the checksum-pinned official WebM/libvpx
@@ -694,6 +711,20 @@ rejects inconsistent RT/pixel formats, checks zero-timeout behavior for a
 pending fence, and checks failure signaling when that fence's context is
 destroyed. Its sanitized and TSan variants apply ASan/UBSan and thread-race
 checking to the complete lifecycle.
+
+It also exports fresh NV12 and P010 surfaces before decode, copies patterned
+output with deliberately different source strides, and requires both the
+DMA-BUF identity and plane layout to remain unchanged afterward. The P010
+case uses the synchronized CPU-copy fallback because the qualified RGA stack
+returned success for a P010-to-P010 blit without changing the destination.
+
+`make check-stable-export-decode` exercises the same contract through the
+real decoder worker. It exports eight 352x288 NV12 surfaces before submitting
+any picture, retains those descriptors, decodes 24 lossless VP9 frames through
+three complete uses of each surface, and reads every result only through the
+original DMA-BUF. The log audit requires one stable-export copy per frame and
+rejects decode, routing, and copy failures. This matches Chromium's persistent
+NativePixmap lifetime without requiring a browser in the regression gate.
 
 The zero-copy gate runs the synthetic H.264 reference/B-frame matrix, 4K
 decode, and five VP9 runs while auditing the driver log. It requires at least

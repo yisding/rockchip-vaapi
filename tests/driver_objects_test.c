@@ -10,10 +10,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "convert.h"
 #include "driver_internal.h"
+#include "frame_layout.h"
+#include "surface.h"
 
 extern VAStatus __vaDriverInit_1_20(VADriverContextP ctx);
 
@@ -434,6 +437,207 @@ static void test_rga_nv12_repack(void)
     mpp_buffer_put(destination);
     mpp_buffer_put(source);
     mpp_buffer_group_put(group);
+}
+
+static void fill_stable_export_source(uint8_t *bytes, uint32_t width,
+                                      uint32_t height, uint32_t stride,
+                                      bool is_10bit)
+{
+    size_t bytes_per_sample = is_10bit ? 2u : 1u;
+    size_t byte_stride = (size_t)stride * bytes_per_sample;
+    size_t row_bytes = (size_t)width * bytes_per_sample;
+    memset(bytes, 0, byte_stride * height * 3u / 2u);
+    for (uint32_t row = 0; row < height; row++)
+        for (size_t column = 0; column < row_bytes; column++)
+            bytes[(size_t)row * byte_stride + column] =
+                (uint8_t)(row * 13u + column * 7u + 3u);
+    uint8_t *uv = bytes + byte_stride * height;
+    for (uint32_t row = 0; row < height / 2; row++)
+        for (size_t column = 0; column < row_bytes; column++)
+            uv[(size_t)row * byte_stride + column] =
+                (uint8_t)(row * 5u + column * 11u + 19u);
+}
+
+static void check_stable_export_bytes(const uint8_t *source,
+                                      const uint8_t *destination,
+                                      uint32_t width, uint32_t height,
+                                      uint32_t source_stride,
+                                      uint32_t destination_stride,
+                                      bool is_10bit)
+{
+    size_t bytes_per_sample = is_10bit ? 2u : 1u;
+    size_t source_byte_stride = (size_t)source_stride * bytes_per_sample;
+    size_t destination_byte_stride =
+        (size_t)destination_stride * bytes_per_sample;
+    size_t row_bytes = (size_t)width * bytes_per_sample;
+    for (uint32_t row = 0; row < height; row++) {
+        for (size_t column = 0; column < row_bytes; column++) {
+            uint8_t expected =
+                source[(size_t)row * source_byte_stride + column];
+            uint8_t actual =
+                destination[(size_t)row * destination_byte_stride + column];
+            if (actual != expected) {
+                fprintf(stderr, "stable %s export luma mismatch "
+                        "row=%u byte=%zu expected=%u actual=%u\n",
+                        is_10bit ? "P010" : "NV12", row, column,
+                        expected, actual);
+                exit(1);
+            }
+        }
+    }
+    const uint8_t *source_uv = source + source_byte_stride * height;
+    const uint8_t *destination_uv =
+        destination + destination_byte_stride * height;
+    for (uint32_t row = 0; row < height / 2; row++) {
+        for (size_t column = 0; column < row_bytes; column++) {
+            uint8_t expected =
+                source_uv[(size_t)row * source_byte_stride + column];
+            uint8_t actual = destination_uv[
+                (size_t)row * destination_byte_stride + column];
+            if (actual != expected) {
+                fprintf(stderr, "stable %s export chroma mismatch "
+                        "row=%u byte=%zu expected=%u actual=%u\n",
+                        is_10bit ? "P010" : "NV12", row, column,
+                        expected, actual);
+                exit(1);
+            }
+        }
+    }
+}
+
+static void test_stable_predecode_export(struct VADriverVTable *v,
+                                         VADriverContextP ctx,
+                                         bool is_10bit)
+{
+    enum {
+        WIDTH = 352,
+        HEIGHT = 64,
+        SOURCE_STRIDE = 416,
+    };
+    VASurfaceAttrib pixel_format = {
+        .type = VASurfaceAttribPixelFormat,
+        .flags = VA_SURFACE_ATTRIB_SETTABLE,
+        .value = {
+            .type = VAGenericValueTypeInteger,
+            .value.i = is_10bit ? VA_FOURCC_P010 : VA_FOURCC_NV12,
+        },
+    };
+    VASurfaceID surface;
+    CHECK_STATUS(v->vaCreateSurfaces2(
+                     ctx,
+                     is_10bit ? VA_RT_FORMAT_YUV420_10
+                              : VA_RT_FORMAT_YUV420,
+                     WIDTH, HEIGHT, &surface, 1, &pixel_format, 1),
+                 VA_STATUS_SUCCESS);
+
+    VADRMPRIMESurfaceDescriptor before = {0};
+    CHECK_STATUS(v->vaExportSurfaceHandle(
+                     ctx, surface,
+                     VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+                     VA_EXPORT_SURFACE_READ_ONLY |
+                         VA_EXPORT_SURFACE_SEPARATE_LAYERS,
+                     &before),
+                 VA_STATUS_SUCCESS);
+    struct stat before_stat;
+    if (before.num_objects != 1 || before.objects[0].fd < 0 ||
+        fstat(before.objects[0].fd, &before_stat) != 0) {
+        fputs("pre-decode stable export descriptor is invalid\n", stderr);
+        exit(1);
+    }
+
+    RKSurface *stable_surface =
+        surface_acquire(drv_from_ctx(ctx), surface);
+    if (!stable_surface || !stable_surface->stable_export) {
+        fputs("pre-decode export did not establish stable storage\n", stderr);
+        exit(1);
+    }
+
+    size_t source_size = 0;
+    bool source_layout_ok = is_10bit
+        ? rk_p010_layout_size(SOURCE_STRIDE, HEIGHT, &source_size)
+        : rk_nv12_layout_size(SOURCE_STRIDE, HEIGHT, &source_size);
+    MppBufferGroup group = NULL;
+    MppBuffer source = NULL;
+    if (!source_layout_ok ||
+        mpp_buffer_group_get_internal(&group, MPP_BUFFER_TYPE_DRM) != MPP_OK ||
+        mpp_buffer_get(group, &source, source_size) != MPP_OK ||
+        mpp_buffer_sync_begin(source) != MPP_OK) {
+        fputs("failed to allocate stable export source buffer\n", stderr);
+        exit(1);
+    }
+    uint8_t *source_bytes = mpp_buffer_get_ptr(source);
+    if (!source_bytes) {
+        fputs("failed to map stable export source buffer\n", stderr);
+        exit(1);
+    }
+    fill_stable_export_source(source_bytes, WIDTH, HEIGHT, SOURCE_STRIDE,
+                              is_10bit);
+    if (mpp_buffer_sync_end(source) != MPP_OK) {
+        fputs("failed to finish stable export source write\n", stderr);
+        exit(1);
+    }
+
+    bool copied = false;
+    uint32_t destination_stride = SOURCE_STRIDE;
+    uint32_t destination_vertical_stride = HEIGHT;
+    if (!rk_surface_copy_to_stable_export(
+            stable_surface, source, WIDTH, HEIGHT, SOURCE_STRIDE, HEIGHT,
+            is_10bit, stable_surface->fence, &copied, &destination_stride,
+            &destination_vertical_stride) ||
+        !copied || destination_stride !=
+                       (is_10bit ? (WIDTH + 15u) & ~15u
+                                 : (WIDTH + 63u) & ~63u) ||
+        destination_vertical_stride != HEIGHT ||
+        mpp_buffer_sync_ro_begin(stable_surface->priv_buf) != MPP_OK) {
+        fputs("stable pre-decode export copy failed\n", stderr);
+        exit(1);
+    }
+    uint8_t *destination_bytes =
+        mpp_buffer_get_ptr(stable_surface->priv_buf);
+    if (!destination_bytes) {
+        fputs("failed to map stable export destination buffer\n", stderr);
+        exit(1);
+    }
+    check_stable_export_bytes(source_bytes, destination_bytes, WIDTH, HEIGHT,
+                              SOURCE_STRIDE, destination_stride, is_10bit);
+    if (mpp_buffer_sync_ro_end(stable_surface->priv_buf) != MPP_OK) {
+        fputs("failed to finish stable export destination read\n", stderr);
+        exit(1);
+    }
+
+    pthread_mutex_lock(&stable_surface->lock);
+    stable_surface->decoded = true;
+    pthread_mutex_unlock(&stable_surface->lock);
+    rk_object_unref(&stable_surface->base);
+
+    VADRMPRIMESurfaceDescriptor after = {0};
+    CHECK_STATUS(v->vaExportSurfaceHandle(
+                     ctx, surface,
+                     VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+                     VA_EXPORT_SURFACE_READ_ONLY |
+                         VA_EXPORT_SURFACE_SEPARATE_LAYERS,
+                     &after),
+                 VA_STATUS_SUCCESS);
+    struct stat after_stat;
+    if (after.num_objects != 1 || after.objects[0].fd < 0 ||
+        fstat(after.objects[0].fd, &after_stat) != 0 ||
+        before_stat.st_dev != after_stat.st_dev ||
+        before_stat.st_ino != after_stat.st_ino ||
+        before.num_layers != after.num_layers ||
+        before.layers[0].pitch[0] != after.layers[0].pitch[0] ||
+        before.layers[0].offset[0] != after.layers[0].offset[0] ||
+        before.layers[1].pitch[0] != after.layers[1].pitch[0] ||
+        before.layers[1].offset[0] != after.layers[1].offset[0]) {
+        fputs("stable export changed DMA-BUF or plane layout after decode\n",
+              stderr);
+        exit(1);
+    }
+
+    close(after.objects[0].fd);
+    close(before.objects[0].fd);
+    mpp_buffer_put(source);
+    mpp_buffer_group_put(group);
+    CHECK_STATUS(v->vaDestroySurfaces(ctx, &surface, 1), VA_STATUS_SUCCESS);
 }
 
 static void test_experimental_10bit_profiles(struct VADriverVTable *v,
@@ -1342,6 +1546,8 @@ int main(void)
 
     test_rga_10bit_geometry();
     test_rga_nv12_repack();
+    test_stable_predecode_export(&vtable, &ctx, false);
+    test_stable_predecode_export(&vtable, &ctx, true);
     test_experimental_10bit_profiles(&vtable, &ctx);
     test_experimental_h264_encode(&vtable, &ctx);
     test_experimental_hevc_encode(&vtable, &ctx);

@@ -50,6 +50,24 @@ Published MPP `3381fd2c` and FFmpeg `33a651a55b` package root, completing
   use that buffer directly, with dma-buf CPU synchronization around readback.
   The old per-frame CPU copy is gone, and pool lifetime is shared with bound
   surfaces so context teardown does not orphan MPP allocations.
+- **Stable pre-decode DMA-BUF exports for Chromium.** Google Chrome 151
+  exports each VA surface while it is still empty and retains that NativePixmap
+  across later decodes. The driver previously replaced the surface's active
+  storage with an MPP external-pool buffer, leaving Chrome's retained
+  placeholder all-zero (green H.264 video). A pre-decode export now makes the
+  original NV12/P010 allocation permanent for that surface and completed
+  pictures are copied into it; consumers that first export after decode keep
+  the normal zero-copy path. A hardware gate exercises 24 VP9 pictures through
+  eight retained pre-decode DMA-BUFs, including surface reuse, while the
+  complementary zero-copy audit remains green for 1,440 frames. The resulting
+  `1.0.11+ysp13-0ubuntu1~rk1` driver/config packages are now installed and
+  Google Chrome 151 renders H.264 correctly instead of green. Chrome also
+  selects `VaapiVideoDecoder` for a 640x480 VP9 Profile 0 stream; its selection
+  of `VpxVideoDecoder` for a separate 384x240 stream is Chromium's intentional
+  sub-360p software-decoder preference, not a missing driver capability. This
+  is a stock Google Chrome launch with no sandbox-disabling options, but the
+  GPU process still reports `Sandboxed: false` and has no seccomp filter. The
+  functional browser result therefore does not close sandbox qualification.
 - **Honest surface fences.** Decode jobs carry unique route tokens and the
   target's generation fence. The worker signals completion through the
   surface condition variable; `vaSyncSurface2` honors zero, finite, and
@@ -88,10 +106,10 @@ Published MPP `3381fd2c` and FFmpeg `33a651a55b` package root, completing
   applications fall back instead of receiving an unsafe format or decode path.
 - Packaging/build hygiene: `DESTDIR`/`PREFIX`/multiarch-aware Makefile,
   no `sudo` in `make install`, `make check` validation gate. Version
-  `1.0.11+ysp10` is installed on the ROCK 5B and passes the pinned conformance
-  and repeated RGA small-geometry gates as the installed packaged payload. The
-  current source passes the complete normal and ASan/UBSan hardware gates on
-  the audited production `6.18.41-ysp-rockchip64` kernel.
+  `1.0.11+ysp13-0ubuntu1~rk1` is installed on the ROCK 5B; its installed driver
+  SHA-256 (`ed578a241803f35f51ccc6afe38b1d132539ae48ca691b5a3180e37565fe56c0`)
+  matches the locally built deb payload. The current source passes the complete
+  normal and ASan/UBSan hardware gates on the audited production kernel.
   Packaging MPP `3381fd2c` plus an FFmpeg line containing upstream fix
   `265d39e551` is complete in the YSP PPA. An isolated extraction of the exact
   Published arm64 packages passes the complete 163-vector sweep and full
@@ -119,7 +137,8 @@ library, which in turn uses the hardware VPU.
 Key features:
 
 - H.264, HEVC Main and VP9 hardware decode with byte-exact regression checking
-- DRM PRIME 2 surface export directly from retained MPP external-pool DMA-BUFs
+- DRM PRIME 2 surface export directly from retained MPP external-pool DMA-BUFs,
+  with address-stable NV12/P010 storage for consumers that export before decode
 - `vaDeriveImage` over linear NV12/P010 surface DMA-BUFs, including safe
   64-pixel-aligned provisional P010 converter probes, so VLC's OpenGL VA-API
   converters can import decoded frames as EGLImages

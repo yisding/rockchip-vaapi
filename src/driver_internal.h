@@ -173,6 +173,11 @@ struct RKSurface {
 
     MppBufferGroup priv_group;
     MppBuffer priv_buf;
+    /* A consumer exported priv_buf before the first decode and may retain
+     * that DMA-BUF for the VA surface's lifetime (Chromium NativePixmap).
+     * Completed pictures must be copied back into priv_buf instead of
+     * replacing the surface's externally visible storage. */
+    bool stable_export;
     MppBuffer export_buf;
     uint64_t export_fence;
     int export_hstride;
